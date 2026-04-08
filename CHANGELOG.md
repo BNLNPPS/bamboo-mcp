@@ -8,6 +8,99 @@ All notable changes to Bamboo are documented here.
 
 ---
 
+## 2026-04-08
+
+### Added
+
+- **Docker container support.** Bamboo MCP can now be built and distributed
+  as a Docker image, enabling deployment on Kubernetes and easy distribution
+  to users who want a self-contained environment.
+
+  The image supports three runtime modes selected via the container command:
+
+  | Command | Mode | Use case |
+  |---|---|---|
+  | *(default)* `server` | HTTP MCP server on port 8000 | Kubernetes, Docker Compose |
+  | `tui` | Interactive Textual TUI | `docker run -it` for end users |
+  | `stdio` | stdio MCP server | Claude Desktop integration |
+
+  The Textual TUI is always installed in the image so that interactive use
+  requires no separate build variant.
+
+- **Multi-stage `Dockerfile`** (`docker/Dockerfile`). A `builder` stage
+  installs all packages into `/opt/venv`; the `final` stage copies only the
+  venv (no build tools, no source tree). Key properties:
+
+  - Base image: `python:3.11-slim`.
+  - Non-root user `bamboo` (UID 1000) for Kubernetes PSA compliance.
+  - Well-known volume mount points at `/data/jobs`, `/data/cric`,
+    `/data/chroma`, and `/data/trace`.
+  - Default LLM provider set to **Google Gemini** (`gemini-2.0-flash`) for
+    all three profiles (default, fast, reasoning).
+  - `HEALTHCHECK` via `GET /healthz` (the existing endpoint in
+    `bamboo.entrypoints.http`).
+
+- **Build arguments** for optional dependency groups:
+
+  | Argument | Default | Controls |
+  |---|---|---|
+  | `INSTALL_GEMINI` | `true` | Google Generative AI SDK |
+  | `INSTALL_ANTHROPIC` | `false` | Anthropic SDK |
+  | `INSTALL_OPENAI` | `false` | OpenAI SDK |
+  | `INSTALL_RAG` | `false` | ChromaDB + BM25 |
+  | `INSTALL_OTEL` | `false` | OpenTelemetry OTLP exporter |
+  | `INSTALL_CERN_CA` | `true` | CERN Grid CA appended to certifi |
+
+- **CERN Grid CA baked into the image.** When `INSTALL_CERN_CA=true` (the
+  default), the builder stage downloads the CERN Root CA 2 and CERN Grid CA 2
+  from `cafiles.cern.ch`, converts them from DER to PEM, and appends both to
+  the certifi bundle. This allows `httpx` to verify the PanDA MCP server
+  (`aipanda120.cern.ch:8443`) without setting `PANDA_MCP_TLS_VERIFY=0`.
+  If `cafiles.cern.ch` is unreachable during the build (air-gapped
+  environment), the build continues and the CA step is silently skipped.
+
+- **`docker/entrypoint.sh`** — dispatch script that maps the container
+  command to the correct Python invocation (`uvicorn`, Textual TUI, or
+  `bamboo.server` stdio). Unknown commands fall through to `exec "$@"` for
+  one-off debugging (e.g. `docker run bamboo-mcp python -m bamboo tools list`).
+
+- **`docker/docker-compose.yml`** — local development and integration testing
+  configuration. Defines two services: `bamboo-server` (HTTP server, always
+  started) and `bamboo-tui` (interactive TUI, under the `tui` Compose
+  profile). The TUI service connects to the server via `MCP_URL`. Host paths
+  for DuckDB files are configured via `PANDA_DUCKDB_HOST_PATH` and
+  `CRIC_DUCKDB_HOST_PATH` environment variables.
+
+- **`docker/kubernetes/bamboo-mcp.yaml`** — Kubernetes deployment skeleton
+  including Deployment, Service, ConfigMap, and PersistentVolumeClaims for
+  the jobs and CRIC DuckDB volumes. The manifest uses the existing `/healthz`
+  endpoint for both liveness and readiness probes. Includes a note on
+  sticky-session requirements when scaling beyond one replica (the HTTP server
+  holds in-process MCP session state).
+
+- **`docker/docs/docker.md`** — usage documentation covering build arguments,
+  all three runtime modes, Docker Compose workflow, Kubernetes quick-start,
+  the CERN CA setup, and a one-liner for converting `bamboo_env.sh` to a
+  Docker-compatible `bamboo.env.docker` file.
+
+- **`.dockerignore`** — excludes test artefacts, `__pycache__`, secrets
+  (`bamboo_env.sh`, `*.env`), DuckDB/ChromaDB files, docs, and log files
+  from the build context.
+
+### New files
+
+| File | Purpose |
+|---|---|
+| `docker/Dockerfile` | Multi-stage container image definition |
+| `docker/entrypoint.sh` | Runtime mode dispatcher |
+| `docker/docker-compose.yml` | Local development / integration testing |
+| `docker/kubernetes/bamboo-mcp.yaml` | Kubernetes Deployment + Service + PVCs |
+| `docker/docs/docker.md` | Usage documentation |
+| `.dockerignore` | Build context filter |
+
+
+---
+
 ## 2026-04-07
 
 ### Added

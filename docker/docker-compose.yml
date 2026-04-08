@@ -1,0 +1,124 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Authors
+# - Paul Nilsson, paul.nilsson@cern.ch, 2026
+#
+# Bamboo MCP — Docker Compose for local development and integration testing.
+#
+# Usage
+# -----
+#   # Copy the example env file and fill in your secrets:
+#   cp bamboo_env_example.sh bamboo.env   # then edit bamboo.env
+#
+#   # Start the HTTP server:
+#   docker compose up bamboo-server
+#
+#   # Run the TUI against the running server (new terminal):
+#   docker compose run --rm bamboo-tui
+#
+#   # Bring everything down:
+#   docker compose down
+#
+# The bamboo.env file is a bash-style "export KEY=VALUE" file.
+# Docker Compose reads it with env_file: but requires plain KEY=VALUE lines
+# (no "export" prefix, no comments).  Use bamboo.env.docker for that; see
+# the note in docs/docker.md for a one-liner conversion.
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # bamboo-server: HTTP MCP server (primary deployment target)
+  # ---------------------------------------------------------------------------
+  bamboo-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        INSTALL_GEMINI: "true"
+        INSTALL_ANTHROPIC: "false"
+        INSTALL_OPENAI: "false"
+        INSTALL_RAG: "false"
+        INSTALL_OTEL: "false"
+        INSTALL_CERN_CA: "true"
+    image: bamboo-mcp:latest
+    container_name: bamboo-server
+    command: ["server"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: bamboo.env.docker
+        required: false   # graceful if the file does not exist yet
+    environment:
+      # Default Gemini provider — override in bamboo.env.docker with your key.
+      LLM_DEFAULT_PROVIDER: "${LLM_DEFAULT_PROVIDER:-gemini}"
+      LLM_DEFAULT_MODEL: "${LLM_DEFAULT_MODEL:-gemini-2.0-flash}"
+      LLM_FAST_PROVIDER: "${LLM_FAST_PROVIDER:-gemini}"
+      LLM_FAST_MODEL: "${LLM_FAST_MODEL:-gemini-2.0-flash}"
+      LLM_REASONING_PROVIDER: "${LLM_REASONING_PROVIDER:-gemini}"
+      LLM_REASONING_MODEL: "${LLM_REASONING_MODEL:-gemini-2.0-flash}"
+      ASKPANDA_ENABLE_REAL_PANDA: "${ASKPANDA_ENABLE_REAL_PANDA:-1}"
+      ASKPANDA_ENABLE_REAL_LLM: "${ASKPANDA_ENABLE_REAL_LLM:-1}"
+    volumes:
+      # Mount host DuckDB files so the container sees live data written by the
+      # ingestion agents.  Adjust host paths to match your local setup.
+      - type: bind
+        source: "${PANDA_DUCKDB_HOST_PATH:-/tmp/bamboo-data/jobs}"
+        target: /data/jobs
+        read_only: true
+      - type: bind
+        source: "${CRIC_DUCKDB_HOST_PATH:-/tmp/bamboo-data/cric}"
+        target: /data/cric
+        read_only: true
+      # Trace output — writable, so bamboo can append spans.
+      - type: bind
+        source: "${BAMBOO_TRACE_HOST_PATH:-/tmp/bamboo-data/trace}"
+        target: /data/trace
+        read_only: false
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # bamboo-tui: interactive Textual TUI (run with `docker compose run --rm`)
+  # ---------------------------------------------------------------------------
+  bamboo-tui:
+    image: bamboo-mcp:latest
+    container_name: bamboo-tui
+    command: ["tui"]
+    stdin_open: true
+    tty: true
+    env_file:
+      - path: bamboo.env.docker
+        required: false
+    environment:
+      # Point TUI at the HTTP server running in bamboo-server.
+      MCP_URL: "${MCP_URL:-http://bamboo-server:8000/mcp}"
+      LLM_DEFAULT_PROVIDER: "${LLM_DEFAULT_PROVIDER:-gemini}"
+      LLM_DEFAULT_MODEL: "${LLM_DEFAULT_MODEL:-gemini-2.0-flash}"
+      ASKPANDA_ENABLE_REAL_LLM: "${ASKPANDA_ENABLE_REAL_LLM:-1}"
+    depends_on:
+      bamboo-server:
+        condition: service_healthy
+    # TUI does not need port exposure.
+    profiles:
+      - tui

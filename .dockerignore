@@ -1,0 +1,70 @@
+# Bamboo MCP — .dockerignore
+#
+# Excludes files that should not be sent to the Docker build context.
+# Keep this list in sync with the COPY directives in docker/Dockerfile.
+
+# Version control
+.git
+.gitignore
+.github
+
+# Python cache and compiled files
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.pyright
+*.egg-info
+dist
+build
+*.dist-info
+
+# Virtual environments (build stage creates its own)
+.venv
+venv
+env
+
+# Test artefacts
+.coverage
+coverage.xml
+htmlcov
+pytest_cache
+
+# Secrets and local config (never bake into the image)
+bamboo_env.sh
+bamboo.env.docker
+*.env
+*.key
+*.pem
+
+# IDE / editor files
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Docs (not needed in the container)
+docs
+
+# Log files
+*.log
+bamboo_stderr.log
+
+# Trace files
+*.jsonl
+
+# Temporary ingestion databases (mounted at runtime via volumes)
+*.duckdb
+*.db
+chroma_db
+
+# Pre-commit hooks
+.pre-commit-config.yaml
+
+# CI configuration
+.pre-commit-config.yaml
+pyrightconfig.json
+.flake8
