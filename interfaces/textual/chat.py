@@ -32,7 +32,8 @@ import os
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Optional
+import webbrowser
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -66,6 +67,11 @@ ANSWER_TOOL_CANDIDATES: List[str] = ["bamboo_answer", "askpanda_answer", "bamboo
 
 _TASK_CMD_RE = re.compile(r"^/task\s+(\d{1,12})\s*$", re.IGNORECASE)
 _JOB_CMD_RE = re.compile(r"^/job\s+(\d{1,12})\s*$", re.IGNORECASE)
+
+# Matches Markdown inline links: [label](url)
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
+# Matches bare URLs not already captured inside markdown link parentheses
+_BARE_URL_RE = re.compile(r"(?<!\()(https?://[^\s\)\]\>\"']+)")
 
 FALLBACK_BANNER = r"""
     _        _     ____            ____     _
@@ -516,6 +522,7 @@ class BambooTui(App):
         self._cmd_history_pos: int = -1           # Current position in _command_history (-1 = not browsing)
         self._thinking_task: Optional[Any] = None  # Textual Timer for animated thinking indicator
         self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
+        self._last_response_links: List[Tuple[str, str]] = []  # (label, url) pairs from last assistant response
         # Session-level cost accumulators — updated after every completed request.
         self._session_input_tokens: int = 0
         self._session_output_tokens: int = 0
@@ -1160,6 +1167,9 @@ class BambooTui(App):
         if cmd == "/clear":
             await self.action_clear()
             return
+        if cmd == "/links":
+            self._cmd_links(args)
+            return
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
     def _cmd_help(self) -> None:
@@ -1180,6 +1190,7 @@ class BambooTui(App):
             "  /fastpath on|off      Toggle deterministic fast-path routing (off → use LLM planner)\n"
             "  /costs                Show estimated LLM token cost for the last request + session total\n"
             "  /clear                Clear transcript, context memory, and HTTP cache\n"
+            "  /links [N]            List links from last response; /links N opens link N in browser\n"
             "  /exit, /quit          Exit the app\n"
             "\n"
             "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
@@ -1337,6 +1348,55 @@ class BambooTui(App):
         self._write_panel(table, title=f"{_now()}  costs (estimated)", border_style="green")
         if note:
             self._write_system(note)
+
+    def _cmd_links(self, args: List[str]) -> None:
+        """List links from the last assistant response, or open one by number.
+
+        With no arguments, prints all ``(label, url)`` pairs found in the
+        most recent AskPanDA response, numbered from 1.  With a numeric
+        argument ``N``, opens link number N in the system default browser via
+        :func:`webbrowser.open`.
+
+        Args:
+            args (List[str]): Parsed command arguments.  Empty for listing;
+                one element (digit string) to open a specific link.
+        """
+        if not self._last_response_links:
+            self._write_system(
+                "No links found in the last response.\n"
+                "Ask a question that returns links, then type /links."
+            )
+            return
+
+        # Opening a specific link by 1-based index.
+        if args:
+            try:
+                idx = int(args[0])
+            except ValueError:
+                self._write_system(f"Usage: /links [N] — N must be a number, got {args[0]!r}")
+                return
+            if idx < 1 or idx > len(self._last_response_links):
+                self._write_system(
+                    f"Link number {idx} is out of range "
+                    f"(1–{len(self._last_response_links)}).  Type /links to list them."
+                )
+                return
+            label, url = self._last_response_links[idx - 1]
+            webbrowser.open(url)
+            self._write_system(f"Opened in browser: {label}\n{url}")
+            return
+
+        # Listing mode — show all links numbered.
+        lines_out = [f"Links in last response ({len(self._last_response_links)}):"]
+        for i, (label, url) in enumerate(self._last_response_links, start=1):
+            if label == url:
+                lines_out.append(f"  {i}.  {url}")
+            else:
+                lines_out.append(f"  {i}.  {label}")
+                lines_out.append(f"       {url}")
+        lines_out.append("")
+        lines_out.append("Type /links N to open link N in your browser.")
+        self._write_system("\n".join(lines_out))
 
     def _handle_history_command(self) -> None:
         """Render the current in-context conversation turns as a Rich table.
@@ -1639,17 +1699,56 @@ class BambooTui(App):
             return False
         return lines[0].rstrip().endswith(":") and lines[1].startswith("  ")
 
+    @staticmethod
+    def _extract_links(msg: str) -> List[Tuple[str, str]]:
+        """Extract hyperlinks from a Markdown response string.
+
+        Collects Markdown inline links ``[label](url)`` first, then picks up
+        any bare ``https?://`` URLs that were not already captured as the
+        target of a Markdown link.  Duplicates (same URL appearing more than
+        once) are deduplicated while preserving first-occurrence order.
+
+        Args:
+            msg (str): Raw Markdown (or plain-text) response from the assistant.
+
+        Returns:
+            List of ``(label, url)`` tuples in order of first appearance.
+            For bare URLs the label equals the URL.
+        """
+        seen: set[str] = set()
+        results: List[Tuple[str, str]] = []
+
+        # 1. Markdown inline links — [label](url)
+        for label, url in _MD_LINK_RE.findall(msg):
+            if url not in seen:
+                seen.add(url)
+                results.append((label.strip(), url))
+
+        # 2. Bare URLs not already captured above
+        # Build a set of all markdown-link URLs already consumed so we can skip them.
+        md_urls: set[str] = {url for _, url in _MD_LINK_RE.findall(msg)}
+        for url in _BARE_URL_RE.findall(msg):
+            # Strip trailing punctuation that is unlikely to be part of the URL.
+            url = url.rstrip(".,;:!?)")
+            if url not in seen and url not in md_urls:
+                seen.add(url)
+                results.append((url, url))
+
+        return results
+
     def _write_assistant(self, msg: str) -> None:
         """Write an assistant message.
 
         Pre-formatted plain-text tables (e.g. the CRIC full-list output) are
         rendered with ``Text`` to prevent Rich's Markdown renderer from
         reflowing the table rows into a single paragraph.  All other responses
-        are rendered as ``Markdown``.
+        are rendered as ``Markdown``.  Links are extracted and stored in
+        ``_last_response_links`` so the user can open them with ``/links``.
 
         Args:
             msg (str): Message text (Markdown or pre-formatted plain text).
         """
+        self._last_response_links = self._extract_links(msg)
         renderable = Text(msg) if self._is_preformatted(msg) else Markdown(msg)
         self._write_panel(renderable, title=f"{_now()}  AskPanDA", border_style="dim")
 
