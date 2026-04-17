@@ -973,12 +973,13 @@ def _build_deterministic_plan(
     the question is ambiguous enough to need the LLM planner.
 
     Fast-path rules (in priority order):
-    1. Job ID + analysis keywords → ``panda_log_analysis``       FAST_PATH
-    2. Job ID (no task ID)        → ``panda_job_status``         FAST_PATH
-    3. Task ID                    → ``panda_task_status``         FAST_PATH
-    4. Pilot/Harvester signals    → ``panda_harvester_workers``  FAST_PATH
-    5. Jobs DB signals (no IDs)   → ``panda_jobs_query``         FAST_PATH
-    6. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
+    1b. Job ID + pilot-source signals + stored pilot_monitoring_error → ``pilot_source_analysis`` FAST_PATH
+    1. Job ID + analysis keywords   → ``panda_log_analysis``       FAST_PATH
+    2. Job ID (no task ID)          → ``panda_job_status``         FAST_PATH
+    3. Task ID                      → ``panda_task_status``        FAST_PATH
+    4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
+    5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
+    6. No IDs                       → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
 
     Args:
         question: User question text.
@@ -991,24 +992,13 @@ def _build_deterministic_plan(
     """
     reuse = ReusePolicy()
 
-    if job_id and _is_log_analysis_request(question):
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_log_analysis",
-                arguments={"job_id": job_id, "query": question, "context": ""},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: job ID + analysis keywords → log analysis.",
-        )
-
-    # Rule 1b: follow-up pilot source analysis.
+    # Rule 1b: follow-up pilot source analysis — checked FIRST.
     # If the last panda_log_analysis returned pilot_monitoring_error and the
-    # question asks about the pilot code, route directly to pilot_source_analysis
-    # using the stored log_excerpt — skipping panda_job_status entirely.
-    # This must come before rule 2 (job ID → job status) so a follow-up like
-    # "Why did the pilot code raise that?" doesn't misfire as a status lookup.
+    # question contains pilot-source signals, route to pilot_source_analysis
+    # using the stored log_excerpt.  This must come before rule 1 (log analysis)
+    # because questions like "Why did the pilot code raise that? job 7099503721"
+    # match _is_log_analysis_request ("why" + job ID) and would otherwise
+    # re-run panda_log_analysis instead of fetching the pilot source.
     if job_id and _is_pilot_source_request(question):
         monitoring_evidence = get_last_pilot_monitoring_evidence()
         if monitoring_evidence is not None:
@@ -1029,6 +1019,18 @@ def _build_deterministic_plan(
                     "pilot_monitoring_error evidence → pilot source analysis."
                 ),
             )
+
+    if job_id and _is_log_analysis_request(question):
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=1.0,
+            tool_calls=[ToolCall(
+                tool="panda_log_analysis",
+                arguments={"job_id": job_id, "query": question, "context": ""},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: job ID + analysis keywords → log analysis.",
+        )
 
     if job_id and not task_id:
         return Plan(

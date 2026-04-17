@@ -590,7 +590,12 @@ class TestPilotSourceAnalysisFastPath:
 
     @pytest.mark.asyncio
     async def test_routes_to_pilot_source_when_prior_monitoring_error(self) -> None:
-        """After pilot_monitoring_error, a source-question routes to pilot_source_analysis."""
+        """After pilot_monitoring_error, a source-question routes to pilot_source_analysis.
+
+        The question intentionally contains 'why' + job ID so it would normally
+        match _is_log_analysis_request (rule 1).  Rule 1b must win because
+        pilot-source signals are present and stored evidence exists.
+        """
         import bamboo.tools.bamboo_answer as ba_mod
         import bamboo.tools.bamboo_executor as ex_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
