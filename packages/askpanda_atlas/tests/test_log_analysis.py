@@ -454,6 +454,7 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
         "  File \".../psutils.py\", line 428, in list_processes_and_threads\n"
         "    current_user = getpass.getuser()\n"
         "KeyError: 'getpwuid(): uid not found: 6435'\n"
+        "\n"  # blank line terminates the traceback block — mirrors real pilot logs
     )
     # Append unrelated tail lines that would be chosen if the anchor missed
     tail = "INFO | some unrelated pilot cleanup line\n" * _CONTEXT_LINES
