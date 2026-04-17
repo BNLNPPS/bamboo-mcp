@@ -390,7 +390,19 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     elif pilot_error_diag:
         summary += f" Pilot: {pilot_error_diag[:120]}."
 
-    return {"evidence": evidence, "text": summary}
+    # Append a canonical links footer so the LLM always has real URLs to
+    # reproduce rather than inventing placeholder text.
+    link_lines: list[str] = [f"- [BigPanDA Monitor]({monitor_url})"]
+    if log_url:
+        log_label = (
+            "Pilot Log"
+            if log_available
+            else "Pilot Log (may not be available yet)"
+        )
+        link_lines.append(f"- [{log_label}]({log_url})")
+    link_section = "\n\nLinks:\n" + "\n".join(link_lines)
+
+    return {"evidence": evidence, "text": summary + link_section}
 
 
 # ---------------------------------------------------------------------------

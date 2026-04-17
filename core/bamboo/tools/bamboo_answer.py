@@ -645,6 +645,10 @@ _PILOT_SIGNALS: frozenset[str] = frozenset({
     "pilot health",
     # "how many pilots" — operational count question
     "how many pilots",
+    # Resource-typed pilot questions (MCORE/SCORE/HCORE + pilots)
+    "mcore pilots",
+    "score pilots",
+    "hcore pilots",
     # "pilot failure rate" — live metric
     "pilot failure rate",
     "pilot error rate",

@@ -1,6 +1,6 @@
-"""ATLAS PanDA job log analysis tool — canonical implementation.
+"""ePIC PanDA job log analysis tool — canonical implementation.
 
-Fetches job metadata and pilot log from BigPanDA, extracts a relevant
+Fetches job metadata and pilot log from the PanDA monitor, extracts a relevant
 context window using known log message patterns, classifies the failure,
 and returns structured evidence suitable for LLM summarisation.
 
@@ -87,7 +87,7 @@ _MAX_EXCERPT_CHARS: int = 6000
 # ---------------------------------------------------------------------------
 
 def _fetch_metadata(job_id: int, base_url: str, timeout: int) -> dict[str, Any] | None:
-    """Fetch job metadata JSON from BigPanDA, using the in-process TTL cache.
+    """Fetch job metadata JSON from the PanDA monitor, using the in-process TTL cache.
 
     Results are cached for :data:`~askpanda_epic._cache.METADATA_TTL`
     seconds (60 s) so follow-up questions within the same session do not
@@ -95,7 +95,7 @@ def _fetch_metadata(job_id: int, base_url: str, timeout: int) -> dict[str, Any] 
 
     Args:
         job_id: PanDA job ID.
-        base_url: BigPanDA base URL.
+        base_url: PanDA monitor base URL.
         timeout: HTTP timeout in seconds.
 
     Returns:
@@ -123,7 +123,7 @@ def _fetch_log_text(job_id: int, filename: str, base_url: str, timeout: int) -> 
     Args:
         job_id: PanDA job ID.
         filename: Log filename to fetch (e.g. ``pilotlog.txt``).
-        base_url: BigPanDA base URL.
+        base_url: PanDA monitor base URL.
         timeout: HTTP timeout in seconds.
 
     Returns:
@@ -189,7 +189,7 @@ def _select_log_filename(job: dict[str, Any]) -> str:
     are diagnosed from ``pilotlog.txt``.
 
     Args:
-        job: The ``job`` dict from the BigPanDA metadata response.
+        job: The ``job`` dict from the PanDA monitor metadata response.
 
     Returns:
         Log filename string (``"pilotlog.txt"`` or ``"payload.stdout"``).
@@ -259,7 +259,7 @@ def classify_failure(job: dict[str, Any], log_excerpt: str) -> str:
     excerpt, then checks it against ``_FAILURE_PATTERNS`` in order.
 
     Args:
-        job: The ``job`` dict from the BigPanDA metadata response.
+        job: The ``job`` dict from the PanDA monitor metadata response.
         log_excerpt: Extracted context window from the pilot log.
 
     Returns:
@@ -294,7 +294,7 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
 
     Args:
         job_id: PanDA job ID.
-        base_url: BigPanDA base URL (from environment or default).
+        base_url: PanDA monitor base URL (from environment or default).
         timeout: HTTP timeout in seconds for each request.
 
     Returns:
@@ -310,7 +310,7 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     # --- Step 1: Fetch metadata ---
     payload = _fetch_metadata(job_id, base_url, timeout)
     if payload is None:
-        base_evidence["error"] = "Failed to fetch job metadata from BigPanDA"
+        base_evidence["error"] = "Failed to fetch job metadata from the PanDA monitor"
         return {
             "evidence": base_evidence,
             "text": f"Could not retrieve metadata for job {job_id}.",
@@ -321,7 +321,7 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
         base_evidence["not_found"] = True
         return {
             "evidence": base_evidence,
-            "text": f"Job {job_id} was not found in BigPanDA.",
+            "text": f"Job {job_id} was not found in the PanDA monitor.",
         }
 
     jobstatus = str(job.get("jobstatus") or "")
@@ -390,7 +390,19 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     elif pilot_error_diag:
         summary += f" Pilot: {pilot_error_diag[:120]}."
 
-    return {"evidence": evidence, "text": summary}
+    # Append a canonical links footer so the LLM always has real URLs to
+    # reproduce rather than inventing placeholder text.
+    link_lines: list[str] = [f"- [PanDA Monitor]({monitor_url})"]
+    if log_url:
+        log_label = (
+            "Pilot Log"
+            if log_available
+            else "Pilot Log (may not be available yet)"
+        )
+        link_lines.append(f"- [{log_label}]({log_url})")
+    link_section = "\n\nLinks:\n" + "\n".join(link_lines)
+
+    return {"evidence": evidence, "text": summary + link_section}
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +420,7 @@ def get_definition() -> dict[str, Any]:
         "name": "panda_log_analysis",
         "description": (
             "Diagnose why a specific PanDA job failed. Downloads the job's "
-            "pilot log and error metadata from BigPanDA, extracts the "
+            "pilot log and error metadata from the PanDA monitor, extracts the "
             "relevant failure context, and classifies the error "
             "(e.g. stage-in timeout, segfault, memory error, network issue, "
             "payload failure, JEDI reassignment). Use when the question asks "
@@ -436,7 +448,7 @@ def get_definition() -> dict[str, Any]:
         "examples": [
             {"job_id": 6799893074, "query": "Why did job 6799893074 fail?"},
         ],
-        "tags": ["epic", "eic", "panda", "bigpanda", "job", "log", "failure", "diagnosis"],
+        "tags": ["epic", "eic", "panda", "job", "log", "failure", "diagnosis"],
     }
 
 
@@ -447,7 +459,7 @@ def get_definition() -> dict[str, Any]:
 class PandaLogAnalysisTool:
     """MCP tool for downloading and analysing PanDA job failure logs.
 
-    Fetches job metadata and pilot/payload logs directly from BigPanDA,
+    Fetches job metadata and pilot/payload logs directly from the PanDA monitor,
     extracts a failure context window using pilot error code patterns,
     classifies the failure, and returns structured evidence for LLM
     summarisation.

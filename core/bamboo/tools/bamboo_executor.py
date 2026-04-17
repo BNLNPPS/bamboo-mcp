@@ -56,7 +56,9 @@ _SYSTEM_LOG_ANALYSIS: str = (
     "- State the failure classification clearly.\n"
     "- Quote relevant log excerpts if present.\n"
     "- Suggest concrete next steps based on the failure type.\n"
-    "- Include the BigPanDA monitor link.\n"
+    "- The evidence text field contains a Links section with real Markdown URLs. "
+    "Reproduce it verbatim at the end of your answer. "
+    "Do not invent, paraphrase, or omit any link.\n"
     "- Keep it under ~10 bullet points.\n"
 )
 
