@@ -142,6 +142,7 @@ Type any question and press Enter.
 | `/fastpath on\|off` | Toggle deterministic fast-path routing (off → use LLM planner) |
 | `/debug on\|off` | Toggle verbose tool call output |
 | `/tools` | List tools registered on the server |
+| `/links [N]` | List links from the last response; `/links N` opens link N in browser |
 | `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit` | Quit |
 
@@ -193,6 +194,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
 | [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions for every tool and routing path |
+| [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
 
 ---
 

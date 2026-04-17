@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from bamboo.llm.types import Message
@@ -56,7 +57,7 @@ _SYSTEM_LOG_ANALYSIS: str = (
     "- State the failure classification clearly.\n"
     "- Quote relevant log excerpts if present.\n"
     "- Suggest concrete next steps based on the failure type.\n"
-    "- Include the BigPanDA monitor link.\n"
+    "- Do not include a Links section; links are appended automatically.\n"
     "- Keep it under ~10 bullet points.\n"
 )
 
@@ -877,6 +878,44 @@ async def _execute_one_tool(
             evidence_parts.append(f"[{tool_name}]\n{raw_text}")
 
 
+def _log_analysis_links_md() -> str:
+    r"""Return the pre-built Markdown links block from the last log analysis call.
+
+    Reads ``links_md`` from the ``panda_log_analysis`` evidence stored in
+    ``_last_evidence_store``.  The value is built deterministically in
+    ``log_analysis_impl.fetch_and_analyse`` from programmatic URLs, so it
+    always contains real hrefs regardless of what the LLM produced.
+
+    Returns:
+        Markdown links block string (e.g. ``"\n\nLinks:\n- [BigPanDA Monitor](...)"``),
+        or an empty string when no evidence is available.
+    """
+    stored = _last_evidence_store.get("panda_log_analysis", {})
+    evidence = stored.get("evidence", stored)
+    return str(evidence.get("links_md", ""))
+
+
+def _strip_llm_links_section(body: str) -> str:
+    """Remove any LLM-generated Links section from a synthesis response.
+
+    The LLM may invent a ``Links:`` section with placeholder text or
+    incorrect URLs.  This function strips everything from the last
+    occurrence of a ``Links:`` heading to the end of the string so the
+    canonical block from ``_log_analysis_links_md`` can be appended
+    instead.
+
+    Args:
+        body: Raw LLM synthesis response text.
+
+    Returns:
+        Response text with any trailing Links section removed.
+    """
+    # Match a Links heading that appears on its own line (case-insensitive),
+    # preceded by optional whitespace.  Strip from that point to end-of-string.
+    stripped = re.sub(r"\n[^\n]*[Ll]inks:[^\n]*\n.*$", "", body, flags=re.DOTALL)
+    return stripped.rstrip()
+
+
 async def execute_plan(
     plan: Plan,
     question: str,
@@ -949,6 +988,12 @@ async def execute_plan(
         else:
             synthesis_max_tokens = 2048
         body = await call_llm(system, user, history, max_tokens=synthesis_max_tokens)
+
+    # For log analysis: strip any LLM-invented Links section and append the
+    # canonical one built from programmatic URLs in log_analysis_impl.
+    if "panda_log_analysis" in called_tool_names:
+        body = _strip_llm_links_section(body)
+        body += _log_analysis_links_md()
 
     return text_content(body + _db_footnote(called_tool_names))
 

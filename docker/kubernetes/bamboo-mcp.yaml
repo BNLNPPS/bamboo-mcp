@@ -1,0 +1,238 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Authors
+# - Paul Nilsson, paul.nilsson@cern.ch, 2026
+#
+# Bamboo MCP — Kubernetes deployment skeleton.
+#
+# This manifest is a starting point.  Adjust image, namespace, resource
+# limits, volume claims, and Secret references to match your cluster.
+#
+# Apply:
+#   kubectl apply -f kubernetes/bamboo-mcp.yaml
+#
+# Secrets — create before applying:
+#   kubectl create secret generic bamboo-llm-secrets \
+#     --from-literal=GEMINI_API_KEY=<key>
+#
+# PVC for DuckDB data — must be pre-populated by the ingestion agents:
+#   kubectl apply -f kubernetes/bamboo-data-pvc.yaml   # see below
+
+---
+# =============================================================================
+# ConfigMap — non-secret runtime configuration
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bamboo-mcp-config
+  namespace: default           # change to your target namespace
+  labels:
+    app.kubernetes.io/name: bamboo-mcp
+    app.kubernetes.io/component: config
+data:
+  PANDA_BASE_URL: "https://bigpanda.cern.ch"
+  LLM_DEFAULT_PROVIDER: "gemini"
+  LLM_DEFAULT_MODEL: "gemini-2.0-flash"
+  LLM_FAST_PROVIDER: "gemini"
+  LLM_FAST_MODEL: "gemini-2.0-flash"
+  LLM_REASONING_PROVIDER: "gemini"
+  LLM_REASONING_MODEL: "gemini-2.0-flash"
+  ASKPANDA_ENABLE_REAL_PANDA: "1"
+  ASKPANDA_ENABLE_REAL_LLM: "1"
+  PANDA_DUCKDB_PATH: "/data/jobs/jobs.duckdb"
+  CRIC_DUCKDB_PATH: "/data/cric/cric.db"
+  BAMBOO_TRACE: "1"
+  BAMBOO_TRACE_FILE: "/data/trace/bamboo_trace.jsonl"
+  # Uncomment and fill in if the PanDA MCP server is reachable from the cluster:
+  # PANDA_MCP_BASE_URL: "https://aipanda120.cern.ch:8443/mcp/"
+
+---
+# =============================================================================
+# Deployment
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bamboo-mcp
+  namespace: default
+  labels:
+    app.kubernetes.io/name: bamboo-mcp
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  # NOTE: The HTTP server holds in-process session state (_transports, _tasks).
+  # Multiple replicas require a sticky session layer (e.g. an Ingress with
+  # session affinity) or a future stateless transport refactor.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bamboo-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bamboo-mcp
+    spec:
+      # ---- Security context (drop all capabilities, non-root) ---------------
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+        fsGroup: 0
+
+      containers:
+        - name: bamboo-mcp
+          # Replace with your registry/image:tag after pushing.
+          image: bamboo-mcp:latest
+          imagePullPolicy: IfNotPresent
+          command: ["server"]
+
+          ports:
+            - name: http-mcp
+              containerPort: 8000
+              protocol: TCP
+
+          # ---- Environment: non-secret config from ConfigMap ----------------
+          envFrom:
+            - configMapRef:
+                name: bamboo-mcp-config
+
+          # ---- Environment: secrets -----------------------------------------
+          env:
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bamboo-llm-secrets
+                  key: GEMINI_API_KEY
+            # Uncomment the providers you enable:
+            # - name: ANTHROPIC_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: bamboo-llm-secrets
+            #       key: ANTHROPIC_API_KEY
+            # - name: OPENAI_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: bamboo-llm-secrets
+            #       key: OPENAI_API_KEY
+
+          # ---- Volume mounts ------------------------------------------------
+          volumeMounts:
+            - name: jobs-data
+              mountPath: /data/jobs
+              readOnly: true
+            - name: cric-data
+              mountPath: /data/cric
+              readOnly: true
+            - name: trace-data
+              mountPath: /data/trace
+              readOnly: false
+
+          # ---- Health probes ------------------------------------------------
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # ---- Resource limits (adjust for your cluster) --------------------
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+
+      # ---- Volumes ----------------------------------------------------------
+      volumes:
+        - name: jobs-data
+          persistentVolumeClaim:
+            claimName: bamboo-jobs-pvc     # pre-populated by ingestion agent
+        - name: cric-data
+          persistentVolumeClaim:
+            claimName: bamboo-cric-pvc     # pre-populated by cric_agent
+        - name: trace-data
+          emptyDir: {}                     # trace is ephemeral; use a PVC if you need persistence
+
+      restartPolicy: Always
+
+---
+# =============================================================================
+# Service — ClusterIP (internal); front with an Ingress for external access
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: bamboo-mcp
+  namespace: default
+  labels:
+    app.kubernetes.io/name: bamboo-mcp
+    app.kubernetes.io/component: server
+spec:
+  selector:
+    app.kubernetes.io/name: bamboo-mcp
+  ports:
+    - name: http-mcp
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+# =============================================================================
+# PersistentVolumeClaims for DuckDB data
+# Adjust storageClassName and capacity to match your cluster's storage class.
+# These PVCs must be populated by the ingestion agents before Bamboo starts.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bamboo-jobs-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany      # RWX required if ingestion agent and Bamboo share the PVC
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard   # replace with your cluster's storage class
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bamboo-cric-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard

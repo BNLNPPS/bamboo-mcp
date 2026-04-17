@@ -607,20 +607,25 @@ def _is_cric_question(question: str) -> bool:
     return False
 
 
-# Signal phrases that unambiguously indicate a Harvester pilot/worker question.
-# These bypass the topic guard (same pattern as jobs DB signals) because they
-# are unambiguously on-topic and the guard LLM call would add ~3 s of latency.
+# Signal phrases that unambiguously indicate a Harvester pilot/worker question
+# requesting *live operational data* (counts, status, activity at a site).
+# These bypass the topic guard because they are clearly on-topic and a guard
+# LLM call would add ~3 s of latency.
 # Phrases are matched against the lowercased question string.
+#
+# NOTE: bare "pilot" and "pilots" are intentionally absent.  Those single words
+# also appear in conceptual/documentation questions such as "How does the panda
+# pilot work?" or "Explain the pilot lifecycle."  Only operational, data-seeking
+# phrases are listed here so that documentation questions fall through to the
+# RAG retrieval path instead of calling panda_harvester_workers.
 _PILOT_SIGNALS: frozenset[str] = frozenset({
-    # Direct pilot / worker references
-    "pilot",
-    "pilots",
+    # Harvester-specific terminology (always operational)
     "harvester worker",
     "harvester workers",
     "worker count",
     "worker status",
     "nworkers",
-    # Status-specific pilot questions
+    # Status-specific pilot questions (unambiguously requesting live counts)
     "pilots running",
     "pilots idle",
     "pilots failed",
@@ -630,7 +635,7 @@ _PILOT_SIGNALS: frozenset[str] = frozenset({
     "idle pilots",
     "failed pilots",
     "submitted pilots",
-    # Temporal pilot questions
+    # Explicit count / activity requests
     "pilot count",
     "pilot counts",
     "pilot activity",
@@ -638,7 +643,49 @@ _PILOT_SIGNALS: frozenset[str] = frozenset({
     "pilot stats",
     "pilot monitor",
     "pilot health",
+    # "how many pilots" — operational count question
+    "how many pilots",
+    # Resource-typed pilot questions (MCORE/SCORE/HCORE + pilots)
+    "mcore pilots",
+    "score pilots",
+    "hcore pilots",
+    # "pilot failure rate" — live metric
+    "pilot failure rate",
+    "pilot error rate",
+    "pilots at",
+    "pilots for",
 })
+
+# Documentation-intent prefixes that indicate the user wants a conceptual
+# explanation rather than live operational data.  When any of these appear at
+# the start of the lowercased question, _is_pilot_question() returns False so
+# the question falls through to RAG retrieval even if a more specific signal
+# phrase also matches (e.g. "How does pilot health monitoring work?").
+_PILOT_DOC_PREFIXES: tuple[str, ...] = (
+    "how does",
+    "how do",
+    "how is",
+    "how are",
+    "what is",
+    "what are",
+    "what does",
+    "explain",
+    "describe",
+    "tell me about",
+    "tell me how",
+    "give me an overview",
+    "give an overview",
+    "overview of",
+    "what's the",
+    "what's a",
+    "can you explain",
+    "can you describe",
+    "could you explain",
+    "could you describe",
+    "i want to understand",
+    "help me understand",
+    "walk me through",
+)
 
 
 def _is_pilot_question(question: str) -> bool:
@@ -652,13 +699,21 @@ def _is_pilot_question(question: str) -> bool:
     The heuristic requires at least one signal from :data:`_PILOT_SIGNALS`.
     False negatives are acceptable — the LLM planner will catch them.
 
+    Questions that begin with a documentation-intent prefix from
+    :data:`_PILOT_DOC_PREFIXES` (e.g. "How does the pilot work?", "What is
+    the Harvester?") are excluded even when a signal phrase is present, so
+    they fall through to RAG retrieval rather than calling the live API.
+
     Args:
         question: User question text (before any normalisation).
 
     Returns:
         ``True`` if the question should be routed to ``panda_harvester_workers``.
     """
-    q = question.lower()
+    q = question.lower().strip()
+    # Exclude conceptual / documentation questions regardless of signal matches.
+    if any(q.startswith(prefix) for prefix in _PILOT_DOC_PREFIXES):
+        return False
     return any(sig in q for sig in _PILOT_SIGNALS)
 
 
@@ -693,7 +748,12 @@ def _is_site_health_question(question: str) -> bool:
     q = question.lower()
     if "task" in q:
         return False
-    has_pilot = any(sig in q for sig in _PILOT_SIGNALS)
+    # Use a broader pilot check here: bare "pilot"/"pilots" is safe because
+    # the site-health function already requires a co-occurring jobs reference,
+    # so conceptual doc questions like "How does the pilot work?" can't reach
+    # this branch (they have no \bjobs?\b match).
+    _PILOT_BROAD = _PILOT_SIGNALS | frozenset({"pilot", "pilots"})
+    has_pilot = any(sig in q for sig in _PILOT_BROAD)
     if not has_pilot:
         return False
     # Use word-boundary matching for "job"/"jobs" to avoid false matches
@@ -1777,6 +1837,7 @@ __all__ = [
     "_last_tool_was_cric",
     "_is_cric_followup",
     "_PILOT_SIGNALS",
+    "_PILOT_DOC_PREFIXES",
     "_CRIC_SIGNALS",
     "_CRIC_HISTORY_SIGNALS",
 ]
