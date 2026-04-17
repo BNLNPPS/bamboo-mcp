@@ -120,11 +120,21 @@ If the `piloterrordiag` pattern fails to match (e.g. the diag was set programmat
 
 ### Context window extraction for payload logs (code 1305)
 
-No pattern matching is attempted. The last 300 lines of the combined stdout+stderr text are returned. Payload logs are unstructured application output where a keyword anchor would be unreliable; the failure is almost always near the end.
+No pattern matching is attempted. The excerpt is built with a **split budget** to guarantee both the relevant stdout errors and the stderr traceback are always visible:
+
+| Section | Budget | Method |
+|---|---|---|
+| `payload.stdout` | up to 4 000 characters | **Character-based tail** (last 4 000 chars) |
+| `payload.stderr` | up to 2 000 characters | Full content |
+| **Total** | **6 000 characters** | |
+
+**Why character-based (not line-based) for stdout:** Payload logs from ATLAS frameworks like EventLoop and TopCPToolkit are often hundreds of thousands of characters of verbose `INFO` tool-initialisation messages, followed by a compact block of `ERROR` lines at the very end. A line-count tail (e.g. last 300 lines) would take ~30 000 characters of verbose output and then truncate to 4 000 characters from the start — landing in the middle of INFO messages and never reaching the ERROR block. A char-based tail takes the last 4 000 characters directly, always capturing the ERROR cascade and abort message.
+
+The stderr section is always appended last, separated by `--- payload.stderr ---`, and is allocated its 2 000-char budget independently. This ensures a `FileNotFoundError` or Python traceback in stderr is included even when stdout is also long.
 
 ### Character cap
 
-All excerpts are truncated to **6 000 characters** before being embedded in the LLM evidence dict. This keeps the synthesis prompt within token budget while preserving enough context for diagnosis.
+The total excerpt sent to the LLM is capped at **6 000 characters**. The split budget above is how that cap is distributed for payload failures. For `pilotlog.txt` the full 6 000 characters are available for the context window.
 
 ---
 

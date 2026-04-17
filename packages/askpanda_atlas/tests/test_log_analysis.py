@@ -18,6 +18,7 @@ from askpanda_atlas.log_analysis_impl import (
     _extract_context_window,
     _extract_tail,
     _select_log_filename,
+    _strip_payload_noise,
 )
 
 
@@ -192,17 +193,32 @@ def test_extract_log_excerpt_uses_pattern_for_pilotlog() -> None:
     assert "timed out" in excerpt.lower() or "timeout" in excerpt.lower()
 
 
-def test_extract_log_excerpt_uses_tail_for_payload() -> None:
-    """extract_log_excerpt returns tail for payload.stdout (code 1305)."""
-    long_log = "\n".join(f"line{i}" for i in range(500))
+def test_extract_log_excerpt_uses_char_tail_for_payload() -> None:
+    """extract_log_excerpt uses a char-based tail for payload.stdout (code 1305).
+
+    A char-based tail guarantees that ERROR lines near the end of a long
+    verbose stdout are captured even when the per-line budget would cut them
+    off.  The excerpt should contain the final lines regardless of how many
+    verbose INFO lines precede them.
+    """
+    # Simulate verbose init lines followed by ERROR lines at the very end
+    info_lines = [f"INFO    Initializing tool_{i} from /cvmfs/data_{i}.root" for i in range(500)]
+    error_lines = [
+        "NTupleMaker   ERROR   Failed to call setupTree",
+        "EventLoop     ERROR   Failed to call processInputs",
+        "abort EL_JOBID=0",
+    ]
+    long_log = "\n".join(info_lines + error_lines)
     excerpt = extract_log_excerpt(
         long_log, "payload.stdout",
         pilot_error_code=1305,
         pilot_error_diag="",
     )
-    # Should contain the end of the log, not the beginning
-    assert "line499" in excerpt
-    assert "line0" not in excerpt
+    # ERROR lines at the end must be captured
+    assert "NTupleMaker" in excerpt
+    assert "abort EL_JOBID=0" in excerpt
+    # Beginning of a very long log should not be present
+    assert "tool_0" not in excerpt
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +355,42 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
     evidence = json.loads(result[0]["text"])["evidence"]
     assert evidence.get("stderr_url") is not None
     assert "payload.stderr" in (evidence.get("log_excerpt") or "")
+
+
+def test_strip_payload_noise_removes_ls_sections() -> None:
+    """_strip_payload_noise removes PanDA pilot ls directory listings.
+
+    The pilot appends ``=== ls in <dir> ===`` sections between the application
+    error output and the result footer.  These must be stripped before the
+    char-tail is taken so the character budget is not wasted on file listings.
+    """
+    noisy = (
+        "NTupleMaker   ERROR   Failed to call setupTree\n"
+        "abort EL_JOBID=0\n"
+        "\n=== ls in run dir : ./ ===\n"
+        "total 408\n"
+        "drwx------ 4 user user 4096 Apr 17 13:41 somedir\n"
+        "lrwxrwxrwx 1 user user   44 Apr 17 13:41 DAOD.root -> /srv/DAOD.root\n"
+        "-rw------- 1 user user  760 Apr 17 13:42 tmp.stderr.uuid\n"
+        "\n=== ls in work dir : /srv ===\n"
+        "total 572\n"
+        "-rw------- 1 user user 375451 Apr 17 13:42 payload.stdout\n"
+        "\n==== Result ====\n"
+        "ERROR: payload execution failed with 1\n"
+    )
+    cleaned = _strip_payload_noise(noisy)
+    # Application errors and result footer must be preserved
+    assert "NTupleMaker   ERROR" in cleaned
+    assert "abort EL_JOBID=0" in cleaned
+    assert "==== Result ====" in cleaned
+    assert "ERROR: payload execution failed" in cleaned
+    # ls boilerplate must be removed
+    assert "=== ls in run dir" not in cleaned
+    assert "=== ls in work dir" not in cleaned
+    assert "lrwxrwxrwx" not in cleaned
+    assert "drwx------" not in cleaned
+    # Result should be significantly shorter
+    assert len(cleaned) < len(noisy) * 0.6
 
 
 def test_get_definition() -> None:
