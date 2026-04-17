@@ -597,7 +597,6 @@ class TestPilotSourceAnalysisFastPath:
         pilot-source signals are present and stored evidence exists.
         """
         import bamboo.tools.bamboo_answer as ba_mod
-        import bamboo.tools.bamboo_executor as ex_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
 
@@ -617,7 +616,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ex_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
                          return_value=fake_evidence),
         ):
             await tool.call({
@@ -636,7 +635,6 @@ class TestPilotSourceAnalysisFastPath:
     async def test_does_not_route_to_pilot_source_without_prior_evidence(self) -> None:
         """Without prior pilot_monitoring_error evidence, falls through to panda_job_status."""
         import bamboo.tools.bamboo_answer as ba_mod
-        import bamboo.tools.bamboo_executor as ex_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
 
@@ -649,7 +647,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ex_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
                          return_value=None),
         ):
             await tool.call({
@@ -665,7 +663,6 @@ class TestPilotSourceAnalysisFastPath:
     async def test_log_analysis_question_still_routes_to_log_analysis(self) -> None:
         """An initial diagnosis question still routes to panda_log_analysis, not pilot_source."""
         import bamboo.tools.bamboo_answer as ba_mod
-        import bamboo.tools.bamboo_executor as ex_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
 
@@ -675,8 +672,8 @@ class TestPilotSourceAnalysisFastPath:
         execute_mock = AsyncMock(return_value=[{"type": "text", "text": "log analysis done"}])
         tool = BambooAnswerTool()
 
-        # Even with prior pilot_monitoring_error evidence, a diagnosis question
-        # should still use panda_log_analysis (rule 1 fires before rule 1b).
+        # Even with prior pilot_monitoring_error evidence, a pure diagnosis question
+        # (no pilot-source signals) must still use panda_log_analysis (rule 1).
         fake_evidence = {
             "failure_type": "pilot_monitoring_error",
             "log_excerpt": "WARNING | getpwuid error",
@@ -686,7 +683,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ex_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
                          return_value=fake_evidence),
         ):
             await tool.call({
