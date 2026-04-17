@@ -393,6 +393,85 @@ def test_strip_payload_noise_removes_ls_sections() -> None:
     assert len(cleaned) < len(noisy) * 0.6
 
 
+def test_classify_failure_pilot_monitoring_error_getpwuid() -> None:
+    """pilot_monitoring_error is returned for getpwuid UID-not-found errors.
+
+    Regression test for job 7099503721: the pilot's CPU monitoring code
+    raised a KeyError when getpwuid() could not resolve UID 6435 on the
+    worker node.  This is a pilot infrastructure issue, not a user payload
+    failure — it must NOT be classified as payload_error.
+    """
+    log_excerpt = (
+        "2026-04-17 02:05:23,070 | WARNING  | Exception caught: "
+        "'getpwuid(): uid not found: 6435'\n"
+        "2026-04-17 02:05:23,077 | WARNING  | Traceback (most recent call last):\n"
+        "  File \".../pilot/util/monitoring.py\", line 193, in set_cpu_consumption_time\n"
+        "    cpuconsumptiontime = get_current_cpu_consumption_time(job.pid)\n"
+        "  File \".../pilot/util/processes.py\", line 619, "
+        "in get_current_cpu_consumption_time\n"
+        "    ps_cache = get_ps_cache()\n"
+        "  File \".../pilot/util/processes.py\", line 191, in get_ps_cache\n"
+        "    _ps_cache = list_processes_and_threads()\n"
+        "  File \".../pilot/util/psutils.py\", line 428, "
+        "in list_processes_and_threads\n"
+        "    current_user = getpass.getuser()\n"
+        "KeyError: 'getpwuid(): uid not found: 6435'\n"
+    )
+    job = {
+        **_SAMPLE_JOB_STAGEIN_TIMEOUT,
+        "pandaid": 7099503721,
+        "piloterrorcode": 1354,
+        "piloterrordiag": "Exception caught: 'getpwuid(): uid not found: 6435'",
+        "taskbuffererrorcode": 0,
+        "taskbuffererrordiag": "",
+        "exeerrorcode": 0,
+        "exeerrordiag": "",
+        "jobsubstatus": "",
+        "commandtopilot": "",
+    }
+    result = classify_failure(job, log_excerpt)
+    assert result == "pilot_monitoring_error", (
+        f"Expected 'pilot_monitoring_error', got '{result}'. "
+        "getpwuid UID errors are pilot infrastructure failures, not payload errors."
+    )
+
+
+def test_extract_log_excerpt_pilot_error_1354() -> None:
+    """extract_log_excerpt anchors on 'getpwuid' for pilot error code 1354.
+
+    The context window must include the full traceback, not just an
+    unrelated tail of the log.
+    """
+    from askpanda_atlas.log_analysis_impl import _CONTEXT_LINES
+
+    preamble = "INFO | some startup line\n" * 50
+    traceback_block = (
+        "2026-04-17 02:05:23,070 | WARNING  | Exception caught: "
+        "'getpwuid(): uid not found: 6435'\n"
+        "2026-04-17 02:05:23,077 | WARNING  | Traceback (most recent call last):\n"
+        "  File \".../psutils.py\", line 428, in list_processes_and_threads\n"
+        "    current_user = getpass.getuser()\n"
+        "KeyError: 'getpwuid(): uid not found: 6435'\n"
+    )
+    # Append unrelated tail lines that would be chosen if the anchor missed
+    tail = "INFO | some unrelated pilot cleanup line\n" * _CONTEXT_LINES
+    log_text = preamble + traceback_block + tail
+
+    excerpt = extract_log_excerpt(
+        log_text,
+        "pilotlog.txt",
+        pilot_error_code=1354,
+        pilot_error_diag="Exception caught: 'getpwuid(): uid not found: 6435'",
+    )
+    assert "getpwuid" in excerpt, "Excerpt must contain the getpwuid error line."
+    assert "list_processes_and_threads" in excerpt or "psutils" in excerpt, (
+        "Excerpt must contain part of the traceback."
+    )
+    assert "unrelated pilot cleanup" not in excerpt, (
+        "Excerpt should be anchored to the error, not the unrelated tail."
+    )
+
+
 def test_get_definition() -> None:
     """get_definition returns required MCP fields."""
     d = panda_log_analysis_tool.get_definition()

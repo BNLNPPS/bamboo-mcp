@@ -57,6 +57,10 @@ _FAILURE_PATTERNS: list[tuple[str, list[str]]] = [
     ("network", ["connection refused", "network unreachable", "dns failure", "socket error"]),
     ("input_missing", ["no such file", "file not found", "input file missing"]),
     ("stagein_failed", ["failed to stage-in", "stage-in failed", "piloterrorcode.*1099"]),
+    # Pilot infrastructure errors: UID not found in process table scan during CPU monitoring.
+    # Must appear before payload_error — the WARNING log contains "exception" and would
+    # otherwise be misclassified as a user payload failure.
+    ("pilot_monitoring_error", ["getpwuid", "uid not found", "list_processes_and_threads"]),
     ("payload_error", ["athena", "traceback", "exception", "abort", "core dump"]),
     ("pilot_error", ["piloterrorcode"]),
 ]
@@ -72,6 +76,9 @@ _PILOT_CODE_PATTERNS: dict[int, str] = {
     1235: "job has exceeded the memory limit",
     1305: "",          # payload failure — use tail of payload.stdout instead
     1324: "Service not available",
+    # 1354: UID not found when scanning the process table for CPU monitoring.
+    # This is a pilot infrastructure error, not a user payload failure.
+    1354: "getpwuid",
 }
 
 # Number of preceding lines to include when a pattern match is found
@@ -289,9 +296,16 @@ def extract_log_excerpt(
         else:
             excerpt = ""
 
-        # If no match found, fall back to the tail
+        # If no match found, fall back to the tail.
+        # WARNING-level so production logs surface gaps in _PILOT_CODE_PATTERNS.
         if not excerpt:
-            logger.info("Pattern not found in log; falling back to tail extraction.")
+            logger.warning(
+                "Pattern %r not found in log for pilot error code %d; "
+                "falling back to tail extraction. Consider adding this code "
+                "to _PILOT_CODE_PATTERNS.",
+                search_pattern,
+                pilot_error_code,
+            )
             excerpt = _extract_tail(log_text, _CONTEXT_LINES)
 
     return excerpt[:_MAX_EXCERPT_CHARS] if excerpt else ""
