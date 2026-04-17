@@ -1736,21 +1736,58 @@ class BambooTui(App):
 
         return results
 
+    @staticmethod
+    def _expand_links_for_display(msg: str) -> str:
+        """Rewrite Markdown links inside a trailing Links section to show bare URLs.
+
+        Rich's ``Markdown`` renderer displays ``[label](url)`` as underlined
+        text with the URL invisible, which is useless in a terminal.  This
+        method locates the last ``Links:`` heading in *msg* and rewrites every
+        ``[label](url)`` entry within it to ``label — url`` so both the label
+        and the full URL are always visible.  Content before the heading is
+        left untouched so ordinary inline links in the prose still render with
+        Rich Markdown styling.
+
+        Args:
+            msg (str): Raw assistant response text.
+
+        Returns:
+            Message text with the Links section rewritten for plain display.
+        """
+        # Find the last "Links:" heading (case-insensitive, on its own line).
+        m = re.search(r"\n([^\n]*[Ll]inks:[^\n]*)\n", msg)
+        if not m:
+            return msg
+
+        split_pos = m.start()
+        prose = msg[:split_pos]
+        links_block = msg[split_pos:]
+
+        # Replace every [label](url) in the links block with "label — url".
+        links_block = _MD_LINK_RE.sub(lambda mo: f"{mo.group(1)} — {mo.group(2)}", links_block)
+        return prose + links_block
+
     def _write_assistant(self, msg: str) -> None:
         """Write an assistant message.
 
         Pre-formatted plain-text tables (e.g. the CRIC full-list output) are
         rendered with ``Text`` to prevent Rich's Markdown renderer from
         reflowing the table rows into a single paragraph.  All other responses
-        are rendered as ``Markdown``.  Links are extracted and stored in
-        ``_last_response_links`` so the user can open them with ``/links``.
+        are rendered as ``Markdown``.  Links are extracted from the original
+        *msg* (before display rewriting) and stored in ``_last_response_links``
+        so the user can open them with ``/links``.
 
         Args:
             msg (str): Message text (Markdown or pre-formatted plain text).
         """
         self._last_response_links = self._extract_links(msg)
-        renderable = Text(msg) if self._is_preformatted(msg) else Markdown(msg)
+        display_msg = self._expand_links_for_display(msg)
+        renderable = Text(display_msg) if self._is_preformatted(display_msg) else Markdown(display_msg)
         self._write_panel(renderable, title=f"{_now()}  AskPanDA", border_style="dim")
+        if self._last_response_links:
+            n = len(self._last_response_links)
+            word = "link" if n == 1 else "links"
+            self._write_system(f"{n} {word} in this response — type /links to list, /links N to open.")
 
     def _write_error(self, msg: str) -> None:
         """Write an error message.

@@ -390,8 +390,9 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     elif pilot_error_diag:
         summary += f" Pilot: {pilot_error_diag[:120]}."
 
-    # Append a canonical links footer so the LLM always has real URLs to
-    # reproduce rather than inventing placeholder text.
+    # Build a pre-formatted Markdown links block stored in evidence so that
+    # bamboo_executor can append it verbatim after LLM synthesis, bypassing
+    # the LLM entirely and guaranteeing real URLs reach the TUI.
     link_lines: list[str] = [f"- [BigPanDA Monitor]({monitor_url})"]
     if log_url:
         log_label = (
@@ -400,9 +401,9 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
             else "Pilot Log (may not be available yet)"
         )
         link_lines.append(f"- [{log_label}]({log_url})")
-    link_section = "\n\nLinks:\n" + "\n".join(link_lines)
+    evidence["links_md"] = "\n\nLinks:\n" + "\n".join(link_lines)
 
-    return {"evidence": evidence, "text": summary + link_section}
+    return {"evidence": evidence, "text": summary}
 
 
 # ---------------------------------------------------------------------------
