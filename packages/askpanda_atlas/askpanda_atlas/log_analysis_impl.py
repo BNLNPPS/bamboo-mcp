@@ -81,8 +81,18 @@ _PILOT_CODE_PATTERNS: dict[int, str] = {
     1354: "getpwuid",
 }
 
+# Pilot error codes whose diagnostic content *follows* the anchor line
+# (e.g. a WARNING header followed by a multi-line traceback).
+# For these codes _extract_context_window_with_trailing is used instead of
+# _extract_context_window so the traceback body is included in the excerpt.
+_TRAILING_CONTEXT_CODES: frozenset[int] = frozenset({1354})
+
 # Number of preceding lines to include when a pattern match is found
 _CONTEXT_LINES: int = 40
+# Number of lines to continue collecting *after* the match line for error
+# codes whose relevant content follows the anchor (e.g. Python tracebacks
+# that start with a WARNING line and then span several subsequent lines).
+_TRAILING_LINES: int = 30
 # For pilotlog.txt fallback: number of tail lines when no pattern matches
 _PAYLOAD_TAIL_LINES: int = 300
 # Maximum log excerpt length sent to the LLM (characters)
@@ -216,6 +226,49 @@ def _extract_context_window(log_text: str, pattern: str, n_lines: int) -> str:
     return ""
 
 
+def _extract_context_window_with_trailing(
+    log_text: str,
+    pattern: str,
+    n_before: int,
+    n_trailing: int,
+) -> str:
+    """Extract lines around a pattern match, including lines that follow it.
+
+    Like :func:`_extract_context_window` but continues collecting up to
+    ``n_trailing`` lines after the match.  Collection stops early if a blank
+    line is encountered after the match (blank lines reliably signal the end
+    of a Python traceback block in pilot logs).
+
+    Use this for error codes whose diagnostic content *follows* the anchor
+    line (e.g. a WARNING header line followed by a multi-line traceback).
+
+    Args:
+        log_text: Full log content as a string.
+        pattern: Regular expression to search for.
+        n_before: Lines to include before (and including) the match line.
+        n_trailing: Maximum additional lines to collect after the match.
+
+    Returns:
+        Extracted context string, or an empty string if the pattern is
+        not found.
+    """
+    compiled = re.compile(pattern, re.IGNORECASE)
+    buffer: deque[str] = deque(maxlen=n_before)
+    lines = log_text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        buffer.append(line)
+        if compiled.search(line):
+            # Collect up to n_trailing further lines, stopping on a blank line.
+            trailing: list[str] = []
+            for subsequent in lines[i + 1:i + 1 + n_trailing]:
+                if subsequent.strip() == "":
+                    trailing.append(subsequent)
+                    break
+                trailing.append(subsequent)
+            return "".join(buffer) + "".join(trailing)
+    return ""
+
+
 def _extract_tail(log_text: str, n_lines: int) -> str:
     """Return the last ``n_lines`` lines of a log.
 
@@ -292,7 +345,12 @@ def extract_log_excerpt(
             search_pattern = re.escape(pilot_error_diag[:40]) if pilot_error_diag else ""
 
         if search_pattern:
-            excerpt = _extract_context_window(log_text, search_pattern, _CONTEXT_LINES)
+            if pilot_error_code in _TRAILING_CONTEXT_CODES:
+                excerpt = _extract_context_window_with_trailing(
+                    log_text, search_pattern, _CONTEXT_LINES, _TRAILING_LINES
+                )
+            else:
+                excerpt = _extract_context_window(log_text, search_pattern, _CONTEXT_LINES)
         else:
             excerpt = ""
 

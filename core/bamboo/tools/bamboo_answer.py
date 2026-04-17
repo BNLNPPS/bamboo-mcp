@@ -26,7 +26,7 @@ from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
-from bamboo.tools.bamboo_executor import execute_plan
+from bamboo.tools.bamboo_executor import execute_plan, get_last_pilot_monitoring_evidence
 from bamboo.tools.planner import (
     bamboo_plan_tool,
     Plan,
@@ -48,6 +48,62 @@ _LOG_PATTERN = re.compile(
 )
 # Matches PanDA server liveness questions — \"is panda alive\", \"is the panda server ok\", etc.
 # Deliberately avoids matching task/job/site questions that mention \"panda\" incidentally.
+# Signal phrases that indicate the user wants source-level analysis of a
+# pilot_monitoring_error.  Only consulted after confirming the last tool call
+# was panda_log_analysis with failure_type='pilot_monitoring_error'.
+_PILOT_SOURCE_SIGNALS: frozenset[str] = frozenset({
+    "pilot code",
+    "pilot source",
+    "source code",
+    "show me the source",
+    "show the source",
+    "the source",
+    "why did the pilot",
+    "why the pilot",
+    "pilot raise",
+    "pilot threw",
+    "pilot exception",
+    "fix the pilot",
+    "fix this",
+    "can it be fixed",
+    "can this be fixed",
+    "how to fix",
+    "patch",
+    "workaround",
+    "the function",
+    "that function",
+    "the code",
+    "that code",
+    "deeper",
+    "deep dive",
+    "deep-dive",
+    "drill down",
+    "more detail",
+    "more details",
+    "list_processes",
+    "getpwuid",
+    "psutils",
+})
+
+
+def _is_pilot_source_request(question: str) -> bool:
+    """Return True if the question is asking for pilot source-level analysis.
+
+    Only meaningful when the last panda_log_analysis call returned
+    failure_type='pilot_monitoring_error'.  The function is intentionally
+    permissive — it is always guarded by the evidence check so false positives
+    cannot misfire when there is no prior pilot_monitoring_error in context.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        True if the question contains a pilot-source signal phrase.
+    """
+    q = question.lower()
+    return any(sig in q for sig in _PILOT_SOURCE_SIGNALS)
+
+
 _PANDA_HEALTH_RE: re.Pattern[str] = re.compile(
     r"(?i)"
     r"(?:"
@@ -947,6 +1003,33 @@ def _build_deterministic_plan(
             explain="Deterministic: job ID + analysis keywords → log analysis.",
         )
 
+    # Rule 1b: follow-up pilot source analysis.
+    # If the last panda_log_analysis returned pilot_monitoring_error and the
+    # question asks about the pilot code, route directly to pilot_source_analysis
+    # using the stored log_excerpt — skipping panda_job_status entirely.
+    # This must come before rule 2 (job ID → job status) so a follow-up like
+    # "Why did the pilot code raise that?" doesn't misfire as a status lookup.
+    if job_id and _is_pilot_source_request(question):
+        monitoring_evidence = get_last_pilot_monitoring_evidence()
+        if monitoring_evidence is not None:
+            return Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=1.0,
+                tool_calls=[ToolCall(
+                    tool="pilot_source_analysis",
+                    arguments={
+                        "job_id": job_id,
+                        "log_excerpt": monitoring_evidence.get("log_excerpt", ""),
+                        "pilot_error_diag": monitoring_evidence.get("piloterrordiag", ""),
+                    },
+                )],
+                reuse_policy=reuse,
+                explain=(
+                    "Deterministic: job ID + pilot-source keywords + prior "
+                    "pilot_monitoring_error evidence → pilot source analysis."
+                ),
+            )
+
     if job_id and not task_id:
         return Plan(
             route=PlanRoute.FAST_PATH,
@@ -1831,6 +1914,8 @@ __all__ = [
     "_is_pilot_question",
     "_is_site_health_question",
     "_is_panda_health_question",
+    "_is_pilot_source_request",
+    "_PILOT_SOURCE_SIGNALS",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_run_db_query_fast_path",

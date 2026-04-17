@@ -63,15 +63,24 @@ The tool classifies failures into categories using pattern matching against erro
 
 | Category | Signals |
 |---|---|
-| `looping_job` | "looping job", "no recently updated files" |
-| `stagein_timeout` | "stage-in timeout", "ddm", `ddmerrorcode != 0` |
-| `memory_exceeded` | "memory exceeded", "oom", cgroup kill |
-| `segfault` | "segfault", "signal 11", "core dump" |
-| `payload_failure` | `piloterrorcode == 1305`, `payload.stdout` |
-| `cvmfs_timeout` | "cvmfs", "remote file open timed out" |
-| `network_error` | "connection refused", "timeout", network keywords |
-| `jedi_reassignment` | "reassigned by jedi", `commandtopilot` reassignment |
+| `reassigned_by_jedi` | "reassigned by jedi", "toreassign" |
+| `stagein_timeout` | "file transfer timed out", "timeout during stage-in", "cp_timeout" |
+| `stageout_timeout` | "timed out during stage-out", "timeout during stage-out" |
+| `timeout` | "timeout", "timed out", "walltime", "cpu time exceeded", "tobekilled" |
+| `segfault` | "segmentation fault", "sigsegv", "signal 11" |
+| `disk_full` | "no space left", "disk quota", "disk full", "work directory too large" |
+| `memory` | "out of memory", "oom killer", "memory limit", "job has exceeded the memory" |
+| `network` | "connection refused", "network unreachable", "dns failure", "socket error" |
+| `input_missing` | "no such file", "file not found", "input file missing" |
+| `stagein_failed` | "failed to stage-in", "stage-in failed" |
+| `pilot_monitoring_error` | "getpwuid", "uid not found", "list_processes_and_threads" |
+| `payload_error` | "athena", "traceback", "exception", "abort", "core dump" |
+| `pilot_error` | "piloterrorcode" |
 | `unknown` | No pattern matched |
+
+Pattern matching is evaluated in the order above — the first match wins. `pilot_monitoring_error` intentionally appears before `payload_error` because the pilot WARNING log lines that accompany these errors contain the word "exception", which would otherwise trigger a false `payload_error` classification.
+
+`pilot_monitoring_error` signals a pilot infrastructure issue, not a user payload failure. The canonical example is pilot error code 1354 (`getpwuid(): uid not found`), which occurs when the pilot's CPU monitoring code calls `getpass.getuser()` and the current process UID is not present in the worker node's user database. This is a site configuration issue, not a problem with the user's job.
 
 ---
 
@@ -105,8 +114,15 @@ Eight pilot error codes have a hardcoded regex pattern that is known to appear n
 | 1201 | `"caught signal"` |
 | 1235 | `"job has exceeded the memory limit"` |
 | 1324 | `"Service not available"` |
+| 1354 | `"getpwuid"` (uses trailing-context extraction — see below) |
 
 When a match is found, the 40 lines immediately preceding (and including) the matching line are returned. The pilot writes thousands of lines; without anchoring, the relevant 40 lines would be buried.
+
+**Trailing-context extraction for code 1354**
+
+For pilot error code 1354 the diagnostic content *follows* the anchor line: the pilot writes a `WARNING | Exception caught: 'getpwuid()...'` line first, and then the multi-line Python traceback appears on subsequent lines. Standard preceding-context extraction would stop at the `WARNING` line and miss the traceback entirely.
+
+For codes in `_TRAILING_CONTEXT_CODES` (currently `{1354}`), `_extract_context_window_with_trailing` is used instead. After matching the anchor line it continues collecting up to 30 further lines, stopping early on a blank line (which reliably signals the end of a Python traceback block in pilot logs).
 
 **Level 2 — `piloterrordiag` as a fallback pattern (the scalability mechanism)**
 
@@ -171,7 +187,7 @@ Links:
 | Cache module | `askpanda_atlas._cache` | `askpanda_epic._cache` |
 | Tool tags | includes `"bigpanda"`, `"atlas"` | includes `"epic"`, `"eic"` |
 
-The analysis logic (log extraction, failure classification, evidence structure) is identical in both packages.
+The analysis logic (log extraction, failure classification, evidence structure) is identical in both packages, including the `pilot_monitoring_error` category and pilot error code 1354 handling added in the April 2026 update.
 
 ---
 
@@ -184,4 +200,5 @@ The analysis logic (log extraction, failure classification, evidence structure) 
 ## See also
 
 - [`panda_job_status`](panda_job_status.md) — job status without log analysis (for status/metadata questions)
+- [`pilot_source_analysis`](pilot_source_analysis.md) — follow-up tool for `pilot_monitoring_error`: fetches the relevant pilot3 source modules from GitHub and extracts the functions named in the traceback for LLM analysis
 - [`bamboo_last_evidence`](bamboo_last_evidence.md) — inspect the raw evidence dict via `/inspect` or `/json`

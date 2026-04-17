@@ -437,10 +437,12 @@ def test_classify_failure_pilot_monitoring_error_getpwuid() -> None:
 
 
 def test_extract_log_excerpt_pilot_error_1354() -> None:
-    """extract_log_excerpt anchors on 'getpwuid' for pilot error code 1354.
+    """extract_log_excerpt captures the full traceback for pilot error code 1354.
 
-    The context window must include the full traceback, not just an
-    unrelated tail of the log.
+    The context window must include both the WARNING anchor line and the
+    traceback lines that follow it.  With standard preceding-context extraction
+    the function would return at the WARNING line and miss the File/KeyError
+    lines entirely; _extract_context_window_with_trailing fixes this.
     """
     from askpanda_atlas.log_analysis_impl import _CONTEXT_LINES
 
@@ -464,12 +466,58 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
         pilot_error_diag="Exception caught: 'getpwuid(): uid not found: 6435'",
     )
     assert "getpwuid" in excerpt, "Excerpt must contain the getpwuid error line."
-    assert "list_processes_and_threads" in excerpt or "psutils" in excerpt, (
-        "Excerpt must contain part of the traceback."
+    assert "list_processes_and_threads" in excerpt, (
+        "Excerpt must contain the traceback File line that follows the WARNING. "
+        "If this fails, _extract_context_window_with_trailing is not being used "
+        "for code 1354."
     )
+    assert "KeyError" in excerpt, "Excerpt must contain the final KeyError line."
     assert "unrelated pilot cleanup" not in excerpt, (
-        "Excerpt should be anchored to the error, not the unrelated tail."
+        "Excerpt must not bleed into the unrelated tail lines."
     )
+
+
+def test_extract_context_window_with_trailing() -> None:
+    """_extract_context_window_with_trailing includes lines after the match."""
+    from askpanda_atlas.log_analysis_impl import _extract_context_window_with_trailing
+
+    log = (
+        "line 1\n"
+        "line 2\n"
+        "ANCHOR line\n"
+        "line after 1\n"
+        "line after 2\n"
+        "\n"                       # blank line — should stop collection here
+        "line after blank\n"
+    )
+    result = _extract_context_window_with_trailing(log, "ANCHOR", n_before=10, n_trailing=20)
+    assert "ANCHOR line" in result
+    assert "line after 1" in result
+    assert "line after 2" in result
+    # Blank line itself is included as the stop sentinel, content after it is not
+    assert "line after blank" not in result
+
+
+def test_extract_context_window_with_trailing_no_match() -> None:
+    """Returns empty string when the pattern is not found."""
+    from askpanda_atlas.log_analysis_impl import _extract_context_window_with_trailing
+
+    result = _extract_context_window_with_trailing(
+        "INFO | nothing here\n", "MISSING", n_before=10, n_trailing=10
+    )
+    assert result == ""
+
+
+def test_extract_context_window_with_trailing_respects_n_trailing() -> None:
+    """Stops after n_trailing lines even without a blank line."""
+    from askpanda_atlas.log_analysis_impl import _extract_context_window_with_trailing
+
+    log = "ANCHOR\n" + "".join(f"line {i}\n" for i in range(50))
+    result = _extract_context_window_with_trailing(log, "ANCHOR", n_before=5, n_trailing=3)
+    assert "line 0" in result
+    assert "line 1" in result
+    assert "line 2" in result
+    assert "line 3" not in result
 
 
 def test_get_definition() -> None:

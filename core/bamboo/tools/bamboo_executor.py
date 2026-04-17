@@ -61,6 +61,29 @@ _SYSTEM_LOG_ANALYSIS: str = (
     "- Keep it under ~10 bullet points.\n"
 )
 
+_SYSTEM_PILOT_SOURCE: str = (
+    "You are AskPanDA for the ATLAS experiment.\n"
+    "You have fetched the pilot3 source code from GitHub for the functions "
+    "named in a job failure traceback.\n"
+    "The evidence contains:\n"
+    "- exception: the exception string that was raised.\n"
+    "- traceback_frames: list of {pilot_path, func} dicts from the traceback.\n"
+    "- source_snippets: dict keyed by 'path::function' containing the extracted "
+    "source of each function.\n"
+    "- github_urls: dict keyed by pilot path with links to the GitHub source.\n"
+    "- missing_functions: functions named in the traceback but not found in source.\n"
+    "- fetch_errors: any GitHub fetch failures.\n"
+    "Rules:\n"
+    "- Explain exactly which line in the deepest frame caused the exception and why.\n"
+    "- Quote the relevant source lines from source_snippets.\n"
+    "- Describe whether this is a pilot infrastructure bug or a site configuration "
+    "issue (e.g. missing UID in passwd/LDAP vs. a code defect).\n"
+    "- If the fix is straightforward, suggest a concrete code change or workaround.\n"
+    "- Include GitHub source links from github_urls so developers can navigate directly.\n"
+    "- Do not include a Links section; links are appended automatically.\n"
+    "- Keep it focused — this is a developer-level diagnosis, not a user-facing summary.\n"
+)
+
 _SYSTEM_JOB: str = (
     "You are AskPanDA for the ATLAS experiment.\n"
     "Given a user's question and a JSON evidence object from BigPanDA, "
@@ -533,6 +556,8 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
     """
     if "panda_log_analysis" in tool_names:
         return _SYSTEM_LOG_ANALYSIS
+    if "pilot_source_analysis" in tool_names:
+        return _SYSTEM_PILOT_SOURCE
     if "panda_job_status" in tool_names:
         return _SYSTEM_JOB
     if "panda_task_status" in tool_names:
@@ -1042,6 +1067,29 @@ def _db_footnote(tool_names: list[str]) -> str:
     return ""
 
 
+def get_last_pilot_monitoring_evidence() -> dict[str, Any] | None:
+    """Return the stored panda_log_analysis evidence if the last failure was a pilot_monitoring_error.
+
+    Used by ``bamboo_answer._build_deterministic_plan`` to detect whether a
+    follow-up question should be routed to ``pilot_source_analysis`` rather
+    than the default job-status path.
+
+    Returns:
+        The ``evidence`` sub-dict from the last ``panda_log_analysis`` call
+        when ``failure_type == "pilot_monitoring_error"`` and a non-empty
+        ``log_excerpt`` is present; ``None`` otherwise.
+    """
+    stored = _last_evidence_store.get("panda_log_analysis", {})
+    evidence = stored.get("evidence", stored)
+    if (
+        isinstance(evidence, dict)
+        and evidence.get("failure_type") == "pilot_monitoring_error"
+        and evidence.get("log_excerpt")
+    ):
+        return evidence
+    return None
+
+
 def _compact_json(obj: Any, limit: int = 12000) -> str:
     """Compact JSON for prompts, bounded to ``limit`` characters.
 
@@ -1067,7 +1115,9 @@ __all__ = [
     "unpack_tool_result",
     "retrieve_rag_context",
     "_pick_synthesis_prompt",
+    "get_last_pilot_monitoring_evidence",
     "_SYSTEM_LOG_ANALYSIS",
+    "_SYSTEM_PILOT_SOURCE",
     "_SYSTEM_JOB",
     "_SYSTEM_TASK",
     "_SYSTEM_RAG",

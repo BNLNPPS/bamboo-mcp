@@ -540,3 +540,154 @@ class TestContextualFollowupRouting:
         plan = execute_mock.call_args[0][0]
         tool_names = [tc.tool for tc in plan.tool_calls]
         assert "panda_doc_search" in tool_names or "panda_doc_bm25" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# Tests for pilot source analysis routing
+# ---------------------------------------------------------------------------
+
+class TestIsPilotSourceRequest:
+    """Tests for :func:`bamboo_answer._is_pilot_source_request`."""
+
+    from bamboo.tools.bamboo_answer import _is_pilot_source_request as _fn
+
+    @pytest.mark.parametrize("text", [
+        "Why did the pilot code raise that exception? Can it be fixed?",
+        "Show me the pilot source code that failed",
+        "Why did the pilot raise that?",
+        "Can this be fixed?",
+        "How to fix this?",
+        "Show me the source code",
+        "Deep dive into the pilot exception",
+        "What is wrong with the pilot code?",
+        "list_processes_and_threads function",
+        "getpwuid error in the pilot",
+        "psutils module",
+        "more details on the exception",
+        "patch the pilot",
+        "workaround for this?",
+    ])
+    def test_positive_signals(self, text: str) -> None:
+        from bamboo.tools.bamboo_answer import _is_pilot_source_request
+        assert _is_pilot_source_request(text), f"Expected match for: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        "Analyse the failure of job 7099503721",
+        "Why did job 7099503721 fail?",
+        "What is the status of job 7099503721?",
+        "How many jobs failed at BNL?",
+        "Is PanDA alive?",
+        "What is the ATLAS release for task 49752363?",
+        "Tell me about stage-in timeouts",
+    ])
+    def test_negative_signals(self, text: str) -> None:
+        from bamboo.tools.bamboo_answer import _is_pilot_source_request
+        assert not _is_pilot_source_request(text), f"Expected no match for: {text!r}"
+
+
+class TestPilotSourceAnalysisFastPath:
+    """Integration tests: pilot_source_analysis fast-path routing."""
+
+    @pytest.mark.asyncio
+    async def test_routes_to_pilot_source_when_prior_monitoring_error(self) -> None:
+        """After pilot_monitoring_error, a source-question routes to pilot_source_analysis."""
+        import bamboo.tools.bamboo_answer as ba_mod
+        import bamboo.tools.bamboo_executor as ex_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        fake_evidence = {
+            "failure_type": "pilot_monitoring_error",
+            "log_excerpt": "WARNING | Exception caught: 'getpwuid(): uid not found: 6435'\n"
+                           "KeyError: 'getpwuid(): uid not found: 6435'",
+            "piloterrordiag": "Exception caught: 'getpwuid(): uid not found: 6435'",
+        }
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "source analysis done"}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ex_mod, "get_last_pilot_monitoring_evidence",
+                         return_value=fake_evidence),
+        ):
+            await tool.call({
+                "question": "Why did the pilot code raise that exception? "
+                            "Can it be fixed? job 7099503721",
+            })
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        assert plan.tool_calls[0].tool == "pilot_source_analysis"
+        args = plan.tool_calls[0].arguments
+        assert args["job_id"] == 7099503721
+        assert "getpwuid" in args["log_excerpt"]
+
+    @pytest.mark.asyncio
+    async def test_does_not_route_to_pilot_source_without_prior_evidence(self) -> None:
+        """Without prior pilot_monitoring_error evidence, falls through to panda_job_status."""
+        import bamboo.tools.bamboo_answer as ba_mod
+        import bamboo.tools.bamboo_executor as ex_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "job status"}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ex_mod, "get_last_pilot_monitoring_evidence",
+                         return_value=None),
+        ):
+            await tool.call({
+                "question": "Can this be fixed? job 7099503721",
+            })
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        # Should fall through to panda_job_status, not pilot_source_analysis
+        assert plan.tool_calls[0].tool != "pilot_source_analysis"
+
+    @pytest.mark.asyncio
+    async def test_log_analysis_question_still_routes_to_log_analysis(self) -> None:
+        """An initial diagnosis question still routes to panda_log_analysis, not pilot_source."""
+        import bamboo.tools.bamboo_answer as ba_mod
+        import bamboo.tools.bamboo_executor as ex_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "log analysis done"}])
+        tool = BambooAnswerTool()
+
+        # Even with prior pilot_monitoring_error evidence, a diagnosis question
+        # should still use panda_log_analysis (rule 1 fires before rule 1b).
+        fake_evidence = {
+            "failure_type": "pilot_monitoring_error",
+            "log_excerpt": "WARNING | getpwuid error",
+            "piloterrordiag": "getpwuid error",
+        }
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ex_mod, "get_last_pilot_monitoring_evidence",
+                         return_value=fake_evidence),
+        ):
+            await tool.call({
+                "question": "Analyse the failure of job 7099503721",
+            })
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        assert plan.tool_calls[0].tool == "panda_log_analysis"
