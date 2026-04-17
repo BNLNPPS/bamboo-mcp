@@ -879,7 +879,7 @@ async def _execute_one_tool(
 
 
 def _log_analysis_links_md() -> str:
-    """Return the pre-built Markdown links block from the last log analysis call.
+    r"""Return the pre-built Markdown links block from the last log analysis call.
 
     Reads ``links_md`` from the ``panda_log_analysis`` evidence stored in
     ``_last_evidence_store``.  The value is built deterministically in

@@ -1,4 +1,4 @@
-"""Tests for panda_log_analysis tool (askpanda_atlas plugin implementation).
+"""Tests for panda_log_analysis tool (askpanda_epic plugin implementation).
 
 All external HTTP calls are patched; no network access is required.
 """
@@ -9,12 +9,12 @@ import json
 
 import pytest
 
-from bamboo.tools.log_analysis import (
+from askpanda_epic.log_analysis import (
     panda_log_analysis_tool,
     classify_failure,
     extract_log_excerpt,
 )
-from askpanda_atlas.log_analysis_impl import (
+from askpanda_epic.log_analysis_impl import (
     _extract_context_window,
     _extract_tail,
     _select_log_filename,
@@ -29,17 +29,17 @@ _SAMPLE_JOB_STAGEIN_TIMEOUT: dict = {
     "pandaid": 6799893074,
     "jobstatus": "failed",
     "jobsubstatus": "",
-    "computingsite": "UKI-SCOTGRID-GLASGOW_CEPH",
-    "cloud": "UK",
-    "atlasrelease": "Atlas-25.2.66",
+    "computingsite": "BNL-EPIC",
+    "cloud": "US",
+    "atlasrelease": "",
     "jeditaskid": 46249501,
     "attemptnr": 1,
     "maxattempt": 3,
-    "transformation": "Athena",
+    "transformation": "epic_reco",
     "piloterrorcode": 1151,
     "piloterrordiag": (
         "File transfer timed out during stage-in: "
-        "data24_13p6TeV:data24_13p6TeV.00483532... timeout=6842 seconds"
+        "epic_data:epic_data.00483532... timeout=6842 seconds"
     ),
     "exeerrorcode": 0,
     "exeerrordiag": "",
@@ -69,13 +69,7 @@ _SAMPLE_JOB_PAYLOAD: dict = {
     **_SAMPLE_JOB_STAGEIN_TIMEOUT,
     "pandaid": 1111,
     "piloterrorcode": 1305,
-    "piloterrordiag": "Payload error: AthenaMP exited with code 1",
-}
-
-_SAMPLE_PAYLOAD: dict = {
-    "job": _SAMPLE_JOB_STAGEIN_TIMEOUT,
-    "files": [],
-    "dsfiles": [],
+    "piloterrordiag": "Payload error: reconstruction exited with code 1",
 }
 
 _SAMPLE_PILOT_LOG = "\n".join([
@@ -105,7 +99,7 @@ def _unpack(result: list) -> dict:
 
 
 def _make_metadata_response(job: dict) -> dict:
-    """Build a metadata response dict as BigPanDA would return.
+    """Build a metadata response dict as the PanDA monitor would return.
 
     Args:
         job: Job metadata dict.
@@ -142,7 +136,7 @@ def test_classify_failure_unknown() -> None:
 def test_classify_failure_segfault_from_log() -> None:
     """Segfault classification is driven by log excerpt."""
     job = {**_SAMPLE_JOB_STAGEIN_TIMEOUT, "piloterrordiag": ""}
-    result = classify_failure(job, "Segmentation fault in AthenaMP\n")
+    result = classify_failure(job, "Segmentation fault in reconstruction\n")
     assert result == "segfault"
 
 
@@ -200,7 +194,6 @@ def test_extract_log_excerpt_uses_tail_for_payload() -> None:
         pilot_error_code=1305,
         pilot_error_diag="",
     )
-    # Should contain the end of the log, not the beginning
     assert "line499" in excerpt
     assert "line0" not in excerpt
 
@@ -212,11 +205,11 @@ def test_extract_log_excerpt_uses_tail_for_payload() -> None:
 def test_log_analysis_success_with_log(monkeypatch: pytest.MonkeyPatch) -> None:
     """Successful analysis: metadata fetched, log downloaded, failure classified."""
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_STAGEIN_TIMEOUT),
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        "askpanda_epic.log_analysis_impl._fetch_log_text",
         lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
@@ -234,7 +227,7 @@ def test_log_analysis_success_with_log(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_log_analysis_metadata_only_for_closed_job(monkeypatch: pytest.MonkeyPatch) -> None:
     """For non-failed jobs (closed/reassigned) no log is downloaded."""
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_REASSIGNED),
     )
     fetch_log_called = []
@@ -243,7 +236,7 @@ def test_log_analysis_metadata_only_for_closed_job(monkeypatch: pytest.MonkeyPat
         fetch_log_called.append(True)
         return None
 
-    monkeypatch.setattr("askpanda_atlas.log_analysis_impl._fetch_log_text", _no_log)
+    monkeypatch.setattr("askpanda_epic.log_analysis_impl._fetch_log_text", _no_log)
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6837798305}))
     res = _unpack(result)
@@ -255,11 +248,11 @@ def test_log_analysis_metadata_only_for_closed_job(monkeypatch: pytest.MonkeyPat
 def test_log_analysis_log_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """When log download fails, analysis still succeeds using metadata only."""
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_STAGEIN_TIMEOUT),
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        "askpanda_epic.log_analysis_impl._fetch_log_text",
         lambda job_id, filename, base_url, timeout: None,
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
@@ -268,14 +261,13 @@ def test_log_analysis_log_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert ev["log_available"] is False
     assert ev["log_excerpt"] is None
-    # Failure type should still come from metadata
     assert ev["failure_type"] == "stagein_timeout"
 
 
 def test_log_analysis_job_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """When metadata fetch returns no job, not_found is set in evidence."""
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
         lambda job_id, base_url, timeout: {"job": None, "files": [], "dsfiles": []},
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 9999}))
@@ -286,7 +278,7 @@ def test_log_analysis_job_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_log_analysis_metadata_fetch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """When metadata HTTP request fails, an error is returned."""
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
         lambda job_id, base_url, timeout: None,
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 9999}))
@@ -325,20 +317,37 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
         fetched_filenames.append(filename)
         if filename == "payload.stderr":
             return "Segmentation fault (core dumped)\n" * 5
-        return "Traceback (most recent call last):\n  AthenaMP crash\n" * 50
+        return "Traceback (most recent call last):\n  reconstruction crash\n" * 50
 
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
     )
-    monkeypatch.setattr("askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log)
+    monkeypatch.setattr("askpanda_epic.log_analysis_impl._fetch_log_text", _capture_log)
 
-    import json
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
     assert fetched_filenames == ["payload.stdout", "payload.stderr"]
     evidence = json.loads(result[0]["text"])["evidence"]
     assert evidence.get("stderr_url") is not None
     assert "payload.stderr" in (evidence.get("log_excerpt") or "")
+
+
+def test_log_analysis_links_md_uses_panda_monitor_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """links_md uses 'PanDA Monitor' label (not 'BigPanDA Monitor') for ePIC."""
+    monkeypatch.setattr(
+        "askpanda_epic.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_STAGEIN_TIMEOUT),
+    )
+    monkeypatch.setattr(
+        "askpanda_epic.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
+    )
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
+    ev = _unpack(result)["evidence"]
+    assert "PanDA Monitor" in ev.get("links_md", "")
+    assert "BigPanDA Monitor" not in ev.get("links_md", "")
 
 
 def test_get_definition() -> None:

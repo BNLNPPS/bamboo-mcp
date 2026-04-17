@@ -75,8 +75,21 @@ The LLM synthesis uses `_SYSTEM_TASK`, which instructs the model to answer the u
 
 ---
 
+## Plugin differences
+
+The `askpanda_atlas` and `askpanda_epic` packages have different implementations of this tool.
+
+| Aspect | `askpanda_atlas` | `askpanda_epic` |
+|---|---|---|
+| Endpoints fetched | Two: `/jobs/?jeditaskid=` **and** `/task/<id>/` | One: `/jobs/?jeditaskid=` only |
+| `failed_pandaids` in evidence | Yes — flat list of failed PanDA job IDs for easy LLM access | No |
+| Task metadata fields | `status`, `superstatus`, `taskname`, `username`, `creationdate` (from task endpoint) | Not available |
+| Tracing | `_trace()` helper writes debug records to `BAMBOO_TRACE_FILE` | Not present |
+
+---
+
 ## See also
 
 - [`panda_job_status`](panda_job_status.md) — individual job status
 - [`panda_log_analysis`](panda_log_analysis.md) — failure diagnosis for a specific job
-- [`panda_jobs_query`](panda_jobs_query.md) — aggregate job statistics across sites
+- [`panda_jobs_query`](panda_jobs_query.md) — aggregate job statistics across sites (ATLAS only)

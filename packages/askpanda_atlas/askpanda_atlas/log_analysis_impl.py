@@ -182,17 +182,19 @@ def _extract_tail(log_text: str, n_lines: int) -> str:
 
 
 def _select_log_filename(job: dict[str, Any]) -> str:
-    """Choose the appropriate log file to download based on job metadata.
+    """Choose the primary log file to download based on job metadata.
 
     Pilot error code 1305 indicates a user payload failure; in that case
-    ``payload.stdout`` contains the relevant output.  All other failures
-    are diagnosed from ``pilotlog.txt``.
+    ``payload.stdout`` is the primary log.  ``payload.stderr`` is also
+    fetched separately and appended to the excerpt when available, since
+    some failures (e.g. Python tracebacks, segfaults) only appear there.
+    All other failures are diagnosed from ``pilotlog.txt``.
 
     Args:
         job: The ``job`` dict from the BigPanDA metadata response.
 
     Returns:
-        Log filename string (``"pilotlog.txt"`` or ``"payload.stdout"``).
+        Primary log filename string (``"pilotlog.txt"`` or ``"payload.stdout"``).
     """
     pilot_error_code = job.get("piloterrorcode") or 0
     try:
@@ -337,6 +339,8 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     log_url: str | None = None
     log_available = False
 
+    stderr_url: str | None = None
+
     if jobstatus in ("failed", "holding", "cancelled"):
         log_filename = _select_log_filename(job)
         log_url = (
@@ -344,6 +348,20 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
             f"&json&filename={log_filename}"
         )
         log_text = _fetch_log_text(job_id, log_filename, base_url, timeout)
+
+        # For payload failures (code 1305) also fetch payload.stderr — some
+        # failures (Python tracebacks, C++ exceptions, segfaults) only appear
+        # there and would be missed if only stdout is examined.
+        if pilot_error_code == 1305:
+            stderr_url = (
+                f"{base_url}/filebrowser/?pandaid={job_id}"
+                f"&json&filename=payload.stderr"
+            )
+            stderr_text = _fetch_log_text(job_id, "payload.stderr", base_url, timeout)
+            if stderr_text:
+                separator = "\n\n--- payload.stderr ---\n"
+                log_text = (log_text or "") + separator + stderr_text
+
         if log_text:
             log_available = True
             log_excerpt = extract_log_excerpt(
@@ -380,6 +398,7 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
         "duration": job.get("duration"),
         "failure_type": failure_type,
         "log_url": log_url,
+        "stderr_url": stderr_url,
         "log_available": log_available,
         "log_excerpt": log_excerpt or None,
     }
@@ -401,6 +420,8 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
             else "Pilot Log (may not be available yet)"
         )
         link_lines.append(f"- [{log_label}]({log_url})")
+    if stderr_url:
+        link_lines.append(f"- [Payload stderr]({stderr_url})")
     evidence["links_md"] = "\n\nLinks:\n" + "\n".join(link_lines)
 
     return {"evidence": evidence, "text": summary}

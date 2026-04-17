@@ -66,6 +66,36 @@ These tools exist in the codebase but are not connected to live data. They are s
 
 ## Plugin differences
 
-`panda_log_analysis` and `panda_task_status` have separate implementations in the `askpanda_atlas` and `askpanda_epic` plugin packages. The analysis logic is identical; the differences are in monitor URL labels, cache modules, and tool tags. See each tool document for details.
+### Tools only in `askpanda_atlas`
+
+The following tools have no ePIC equivalent and are absent from the `askpanda_epic` package:
+
+| Tool | Reason |
+|---|---|
+| `panda_harvester_workers` | ATLAS-specific Harvester deployment |
+| `panda_harvester_timeseries` | ATLAS OpenSearch cluster (`os-atlas.cern.ch`) |
+| `panda_jobs_query` | ATLAS-specific ingestion database |
+| `cric_query` | CRIC is an ATLAS computing resource catalogue |
+| `panda_server_health` | ATLAS PanDA MCP session wiring |
+
+### `panda_task_status` implementation differences
+
+| Aspect | `askpanda_atlas` | `askpanda_epic` |
+|---|---|---|
+| Endpoints fetched | Two: `/jobs/?jeditaskid=` **and** `/task/<id>/` | One: `/jobs/?jeditaskid=` only |
+| Evidence: `failed_pandaids` | Present — flat list of failed job IDs | Absent |
+| Evidence: task metadata fields | `status`, `superstatus`, `taskname`, `username`, `creationdate` from task endpoint | Not available (jobs endpoint only) |
+| Tracing | `_trace()` writes to `BAMBOO_TRACE_FILE` | Not present |
+
+### `panda_log_analysis` differences
+
+| Aspect | `askpanda_atlas` | `askpanda_epic` |
+|---|---|---|
+| Monitor link label | `BigPanDA Monitor` | `PanDA Monitor` |
+| Tool tags | `"atlas"`, `"bigpanda"` | `"epic"`, `"eic"` |
+
+The log extraction, failure classification, stderr fetching, and evidence structure are identical in both packages.
+
+### Entry point naming
 
 All plugin tools are loaded via Python entry points. The MCP server overwrites `get_definition()["name"]` with the entry point key at load time — for example, `panda_harvester_timeseries` is registered as `atlas.harvester_timeseries` and must be called by that name.

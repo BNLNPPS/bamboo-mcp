@@ -49,9 +49,10 @@ A JSON-serialised evidence dict with the following keys:
 | `ddmerrorcode` / `ddmerrordiag` | DDM (data management) error code and diagnostic string. |
 | `starttime` / `endtime` / `duration` | Job timing information. |
 | `failure_type` | Classified failure category (see below). |
-| `log_url` | URL to fetch the pilot log (may not be available immediately after job completion). |
-| `log_available` | Whether the log was successfully downloaded. |
-| `log_excerpt` | Most relevant section of the pilot log, extracted by pattern matching. |
+| `log_url` | URL to fetch the primary log file (may not be available immediately after job completion). |
+| `stderr_url` | URL to fetch `payload.stderr` (populated only for code 1305 jobs; `null` otherwise). |
+| `log_available` | Whether at least one log file was successfully downloaded. |
+| `log_excerpt` | Most relevant section of the log, extracted by pattern matching. For code 1305 jobs this combines stdout and stderr content (separated by `--- payload.stderr ---`). |
 | `links_md` | Pre-built Markdown links block appended verbatim after LLM synthesis. |
 
 ---
@@ -76,12 +77,54 @@ The tool classifies failures into categories using pattern matching against erro
 
 ## Log extraction
 
-Logs are fetched only for jobs in `failed`, `holding`, or `cancelled` states. The log file selected depends on `piloterrorcode`:
+Logs are fetched only for jobs in `failed`, `holding`, or `cancelled` states.
 
-- **Code 1305** (payload failure): `payload.stdout` is fetched.
-- **All other codes**: `pilotlog.txt` is fetched.
+### File selection
 
-The extraction uses a pattern matched to the pilot error code to find the relevant context window (± 30 lines around the first match). If no pattern matches, the last 60 lines of the log are used as fallback.
+| Condition | Files fetched |
+|---|---|
+| `piloterrorcode == 1305` (payload failure) | `payload.stdout` (primary) + `payload.stderr` (appended if available, separated by `--- payload.stderr ---`) |
+| All other codes | `pilotlog.txt` only |
+
+The stderr fetch for code 1305 is intentional: Python tracebacks, C++ exceptions, and segfaults frequently appear only on stderr and would be missed if only stdout were examined.
+
+### Context window extraction for `pilotlog.txt`
+
+This is a three-level priority cascade:
+
+**Level 1 — hardcoded pattern for known codes (`_PILOT_CODE_PATTERNS`)**
+
+Eight pilot error codes have a hardcoded regex pattern that is known to appear near the failure in the log:
+
+| Code | Pattern used |
+|---|---|
+| 1099 | `"Failed to stage-in file"` |
+| 1104 | `r"work directory .* is too large"` |
+| 1150 | `"pilot has decided to kill looping job"` |
+| 1151 | `"File transfer timed out"` |
+| 1201 | `"caught signal"` |
+| 1235 | `"job has exceeded the memory limit"` |
+| 1324 | `"Service not available"` |
+
+When a match is found, the 40 lines immediately preceding (and including) the matching line are returned. The pilot writes thousands of lines; without anchoring, the relevant 40 lines would be buried.
+
+**Level 2 — `piloterrordiag` as a fallback pattern (the scalability mechanism)**
+
+For the 100+ pilot error codes not in `_PILOT_CODE_PATTERNS`, the tool uses the first 40 characters of `piloterrordiag` (regex-escaped) as the search pattern. This works because the pilot generates `piloterrordiag` directly from the log message it just wrote — the same text that becomes the diagnostic string was written to the log moments earlier. Searching for it therefore finds the right line without requiring a handcrafted entry per error code.
+
+Example: if `piloterrordiag` is `"Failed to execute payload: exit code 1 from ..."`, the pattern `"Failed to execute payload"` is searched in the log and the surrounding 40 lines are returned.
+
+**Level 3 — tail fallback**
+
+If the `piloterrordiag` pattern fails to match (e.g. the diag was set programmatically without a corresponding log line, or the log was truncated), the last 40 lines of the log are returned. This is a last resort that ensures something is always sent to the LLM rather than an empty excerpt.
+
+### Context window extraction for payload logs (code 1305)
+
+No pattern matching is attempted. The last 300 lines of the combined stdout+stderr text are returned. Payload logs are unstructured application output where a keyword anchor would be unreliable; the failure is almost always near the end.
+
+### Character cap
+
+All excerpts are truncated to **6 000 characters** before being embedded in the LLM evidence dict. This keeps the synthesis prompt within token budget while preserving enough context for diagnosis.
 
 ---
 
@@ -90,6 +133,17 @@ The extraction uses a pattern matched to the pilot error code to find the releva
 The `links_md` evidence field contains a Markdown links block constructed from programmatic URLs — not from LLM text — so the URLs are always correct. `bamboo_executor` strips any LLM-invented links section and appends this block verbatim to the synthesised answer. The TUI then rewrites `[label](url)` entries to `label — url` so both the label and the URL are visible in the terminal.
 
 Example output after synthesis:
+
+For a payload failure (code 1305) the block includes a third link:
+
+```
+Links:
+- BigPanDA Monitor — https://bigpanda.cern.ch/job?pandaid=7099498577
+- Pilot Log — https://bigpanda.cern.ch/filebrowser/?pandaid=7099498577&json&filename=payload.stdout
+- Payload stderr — https://bigpanda.cern.ch/filebrowser/?pandaid=7099498577&json&filename=payload.stderr
+```
+
+For pilot log failures:
 
 ```
 Links:
