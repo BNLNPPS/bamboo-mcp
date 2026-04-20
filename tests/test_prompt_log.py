@@ -247,7 +247,7 @@ class TestLogPromptDisabled:
                if k != "BAMBOO_OPENSEARCH_PROMPTLOG"}
         with patch.dict(os.environ, env, clear=True):
             with patch("bamboo.llm.prompt_log._write_document") as mock_write:
-                asyncio.get_event_loop().run_until_complete(
+                asyncio.run(
                     log_prompt(
                         system_prompt="You are AskPanDA.",
                         user_prompt="hello",
@@ -294,7 +294,7 @@ class TestLogPromptEnabled:
                     )
                     await asyncio.sleep(0.05)
 
-                asyncio.get_event_loop().run_until_complete(_run())
+                asyncio.run(_run())
 
         assert len(captured) == 1
         doc = captured[0]
@@ -348,7 +348,7 @@ class TestLogPromptEnabled:
                     )
                     await asyncio.sleep(0.05)
 
-                asyncio.get_event_loop().run_until_complete(_run())
+                asyncio.run(_run())
 
         doc = captured[0]
         assert doc["input_tokens"] is None
@@ -371,7 +371,7 @@ class TestLogPromptEnabled:
                     )
                     await asyncio.sleep(0.05)
 
-                asyncio.get_event_loop().run_until_complete(_run())
+                asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
