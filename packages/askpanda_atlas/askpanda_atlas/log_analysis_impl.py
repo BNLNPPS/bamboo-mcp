@@ -47,10 +47,18 @@ logger = logging.getLogger(__name__)
 
 # Each entry: (category_name, [keywords to search in combined error text])
 # Order matters — first match wins.
+# stageout_timeout MUST appear before stagein_timeout: the piloterrordiag for
+# stage-out timeouts (code 1152) begins with "File transfer timed out during
+# stage-out", which also matches the stagein_timeout keyword "file transfer
+# timed out".  The more specific stage-out check must win.
 _FAILURE_PATTERNS: list[tuple[str, list[str]]] = [
     ("reassigned_by_jedi", ["reassigned by jedi", "toreassign"]),
+    ("stageout_timeout", [
+        "file transfer timed out during stage-out",
+        "timed out during stage-out",
+        "timeout during stage-out",
+    ]),
     ("stagein_timeout", ["file transfer timed out", "timeout during stage-in", "cp_timeout"]),
-    ("stageout_timeout", ["timed out during stage-out", "timeout during stage-out"]),
     ("timeout", ["timeout", "timed out", "walltime", "cpu time exceeded", "tobekilled"]),
     ("segfault", ["segmentation fault", "sigsegv", "signal 11"]),
     ("disk_full", ["no space left", "disk quota", "disk full", "work directory.*too large"]),

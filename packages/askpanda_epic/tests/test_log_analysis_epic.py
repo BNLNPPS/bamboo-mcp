@@ -127,6 +127,33 @@ def test_classify_failure_stagein_timeout() -> None:
     assert result == "stagein_timeout"
 
 
+def test_classify_failure_stageout_timeout_not_misclassified_as_stagein() -> None:
+    """Stage-out timeout (code 1152) is classified as stageout_timeout, not stagein_timeout.
+
+    Regression test for a misclassification where the piloterrordiag for code
+    1152 begins with "File transfer timed out during stage-out", which also
+    matches the stagein_timeout keyword "file transfer timed out".
+    stageout_timeout must appear before stagein_timeout in _FAILURE_PATTERNS,
+    and its keyword list must include the exact diag prefix so the more
+    specific match wins.
+    """
+    job = {
+        **_SAMPLE_JOB_STAGEIN_TIMEOUT,
+        "piloterrorcode": 1152,
+        "piloterrordiag": (
+            "File transfer timed out during stage-out: "
+            "hc_test:output.1.10f2da00_79600.pool.root to CERN-PROD_SCRATCHDISK, "
+            "copy command timed out: TimeoutException: Timeout reached, timeout=410 seconds"
+        ),
+    }
+    result = classify_failure(job, "")
+    assert result == "stageout_timeout", (
+        f"Expected 'stageout_timeout', got '{result}'. "
+        "Code 1152 diag starts with 'File transfer timed out during stage-out' — "
+        "stageout_timeout must be checked before stagein_timeout."
+    )
+
+
 def test_classify_failure_reassigned() -> None:
     """JEDI reassignment is correctly classified from metadata."""
     result = classify_failure(_SAMPLE_JOB_REASSIGNED, "")
