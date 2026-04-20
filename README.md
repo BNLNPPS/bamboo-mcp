@@ -192,6 +192,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
+| [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — harvester timeseries, prompt logging, GDPR pseudonymisation |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
 | [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions for every tool and routing path |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
