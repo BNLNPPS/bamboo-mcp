@@ -8,6 +8,59 @@ All notable changes to Bamboo are documented here.
 
 ---
 
+## 2026-04-20
+
+### Changed
+
+- **`panda_log_analysis`: `setup.stdout`-first download order for pilot error
+  1305** (`askpanda_atlas`, `askpanda_epic`).  For jobs that fail with
+  `piloterrorcode == 1305` (payload setup verification error), `setup.stdout`
+  is now downloaded and inspected *before* `payload.stdout`.  If it contains a
+  recognisable fatal setup error (e.g. `!!!ERROR!!! No matched release is
+  found`) the tool treats `setup.stdout` as the primary excerpt and skips
+  `payload.stdout` and `payload.stderr` entirely — the payload never ran, so
+  those files are empty.  This produces a direct, accurate root-cause
+  explanation instead of an inconclusive "check the payload logs" recommendation.
+
+- **`panda_log_analysis`: zero-length file guard** (`askpanda_atlas`,
+  `askpanda_epic`).  Before downloading any log file the tool fetches the
+  filebrowser directory listing once (`/filebrowser/?pandaid={id}&json`) to
+  obtain a `{filename: size_bytes}` index.  Any file confirmed to have
+  `size == 0` is skipped without issuing a download request.  If the index
+  endpoint is unavailable all files are attempted as before (fail-open).
+
+### Added
+
+- **`setup_release_not_found` failure category** (`askpanda_atlas`,
+  `askpanda_epic`).  New entry in `_FAILURE_PATTERNS` that matches
+  `!!!error!!!` and `no matched release is found` in the log excerpt.
+  Inserted before `payload_error` so setup-log content wins over the empty
+  payload stdout that accompanies these jobs.
+
+- **`setup_log_url` and `setup_log_excerpt` evidence keys**
+  (`askpanda_atlas`, `askpanda_epic`).  Both keys are present in every code
+  1305 evidence dict.  `setup_log_url` is the filebrowser URL for
+  `setup.stdout`; `setup_log_excerpt` is the budget-capped content when a
+  fatal setup error was found, `null` otherwise.
+
+- **Setup Log link in `links_md`** (`askpanda_atlas`, `askpanda_epic`).  When
+  `setup.stdout` is fetched, a `Setup Log` entry is prepended to the Markdown
+  links block so the user can open the raw setup log directly from the TUI.
+
+- **`_LogFetchResult` dataclass, `_fetch_logs_payload`, `_fetch_logs_pilotlog`
+  helpers** (`askpanda_atlas`, `askpanda_epic`).  The log-fetching branches
+  previously inlined inside `fetch_and_analyse` have been extracted into two
+  private helpers returning a `_LogFetchResult` dataclass.  This reduces the
+  cyclomatic complexity of `fetch_and_analyse` from 23 to 6 (project limit:
+  15) while keeping the logic readable.
+
+- **17 new tests per package** (`askpanda_atlas`, `askpanda_epic`).  Cover
+  `_setup_log_has_error`, `_file_is_nonempty`, `_fetch_file_index` parsing,
+  the new `setup_release_not_found` classification, the setup-first download
+  order, setup-error short-circuit (payload not fetched), zero-length skipping,
+  clean-setup fallthrough to payload, fail-open index behaviour, `links_md`
+  Setup Log inclusion, and `setup_log_url` absence on non-1305 jobs.
+
 ## 2026-04-08
 
 ### Added

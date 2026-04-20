@@ -334,6 +334,10 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
     Both files are attempted: stdout is the primary log, stderr is fetched
     additionally since some failures (tracebacks, segfaults) only appear there.
     The stderr content should be present in the log excerpt.
+
+    setup.stdout is confirmed zero-length in the file index so the tool skips
+    it and goes straight to the payload logs, which is the scenario this test
+    exercises.
     """
     fetched_filenames: list[str] = []
 
@@ -348,6 +352,16 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
     )
     monkeypatch.setattr("askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log)
+    # setup.stdout confirmed zero-length in index → skipped by _file_is_nonempty;
+    # payload files are non-empty so they are downloaded as expected.
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            "setup.stdout": 0,
+            "payload.stdout": 50000,
+            "payload.stderr": 200,
+        },
+    )
 
     import json
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -613,7 +627,11 @@ def test_file_is_nonempty_none_index_fail_open() -> None:
 def test_fetch_file_index_parses_list_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_fetch_file_index parses a JSON list of {name, size} dicts."""
+    """_fetch_file_index parses a JSON list of {name, size} dicts.
+
+    ``cached_fetch_jsonish`` is patched inside the impl module so that the
+    real parsing logic inside ``_fetch_file_index`` is exercised end-to-end.
+    """
     from askpanda_atlas.log_analysis_impl import _fetch_file_index
 
     fake_listing = [
@@ -622,12 +640,16 @@ def test_fetch_file_index_parses_list_response(
         {"name": "payload.stderr", "size": 0},
         {"name": "pilotlog.txt", "size": 98304},
     ]
+
+    # _fetch_file_index calls cached_fetch_jsonish via a deferred import inside
+    # the function body.  We patch it on the cache module that gets imported.
+    import askpanda_atlas._cache as cache_mod
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
-            e["name"]: e["size"] for e in fake_listing
-        },
+        cache_mod,
+        "cached_fetch_jsonish",
+        lambda url, timeout: (200, "application/json", "", fake_listing),
     )
+
     result = _fetch_file_index(1, "https://bigpanda.cern.ch", 30)
     assert result == {
         "setup.stdout": 2048,
