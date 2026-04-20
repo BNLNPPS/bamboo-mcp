@@ -1,4 +1,4 @@
-"""Fire-and-forget prompt/response logger for OpenSearch.
+r"""Fire-and-forget prompt/response logger for OpenSearch.
 
 Every call to :func:`~bamboo.tools.bamboo_executor.call_llm` can be logged to
 an OpenSearch index for observability and analysis.  Logging is **opt-in**:
