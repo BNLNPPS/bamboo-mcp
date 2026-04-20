@@ -22,6 +22,7 @@ from bamboo.tools.bamboo_answer import (
     _extract_id_from_history,
     _is_contextual_followup,
     _is_implicit_contextual_followup,
+    _is_conceptual_question,
     _is_log_analysis_request,
 )
 from bamboo.tools.bamboo_executor import (
@@ -693,3 +694,160 @@ class TestPilotSourceAnalysisFastPath:
         execute_mock.assert_awaited_once()
         plan = execute_mock.call_args[0][0]
         assert plan.tool_calls[0].tool == "panda_log_analysis"
+
+
+class TestIsConceptualQuestion:
+    """Detection of definitional / conceptual questions.
+
+    These questions ask what something *means* or *is*.  Any job or task ID
+    in the question is incidental context from a prior turn and must not
+    trigger an operational tool call.
+    """
+
+    def test_what_does_it_mean(self) -> None:
+        """'what does it mean that X is Y' is detected as conceptual."""
+        assert _is_conceptual_question(
+            "what does it mean that a job is looping?"
+        ) is True
+
+    def test_what_does_it_mean_with_job_id(self) -> None:
+        """Incidental job ID does not prevent conceptual detection."""
+        assert _is_conceptual_question(
+            "what does it mean that job 7103770630 is looping?"
+        ) is True
+
+    def test_what_is_a(self) -> None:
+        """'what is a X' is detected as conceptual."""
+        assert _is_conceptual_question("what is a looping job?") is True
+
+    def test_what_is_an(self) -> None:
+        """'what is an X' is detected as conceptual."""
+        assert _is_conceptual_question("what is an input_missing error?") is True
+
+    def test_whats_a(self) -> None:
+        """Contracted 'what's a X' is detected as conceptual."""
+        assert _is_conceptual_question("what's a stagein_timeout?") is True
+
+    def test_what_does_x_mean(self) -> None:
+        """'what does X mean' is detected as conceptual."""
+        assert _is_conceptual_question("what does stagein_timeout mean?") is True
+
+    def test_what_do_x_mean(self) -> None:
+        """'what do X mean' (plural) is detected as conceptual."""
+        assert _is_conceptual_question("what do looping jobs mean?") is True
+
+    def test_can_you_explain_what(self) -> None:
+        """'can you explain what X is' is detected as conceptual."""
+        assert _is_conceptual_question(
+            "can you explain what pilot error 1305 is?"
+        ) is True
+
+    def test_can_you_define(self) -> None:
+        """'can you define what a looping job is' is detected as conceptual."""
+        assert _is_conceptual_question(
+            "can you define what a looping job is?"
+        ) is True
+
+    def test_operational_status_not_matched(self) -> None:
+        """'what is the status of job X' is operational, not conceptual."""
+        assert _is_conceptual_question(
+            "what is the status of job 7103770630?"
+        ) is False
+
+    def test_analyse_not_matched(self) -> None:
+        """An analysis request is not conceptual."""
+        assert _is_conceptual_question(
+            "analyse the failure of job 7103770630"
+        ) is False
+
+    def test_why_fail_not_matched(self) -> None:
+        """'why did job X fail' is operational, not conceptual."""
+        assert _is_conceptual_question(
+            "why did job 7103770630 fail?"
+        ) is False
+
+    def test_show_logs_not_matched(self) -> None:
+        """'show me the logs for job X' is operational, not conceptual."""
+        assert _is_conceptual_question(
+            "show me the logs for job 7103770630"
+        ) is False
+
+    def test_empty(self) -> None:
+        """Empty input returns False."""
+        assert _is_conceptual_question("") is False
+
+
+class TestConceptualQuestionRouting:
+    """Integration tests: conceptual follow-up questions skip job-status routing."""
+
+    @pytest.mark.asyncio
+    async def test_conceptual_followup_with_job_id_skips_job_status(self) -> None:
+        """'what does it mean that job X is looping?' routes to LLM, not job status.
+
+        Regression test: the question contains job ID 7103770630 from a prior
+        analysis turn.  The deterministic router must recognise the conceptual
+        phrasing and fall through to the LLM planner instead of calling
+        panda_job_status with stale evidence.
+        """
+        import bamboo.tools.bamboo_answer as ba_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "explanation"}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+                         return_value=None),
+        ):
+            await tool.call({
+                "question": (
+                    "what does it mean that job 7103770630 is looping?"
+                ),
+            })
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        assert plan.tool_calls[0].tool != "panda_job_status", (
+            "A conceptual follow-up must not route to panda_job_status. "
+            f"Got tool={plan.tool_calls[0].tool!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_operational_job_id_question_still_routes_to_job_status(self) -> None:
+        """'what is the status of job X' still routes to panda_job_status.
+
+        Ensures the conceptual guard does not block legitimate status queries
+        that happen to contain 'what is'.
+        """
+        import bamboo.tools.bamboo_answer as ba_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "status"}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+                         return_value=None),
+        ):
+            await tool.call({
+                "question": "what is the status of job 7103770630?",
+            })
+
+        execute_mock.assert_awaited_once()
+        plan = execute_mock.call_args[0][0]
+        assert plan.tool_calls[0].tool == "panda_job_status", (
+            "An operational status question must still route to panda_job_status. "
+            f"Got tool={plan.tool_calls[0].tool!r}"
+        )

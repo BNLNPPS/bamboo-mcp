@@ -46,6 +46,38 @@ _LOG_PATTERN = re.compile(
     r"(?i)(?:analyz?e|analys[ei]|why|fail|log|diagnos)[^.]{0,60}"
     r"\bjob[:#/\-\s]+([0-9]{4,12})\b"
 )
+# Matches questions that are conceptual/definitional in nature — the user is
+# asking what something *means* or *is*, not requesting fresh job/task data.
+# A job or task ID in the same question is incidental context from a prior
+# turn and must not trigger an operational tool call.
+# Examples that should match:
+#   "what does it mean that a job is looping?"
+#   "what is a looping job?"
+#   "what does stagein_timeout mean?"
+#   "can you explain what pilot error 1305 is?"
+#   "what's a reassigned job?"
+_CONCEPTUAL_RE: re.Pattern[str] = re.compile(
+    r"(?i)"
+    r"(?:"
+    # "what does it/that/this mean"
+    r"what\s+does\s+(?:it|that|this)\s+mean"
+    r"|"
+    # "what is a/an X" — requires indefinite article so "what is the status" is excluded
+    r"what\s+(?:is|are)\s+(?:a\s+|an\s+)"
+    r"|"
+    # "what's a/an X"
+    r"what'?s\s+(?:a\s+|an\s+)"
+    r"|"
+    # "can you explain/describe/define/tell me what"
+    r"can\s+you\s+(?:explain|describe|define|tell\s+me\s+what)"
+    r"|"
+    # "explain/define/describe what"
+    r"(?:explain|define|describe)\s+what"
+    r"|"
+    # "what does/do X mean" (X = one or more words up to ~30 chars)
+    r"what\s+do(?:es)?\s+\w[\w\s]{0,30}mean"
+    r")"
+)
 # Matches PanDA server liveness questions — \"is panda alive\", \"is the panda server ok\", etc.
 # Deliberately avoids matching task/job/site questions that mention \"panda\" incidentally.
 # Signal phrases that indicate the user wants source-level analysis of a
@@ -242,6 +274,24 @@ def _is_log_analysis_request(text: str) -> bool:
         True if analysis keywords are present alongside a job reference.
     """
     return bool(_LOG_PATTERN.search(text or ""))
+
+
+def _is_conceptual_question(text: str) -> bool:
+    """Return True if the question is definitional/conceptual rather than operational.
+
+    A conceptual question asks what something *means* or *is* — e.g. "what
+    does it mean that a job is looping?" or "what is a stagein_timeout?".
+    Any job or task ID present in the question is incidental context from a
+    prior turn and must not cause the router to call an operational tool
+    (``panda_job_status``, ``panda_log_analysis``, etc.).
+
+    Args:
+        text: User question text.
+
+    Returns:
+        True if the question matches a definitional/conceptual phrasing.
+    """
+    return bool(_CONCEPTUAL_RE.search(text or ""))
 
 
 def _extract_history(messages: list[Message], current_question: str) -> list[Message]:
@@ -1033,16 +1083,21 @@ def _build_deterministic_plan(
         )
 
     if job_id and not task_id:
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_job_status",
-                arguments={"job_id": job_id, "query": question},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: job ID, no task ID → job status.",
-        )
+        # Guard: if the question is conceptual/definitional ("what does X mean",
+        # "what is a looping job") the job ID is incidental context from a prior
+        # turn.  Fall through to the LLM planner so it can answer from docs/RAG
+        # instead of fetching fresh (and irrelevant) job status data.
+        if not _is_conceptual_question(question):
+            return Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=1.0,
+                tool_calls=[ToolCall(
+                    tool="panda_job_status",
+                    arguments={"job_id": job_id, "query": question},
+                )],
+                reuse_policy=reuse,
+                explain="Deterministic: job ID, no task ID → job status.",
+            )
 
     if task_id:
         return Plan(
@@ -1913,6 +1968,8 @@ __all__ = [
     "_build_clarification_response",
     "_is_jobs_db_question",
     "_is_cric_question",
+    "_is_conceptual_question",
+    "_CONCEPTUAL_RE",
     "_is_pilot_question",
     "_is_site_health_question",
     "_is_panda_health_question",
