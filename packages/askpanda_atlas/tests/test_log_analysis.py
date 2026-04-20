@@ -528,3 +528,462 @@ def test_get_definition() -> None:
     assert "job_id" in d["inputSchema"]["properties"]
     assert d["inputSchema"]["required"] == ["job_id"]
     assert d["inputSchema"]["additionalProperties"] is False
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: new helpers (_setup_log_has_error, _file_is_nonempty,
+#             _fetch_file_index, classify_failure setup pattern)
+# ---------------------------------------------------------------------------
+
+def test_setup_log_has_error_matches_no_release() -> None:
+    """_setup_log_has_error returns True for 'No matched release is found'."""
+    from askpanda_atlas.log_analysis_impl import _setup_log_has_error
+
+    log = (
+        "sourcing /srv/my_release_setup.sh\n"
+        "AtlasSetup(WARNING): Deprecated tag ignored\n"
+        "!!!ERROR!!! No matched release is found\n"
+        "22:50:44 2026/04/19\n"
+    )
+    assert _setup_log_has_error(log) is True
+
+
+def test_setup_log_has_error_matches_error_bang() -> None:
+    """_setup_log_has_error returns True for bare !!!ERROR!!! line."""
+    from askpanda_atlas.log_analysis_impl import _setup_log_has_error
+
+    assert _setup_log_has_error("some preamble\n!!!ERROR!!! something bad\n") is True
+
+
+def test_setup_log_has_error_case_insensitive() -> None:
+    """_setup_log_has_error is case-insensitive."""
+    from askpanda_atlas.log_analysis_impl import _setup_log_has_error
+
+    assert _setup_log_has_error("No Matched Release Is Found\n") is True
+
+
+def test_setup_log_has_error_clean_log_returns_false() -> None:
+    """_setup_log_has_error returns False when setup completed without error."""
+    from askpanda_atlas.log_analysis_impl import _setup_log_has_error
+
+    clean = (
+        "Info: /cvmfs mounted\n"
+        "sourcing /srv/my_release_setup.sh\n"
+        "Athena release 23.0.32 set up successfully\n"
+    )
+    assert _setup_log_has_error(clean) is False
+
+
+def test_file_is_nonempty_positive() -> None:
+    """_file_is_nonempty returns True for a file with size > 0."""
+    from askpanda_atlas.log_analysis_impl import _file_is_nonempty
+
+    index = {"setup.stdout": 4096, "payload.stdout": 0}
+    assert _file_is_nonempty(index, "setup.stdout") is True
+
+
+def test_file_is_nonempty_zero_size() -> None:
+    """_file_is_nonempty returns False for a confirmed zero-length file."""
+    from askpanda_atlas.log_analysis_impl import _file_is_nonempty
+
+    index = {"payload.stdout": 0, "payload.stderr": 0}
+    assert _file_is_nonempty(index, "payload.stdout") is False
+    assert _file_is_nonempty(index, "payload.stderr") is False
+
+
+def test_file_is_nonempty_missing_from_index() -> None:
+    """_file_is_nonempty returns True when the filename is absent from the index.
+
+    A file absent from the listing may simply not have been flushed yet;
+    we attempt the download and rely on the HTTP layer for a definitive answer.
+    """
+    from askpanda_atlas.log_analysis_impl import _file_is_nonempty
+
+    assert _file_is_nonempty({"pilotlog.txt": 1024}, "setup.stdout") is True
+
+
+def test_file_is_nonempty_none_index_fail_open() -> None:
+    """_file_is_nonempty returns True when the index is None (fail-open)."""
+    from askpanda_atlas.log_analysis_impl import _file_is_nonempty
+
+    assert _file_is_nonempty(None, "payload.stdout") is True
+    assert _file_is_nonempty(None, "setup.stdout") is True
+
+
+def test_fetch_file_index_parses_list_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_fetch_file_index parses a JSON list of {name, size} dicts."""
+    from askpanda_atlas.log_analysis_impl import _fetch_file_index
+
+    fake_listing = [
+        {"name": "setup.stdout", "size": 2048},
+        {"name": "payload.stdout", "size": 0},
+        {"name": "payload.stderr", "size": 0},
+        {"name": "pilotlog.txt", "size": 98304},
+    ]
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            e["name"]: e["size"] for e in fake_listing
+        },
+    )
+    result = _fetch_file_index(1, "https://bigpanda.cern.ch", 30)
+    assert result == {
+        "setup.stdout": 2048,
+        "payload.stdout": 0,
+        "payload.stderr": 0,
+        "pilotlog.txt": 98304,
+    }
+
+
+def test_classify_failure_setup_release_not_found() -> None:
+    """setup_release_not_found is classified when setup log excerpt is used."""
+    setup_excerpt = (
+        "AtlasSetup(Warning): aarch64 not supported on x86_64\n"
+        "!!!ERROR!!! No matched release is found\n"
+        "22:50:44 2026/04/19\n"
+    )
+    job = {
+        **_SAMPLE_JOB_PAYLOAD,
+        "piloterrordiag": "General payload setup verification error",
+    }
+    result = classify_failure(job, setup_excerpt)
+    assert result == "setup_release_not_found", (
+        f"Expected 'setup_release_not_found', got '{result}'. "
+        "The setup log excerpt should drive classification when the "
+        "release is not found."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: setup.stdout-first flow and zero-length guards
+# ---------------------------------------------------------------------------
+
+# Shared setup log fixtures
+_SETUP_LOG_WITH_ERROR = (
+    "Info: /cvmfs mounted\n"
+    "sourcing /srv/my_release_setup.sh\n"
+    "AtlasSetup(WARNING): Deprecated tag ignored\n"
+    "AtlasSetup(Warning): aarch64 not supported on x86_64-like machine\n"
+    "\t/cvmfs/atlas.cern.ch/repo/sw/software/23.0/.../aarch64-centos7-gcc11-opt\n"
+    "!!!ERROR!!! No matched release is found\n"
+    "22:50:44 2026/04/19\n"
+)
+
+_SETUP_LOG_CLEAN = (
+    "Info: /cvmfs mounted\n"
+    "sourcing /srv/my_release_setup.sh\n"
+    "Athena release 23.0.32 set up successfully\n"
+)
+
+
+def _index_with_zero_payload() -> dict[str, int]:
+    """Return a file index where setup.stdout has content but payload logs are empty."""
+    return {
+        "setup.stdout": len(_SETUP_LOG_WITH_ERROR),
+        "setup.stderr": 0,
+        "payload.stdout": 0,
+        "payload.stderr": 0,
+    }
+
+
+def test_setup_log_checked_before_payload_for_code_1305(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """setup.stdout is the first file fetched for pilot error 1305.
+
+    The fetch order must be setup.stdout → (conditionally) payload.stdout →
+    payload.stderr.  setup.stdout must appear first in the fetched list.
+    """
+    fetched: list[str] = []
+
+    def _capture_log(
+        job_id: int, filename: str, base_url: str, timeout: int
+    ) -> str | None:
+        fetched.append(filename)
+        if filename == "setup.stdout":
+            return _SETUP_LOG_CLEAN  # no error → fall through to payload
+        if filename == "payload.stdout":
+            return "Some payload output\n"
+        return None
+
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            "setup.stdout": 100, "payload.stdout": 100, "payload.stderr": 0
+        },
+    )
+
+    asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+    assert fetched[0] == "setup.stdout", (
+        f"First fetched file should be setup.stdout, got {fetched}"
+    )
+
+
+def test_setup_error_skips_payload_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When setup.stdout contains a fatal error, payload logs are never fetched.
+
+    The pilot error 1305 job has a fatal 'No matched release is found' in
+    setup.stdout.  payload.stdout and payload.stderr would be empty anyway;
+    fetching them wastes a round-trip and must be suppressed.
+    """
+    fetched: list[str] = []
+
+    def _capture_log(
+        job_id: int, filename: str, base_url: str, timeout: int
+    ) -> str | None:
+        fetched.append(filename)
+        if filename == "setup.stdout":
+            return _SETUP_LOG_WITH_ERROR
+        # payload logs should never be reached
+        return None
+
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+    )
+
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+    res = _unpack(result)
+    ev = res["evidence"]
+
+    assert "payload.stdout" not in fetched, (
+        "payload.stdout must not be fetched when setup error found"
+    )
+    assert "payload.stderr" not in fetched, (
+        "payload.stderr must not be fetched when setup error found"
+    )
+    assert ev["failure_type"] == "setup_release_not_found"
+    assert ev["log_available"] is True
+    assert ev["setup_log_url"] is not None
+    assert "No matched release" in (ev["log_excerpt"] or "")
+
+
+def test_setup_error_excerpt_used_as_primary_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When setup error found, the setup log excerpt appears in evidence.log_excerpt."""
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: (
+            _SETUP_LOG_WITH_ERROR if filename == "setup.stdout" else None
+        ),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+    )
+
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+    ev = _unpack(result)["evidence"]
+
+    assert ev["setup_log_excerpt"] is not None
+    assert "No matched release" in ev["setup_log_excerpt"]
+    # The primary log_excerpt must also contain the setup content
+    assert "No matched release" in (ev["log_excerpt"] or "")
+
+
+def test_zero_length_payload_files_not_downloaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """payload.stdout and payload.stderr with size=0 in the index are never fetched.
+
+    When the file index confirms both payload files are zero-length and
+    setup.stdout has no error, no download attempt should be made for the
+    zero-length files.
+    """
+    fetched: list[str] = []
+
+    def _capture_log(
+        job_id: int, filename: str, base_url: str, timeout: int
+    ) -> str | None:
+        fetched.append(filename)
+        return _SETUP_LOG_CLEAN if filename == "setup.stdout" else None
+
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            "setup.stdout": len(_SETUP_LOG_CLEAN),
+            "payload.stdout": 0,
+            "payload.stderr": 0,
+        },
+    )
+
+    asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+
+    assert "payload.stdout" not in fetched, (
+        "payload.stdout confirmed zero-length; must not be downloaded"
+    )
+    assert "payload.stderr" not in fetched, (
+        "payload.stderr confirmed zero-length; must not be downloaded"
+    )
+
+
+def test_setup_log_nonempty_no_error_falls_through_to_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If setup.stdout has no error, payload.stdout is still fetched (if non-empty).
+
+    A clean setup.stdout should not suppress payload log downloads —
+    the payload may still have failed for other reasons.
+    """
+    fetched: list[str] = []
+
+    def _capture_log(
+        job_id: int, filename: str, base_url: str, timeout: int
+    ) -> str | None:
+        fetched.append(filename)
+        if filename == "setup.stdout":
+            return _SETUP_LOG_CLEAN
+        if filename == "payload.stdout":
+            return "AthenaMP ERROR: abort\n"
+        return None
+
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            "setup.stdout": len(_SETUP_LOG_CLEAN),
+            "payload.stdout": 100,
+            "payload.stderr": 0,
+        },
+    )
+
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+    ev = _unpack(result)["evidence"]
+
+    assert "payload.stdout" in fetched, (
+        "payload.stdout must be fetched when setup.stdout is clean"
+    )
+    assert ev["log_available"] is True
+
+
+def test_file_index_unavailable_falls_through_to_old_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the file index cannot be fetched, downloads proceed as before.
+
+    _fetch_file_index returning None must not suppress any log downloads;
+    the system falls back to attempting all files (fail-open).
+    """
+    fetched: list[str] = []
+
+    def _capture_log(
+        job_id: int, filename: str, base_url: str, timeout: int
+    ) -> str | None:
+        fetched.append(filename)
+        if filename == "setup.stdout":
+            return _SETUP_LOG_CLEAN
+        if filename == "payload.stdout":
+            return "Some payload output\n"
+        return None
+
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
+    )
+    # Index unavailable — None → fail-open
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: None,
+    )
+
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+    ev = _unpack(result)["evidence"]
+
+    assert "setup.stdout" in fetched
+    assert "payload.stdout" in fetched
+    assert ev["log_available"] is True
+
+
+def test_setup_log_url_in_links_md(monkeypatch: pytest.MonkeyPatch) -> None:
+    """links_md includes the Setup Log URL when setup.stdout was fetched."""
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: (
+            _SETUP_LOG_WITH_ERROR if filename == "setup.stdout" else None
+        ),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+    )
+
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
+    ev = _unpack(result)["evidence"]
+
+    links_md = ev.get("links_md", "")
+    assert "Setup Log" in links_md, (
+        f"links_md must contain 'Setup Log' when setup.stdout was fetched. Got:\n{links_md}"
+    )
+    assert "setup.stdout" in links_md
+
+
+def test_setup_log_url_absent_when_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """setup_log_url is None in evidence when no setup log was fetched.
+
+    For non-1305 errors (pilotlog.txt path), setup.stdout is never attempted
+    and setup_log_url must be None.
+    """
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(
+            _SAMPLE_JOB_STAGEIN_TIMEOUT
+        ),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {"pilotlog.txt": 500},
+    )
+
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
+    ev = _unpack(result)["evidence"]
+
+    assert ev.get("setup_log_url") is None

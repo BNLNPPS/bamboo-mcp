@@ -34,6 +34,7 @@ import json
 import logging
 import re
 from collections import deque
+from dataclasses import dataclass, field
 from typing import Any
 
 from askpanda_epic._fallback_http import get_base_url
@@ -61,6 +62,10 @@ _FAILURE_PATTERNS: list[tuple[str, list[str]]] = [
     # Must appear before payload_error — the WARNING log contains "exception" and would
     # otherwise be misclassified as a user payload failure.
     ("pilot_monitoring_error", ["getpwuid", "uid not found", "list_processes_and_threads"]),
+    # Release / container setup failures detected in setup.stdout before payload runs.
+    # Must appear before payload_error so the setup log excerpt wins over the empty
+    # payload stdout that accompanies these jobs.
+    ("setup_release_not_found", ["no matched release is found", "!!!error!!!"]),
     ("payload_error", ["athena", "traceback", "exception", "abort", "core dump"]),
     ("pilot_error", ["piloterrorcode"]),
 ]
@@ -162,6 +167,141 @@ def _fetch_log_text(job_id: int, filename: str, base_url: str, timeout: int) -> 
 
 
 # ---------------------------------------------------------------------------
+# Setup log error detection
+# ---------------------------------------------------------------------------
+
+# Patterns that, when found in setup.stdout, indicate a fatal setup error that
+# is the definitive root cause of the job failure.  When any of these match,
+# payload.stdout and payload.stderr are not downloaded — they will be empty
+# (the payload never ran) and attempting to fetch them wastes time and budget.
+# Order does not matter; all are checked.
+_SETUP_ERROR_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"!!!error!!!", re.IGNORECASE),
+    re.compile(r"no matched release is found", re.IGNORECASE),
+    re.compile(r"asetup.*failed", re.IGNORECASE),
+    re.compile(r"error.*release.*not.*found", re.IGNORECASE),
+]
+
+
+def _setup_log_has_error(setup_text: str) -> bool:
+    """Return True if setup.stdout contains a recognisable fatal setup error.
+
+    Checks ``setup_text`` against :data:`_SETUP_ERROR_PATTERNS`.  A match
+    means the Athena/Apptainer environment setup failed before the payload
+    could start, making payload.stdout and payload.stderr empty and
+    irrelevant.
+
+    Args:
+        setup_text: Full content of the setup.stdout log file.
+
+    Returns:
+        ``True`` if any setup-error pattern matches; ``False`` otherwise.
+    """
+    for pattern in _SETUP_ERROR_PATTERNS:
+        if pattern.search(setup_text):
+            return True
+    return False
+
+
+def _fetch_file_index(
+    job_id: int,
+    base_url: str,
+    timeout: int,
+) -> dict[str, int] | None:
+    """Fetch the filebrowser directory listing for a job, returning file sizes.
+
+    Calls ``/filebrowser/?pandaid={job_id}&json`` (no ``filename=`` param) to
+    retrieve a JSON list of files available for the job.  The result is parsed
+    into a mapping of ``{filename: size_in_bytes}`` so callers can skip
+    zero-length files before attempting to download them.
+
+    The response is cached via :func:`~askpanda_epic._cache.cached_fetch_jsonish`
+    using the metadata TTL (60 s).  A ``None`` return means the listing could
+    not be fetched; callers must treat this as "assume all files are non-empty"
+    (fail-open) so that an unavailable index does not suppress log downloads.
+
+    The PanDA monitor's filebrowser JSON listing uses the following structure::
+
+        [{"name": "pilotlog.txt", "size": 123456}, ...]
+
+    Args:
+        job_id: PanDA job ID.
+        base_url: PanDA monitor base URL.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        Dict mapping filename to size in bytes, or ``None`` on failure.
+    """
+    from askpanda_epic._cache import cached_fetch_jsonish  # type: ignore[import]
+
+    url = f"{base_url}/filebrowser/?pandaid={job_id}&json"
+    logger.info("Fetching file index: %s", url)
+    status, _ctype, _text, payload = cached_fetch_jsonish(url, timeout)
+    if status < 200 or status >= 300 or payload is None:
+        logger.warning(
+            "File index fetch failed for job %d: HTTP %d", job_id, status
+        )
+        return None
+
+    # The response may be a list directly, or a dict wrapping a list.
+    entries: list[Any] = []
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        # Some BigPanDA versions wrap the list under a "files" key.
+        for key in ("files", "data", "results"):
+            if isinstance(payload.get(key), list):
+                entries = payload[key]
+                break
+
+    if not entries:
+        logger.debug("File index for job %d is empty or unrecognised format", job_id)
+        return {}
+
+    index: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or entry.get("filename") or ""
+        size = entry.get("size") or entry.get("fsize") or 0
+        if name:
+            try:
+                index[str(name)] = int(size)
+            except (ValueError, TypeError):
+                index[str(name)] = 0
+
+    return index
+
+
+def _file_is_nonempty(file_index: dict[str, int] | None, filename: str) -> bool:
+    """Return True if *filename* should be downloaded based on the file index.
+
+    Uses a fail-open policy: if *file_index* is ``None`` (the directory
+    listing could not be fetched), the file is considered non-empty and
+    the download proceeds.  This preserves existing behaviour when the
+    index endpoint is unavailable.
+
+    Args:
+        file_index: Mapping of ``{filename: size_bytes}`` from
+            :func:`_fetch_file_index`, or ``None`` if the index is
+            unavailable.
+        filename: The log filename to check (e.g. ``"setup.stdout"``).
+
+    Returns:
+        ``True`` if the file should be downloaded; ``False`` if it is
+        confirmed to have zero bytes and can safely be skipped.
+    """
+    if file_index is None:
+        return True  # fail-open: index unavailable, assume non-empty
+    size = file_index.get(filename)
+    if size is None:
+        # File not listed at all — may not exist yet; attempt download anyway
+        # to get a definitive 404 rather than silently skipping.
+        return True
+    return size > 0
+
+
+# ---------------------------------------------------------------------------
 # Payload log noise stripping
 # ---------------------------------------------------------------------------
 
@@ -258,6 +398,7 @@ def _extract_context_window_with_trailing(
     for i, line in enumerate(lines):
         buffer.append(line)
         if compiled.search(line):
+            # Collect up to n_trailing further lines, stopping on a blank line.
             trailing: list[str] = []
             for subsequent in lines[i + 1:i + 1 + n_trailing]:
                 if subsequent.strip() == "":
@@ -292,7 +433,7 @@ def _select_log_filename(job: dict[str, Any]) -> str:
     All other failures are diagnosed from ``pilotlog.txt``.
 
     Args:
-        job: The ``job`` dict from the PanDA monitor metadata response.
+        job: The ``job`` dict from the BigPanDA metadata response.
 
     Returns:
         Primary log filename string (``"pilotlog.txt"`` or ``"payload.stdout"``).
@@ -379,7 +520,7 @@ def classify_failure(job: dict[str, Any], log_excerpt: str) -> str:
     excerpt, then checks it against ``_FAILURE_PATTERNS`` in order.
 
     Args:
-        job: The ``job`` dict from the PanDA monitor metadata response.
+        job: The ``job`` dict from the BigPanDA metadata response.
         log_excerpt: Extracted context window from the pilot log.
 
     Returns:
@@ -405,12 +546,199 @@ def classify_failure(job: dict[str, Any], log_excerpt: str) -> str:
 # Synchronous fetch-and-analyse (run via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
+@dataclass
+class _LogFetchResult:
+    """Collected outputs from one of the log-fetch helper functions.
+
+    Bundles the six mutable values that the two fetch helpers must return to
+    ``fetch_and_analyse`` so the helpers can be extracted into their own
+    functions without needing to return an unwieldy tuple.
+
+    Attributes:
+        log_excerpt: Extracted context window for LLM analysis.
+        log_url: Filebrowser URL of the primary log file, or ``None``.
+        log_available: True if any usable log content was obtained.
+        stderr_url: Filebrowser URL of ``payload.stderr``, or ``None``.
+        setup_log_url: Filebrowser URL of ``setup.stdout``, or ``None``.
+        setup_log_excerpt: Full (budget-capped) content of ``setup.stdout``,
+            or ``None`` if it was not fetched or contained no error.
+    """
+
+    log_excerpt: str = ""
+    log_url: str | None = None
+    log_available: bool = False
+    stderr_url: str | None = None
+    setup_log_url: str | None = None
+    setup_log_excerpt: str | None = field(default=None)
+
+
+def _fetch_logs_payload(
+    job_id: int,
+    pilot_error_code: int,
+    pilot_error_diag: str,
+    file_index: dict[str, int] | None,
+    base_url: str,
+    timeout: int,
+) -> _LogFetchResult:
+    """Fetch and excerpt logs for pilot error code 1305 (payload failure).
+
+    Checks ``setup.stdout`` first.  If it contains a recognisable fatal setup
+    error the function returns immediately with that content as the excerpt
+    and does not attempt ``payload.stdout`` or ``payload.stderr`` — the
+    payload never ran so those files will be empty.
+
+    If ``setup.stdout`` is absent, empty, or error-free the function falls
+    through to the ``payload.stdout`` → ``payload.stderr`` path, skipping any
+    file that the file-size index confirms to be zero-length.
+
+    Args:
+        job_id: PanDA job ID.
+        pilot_error_code: Numeric pilot error code (always 1305 for this path).
+        pilot_error_diag: Textual pilot error diagnosis from job metadata.
+        file_index: Mapping of ``{filename: size_bytes}`` from
+            :func:`_fetch_file_index`, or ``None`` (fail-open).
+        base_url: PanDA monitor base URL.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        Populated :class:`_LogFetchResult` instance.
+    """
+    result = _LogFetchResult()
+
+    # --- setup.stdout first ---
+    setup_fetched = False
+    if _file_is_nonempty(file_index, "setup.stdout"):
+        result.setup_log_url = (
+            f"{base_url}/filebrowser/?pandaid={job_id}&json&filename=setup.stdout"
+        )
+        setup_text = _fetch_log_text(job_id, "setup.stdout", base_url, timeout)
+        if setup_text:
+            setup_fetched = True
+            if _setup_log_has_error(setup_text):
+                result.setup_log_excerpt = setup_text[:_MAX_EXCERPT_CHARS]
+                result.log_excerpt = result.setup_log_excerpt
+                result.log_available = True
+                logger.info(
+                    "Setup error found in setup.stdout for job %d; "
+                    "skipping payload.stdout and payload.stderr.",
+                    job_id,
+                )
+                return result
+    else:
+        logger.info("setup.stdout is zero-length for job %d; skipping.", job_id)
+
+    # --- Fall through to payload logs ---
+    log_filename = "payload.stdout"
+    result.log_url = (
+        f"{base_url}/filebrowser/?pandaid={job_id}&json&filename={log_filename}"
+    )
+    log_text: str | None = None
+    if _file_is_nonempty(file_index, log_filename):
+        log_text = _fetch_log_text(job_id, log_filename, base_url, timeout)
+    else:
+        logger.info("payload.stdout is zero-length for job %d; skipping.", job_id)
+
+    stderr_text: str | None = None
+    if _file_is_nonempty(file_index, "payload.stderr"):
+        result.stderr_url = (
+            f"{base_url}/filebrowser/?pandaid={job_id}&json&filename=payload.stderr"
+        )
+        stderr_text = _fetch_log_text(job_id, "payload.stderr", base_url, timeout)
+    else:
+        logger.info("payload.stderr is zero-length for job %d; skipping.", job_id)
+
+    if log_text or stderr_text:
+        result.log_available = True
+        stdout_budget = _MAX_EXCERPT_CHARS - _STDERR_RESERVED_CHARS
+        stdout_excerpt = extract_log_excerpt(
+            log_text or "", log_filename,
+            pilot_error_code, pilot_error_diag,
+        )[:stdout_budget]
+        if stderr_text:
+            result.log_excerpt = (
+                stdout_excerpt
+                + "\n\n--- payload.stderr ---\n"
+                + stderr_text[:_STDERR_RESERVED_CHARS]
+            )
+        else:
+            result.log_excerpt = stdout_excerpt
+    elif setup_fetched:
+        # setup.stdout was fetched but contained no recognised error; use it
+        # as the excerpt so the LLM still has environment context.
+        result.log_available = True
+        result.log_excerpt = result.setup_log_excerpt or ""
+    else:
+        logger.info(
+            "No usable logs for job %d; proceeding with metadata only.", job_id
+        )
+
+    return result
+
+
+def _fetch_logs_pilotlog(
+    job: dict[str, Any],
+    job_id: int,
+    pilot_error_code: int,
+    pilot_error_diag: str,
+    file_index: dict[str, int] | None,
+    base_url: str,
+    timeout: int,
+) -> _LogFetchResult:
+    """Fetch and excerpt the pilot log for all non-1305 error codes.
+
+    Selects either ``pilotlog.txt`` or ``payload.stdout`` via
+    :func:`_select_log_filename`, skips the file if the size index confirms
+    zero bytes, then extracts the relevant context window.
+
+    Args:
+        job: The ``job`` dict from the BigPanDA metadata response.
+        job_id: PanDA job ID.
+        pilot_error_code: Numeric pilot error code from job metadata.
+        pilot_error_diag: Textual pilot error diagnosis from job metadata.
+        file_index: Mapping of ``{filename: size_bytes}`` from
+            :func:`_fetch_file_index`, or ``None`` (fail-open).
+        base_url: PanDA monitor base URL.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        Populated :class:`_LogFetchResult` instance.
+    """
+    result = _LogFetchResult()
+    log_filename = _select_log_filename(job)
+    result.log_url = (
+        f"{base_url}/filebrowser/?pandaid={job_id}&json&filename={log_filename}"
+    )
+
+    log_text: str | None = None
+    if _file_is_nonempty(file_index, log_filename):
+        log_text = _fetch_log_text(job_id, log_filename, base_url, timeout)
+    else:
+        logger.info("%s is zero-length for job %d; skipping.", log_filename, job_id)
+
+    if log_text:
+        result.log_available = True
+        result.log_excerpt = extract_log_excerpt(
+            log_text, log_filename, pilot_error_code, pilot_error_diag,
+        )
+    else:
+        logger.info(
+            "Log unavailable for job %d; proceeding with metadata only.", job_id
+        )
+
+    return result
+
+
 def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any]:
-    """Fetch metadata and log, extract context window, classify failure.
+    """Fetch metadata and logs, extract context window, classify failure.
 
     Intentionally synchronous so it can be offloaded to a thread pool via
     ``asyncio.to_thread``, keeping the async event loop unblocked during
     network I/O.
+
+    For pilot error code 1305 the download order is: ``setup.stdout`` first
+    (see :func:`_fetch_logs_payload`); for all other codes ``pilotlog.txt``
+    is used (see :func:`_fetch_logs_pilotlog`).  Both helpers skip any file
+    confirmed to be zero-length by the filebrowser file-size index.
 
     Args:
         job_id: PanDA job ID.
@@ -452,59 +780,31 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
         pass
     pilot_error_diag: str = str(job.get("piloterrordiag") or "")
 
-    # --- Step 2: Download log (only for failed/holding/cancelled jobs) ---
-    log_excerpt = ""
-    log_url: str | None = None
-    log_available = False
-
-    stderr_url: str | None = None
+    # --- Step 2: Download logs (only for failed/holding/cancelled jobs) ---
+    fetch_result = _LogFetchResult()
 
     if jobstatus in ("failed", "holding", "cancelled"):
-        log_filename = _select_log_filename(job)
-        log_url = (
-            f"{base_url}/filebrowser/?pandaid={job_id}"
-            f"&json&filename={log_filename}"
-        )
-        log_text = _fetch_log_text(job_id, log_filename, base_url, timeout)
+        # Fetch the file-size index once so both helpers can skip zero-length
+        # files.  Returns None on failure; helpers treat None as fail-open.
+        file_index = _fetch_file_index(job_id, base_url, timeout)
 
-        # For payload failures (code 1305) also fetch payload.stderr — some
-        # failures (Python tracebacks, C++ exceptions, segfaults) only appear
-        # there and would be missed if only stdout is examined.
-        stderr_text: str | None = None
         if pilot_error_code == 1305:
-            stderr_url = (
-                f"{base_url}/filebrowser/?pandaid={job_id}"
-                f"&json&filename=payload.stderr"
+            fetch_result = _fetch_logs_payload(
+                job_id, pilot_error_code, pilot_error_diag,
+                file_index, base_url, timeout,
             )
-            stderr_text = _fetch_log_text(job_id, "payload.stderr", base_url, timeout)
-
-        if log_text or stderr_text:
-            log_available = True
-            if pilot_error_code == 1305:
-                # Build the excerpt with a reserved budget for stderr so that a
-                # long payload.stdout cannot crowd out the traceback.  The stdout
-                # tail fills (MAX - RESERVED) chars; stderr fills up to RESERVED
-                # chars and is always appended last.
-                stdout_budget = _MAX_EXCERPT_CHARS - _STDERR_RESERVED_CHARS
-                stdout_excerpt = extract_log_excerpt(
-                    log_text or "", log_filename,
-                    pilot_error_code, pilot_error_diag,
-                )[:stdout_budget]
-                if stderr_text:
-                    log_excerpt = (
-                        stdout_excerpt
-                        + "\n\n--- payload.stderr ---\n"
-                        + stderr_text[:_STDERR_RESERVED_CHARS]
-                    )
-                else:
-                    log_excerpt = stdout_excerpt
-            else:
-                log_excerpt = extract_log_excerpt(
-                    log_text or "", log_filename,
-                    pilot_error_code, pilot_error_diag,
-                )
         else:
-            logger.info("Log unavailable for job %d; proceeding with metadata only.", job_id)
+            fetch_result = _fetch_logs_pilotlog(
+                job, job_id, pilot_error_code, pilot_error_diag,
+                file_index, base_url, timeout,
+            )
+
+    log_excerpt = fetch_result.log_excerpt
+    log_url = fetch_result.log_url
+    log_available = fetch_result.log_available
+    stderr_url = fetch_result.stderr_url
+    setup_log_url = fetch_result.setup_log_url
+    setup_log_excerpt = fetch_result.setup_log_excerpt
 
     # --- Step 3: Classify failure ---
     failure_type = classify_failure(job, log_excerpt)
@@ -535,6 +835,8 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
         "failure_type": failure_type,
         "log_url": log_url,
         "stderr_url": stderr_url,
+        "setup_log_url": setup_log_url,
+        "setup_log_excerpt": setup_log_excerpt,
         "log_available": log_available,
         "log_excerpt": log_excerpt or None,
     }
@@ -549,13 +851,19 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     # bamboo_executor can append it verbatim after LLM synthesis, bypassing
     # the LLM entirely and guaranteeing real URLs reach the TUI.
     link_lines: list[str] = [f"- [PanDA Monitor]({monitor_url})"]
+    if setup_log_url:
+        link_lines.append(f"- [Setup Log]({setup_log_url})")
     if log_url:
         log_label = (
-            "Pilot Log"
+            "Payload Log"
+            if log_available and pilot_error_code == 1305
+            else "Pilot Log"
             if log_available
             else "Pilot Log (may not be available yet)"
         )
         link_lines.append(f"- [{log_label}]({log_url})")
+    if stderr_url:
+        link_lines.append(f"- [Payload stderr]({stderr_url})")
     evidence["links_md"] = "\n\nLinks:\n" + "\n".join(link_lines)
 
     return {"evidence": evidence, "text": summary}
@@ -717,4 +1025,7 @@ __all__ = [
     "fetch_and_analyse",
     "get_definition",
     "panda_log_analysis_tool",
+    "_fetch_file_index",
+    "_file_is_nonempty",
+    "_setup_log_has_error",
 ]
