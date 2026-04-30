@@ -182,6 +182,70 @@ _SYSTEM_GENERIC: str = (
     "- Be concise and prefer bullet points for multi-part answers.\n"
 )
 
+# ---------------------------------------------------------------------------
+# Per-plugin synthesis prompt overrides
+# Keys are ASKPANDA_PLUGIN values; missing keys fall back to the defaults above.
+# ---------------------------------------------------------------------------
+
+_SYSTEM_RAG_CGSIM: str = (
+    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "computing simulation.\n"
+    "You are given a user question and relevant excerpts retrieved from the "
+    "CGSim / SimGrid documentation knowledge base.\n"
+    "Rules:\n"
+    "- Base your answer primarily on the retrieved documentation excerpts.\n"
+    "- Answer in terms of CGSim and SimGrid only. Do not reframe the answer "
+    "in terms of PanDA or ATLAS unless the user explicitly asks about the "
+    "connection.\n"
+    "- If the excerpts fully answer the question, do not add unreferenced claims.\n"
+    "- If the excerpts are only partially relevant, supplement with your general "
+    "knowledge of SimGrid but clearly distinguish documentation vs. general knowledge.\n"
+    "- Be concise and precise. Prefer bullet points for multi-part answers.\n"
+    "- Do not fabricate CGSim-specific details (config keys, plugin method "
+    "signatures, version numbers) that are not in the excerpts.\n"
+)
+
+_SYSTEM_RAG_NO_CONTEXT_CGSIM: str = (
+    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "computing simulation.\n"
+    "No relevant documentation excerpts were found for this question.\n"
+    "Rules:\n"
+    "- Do NOT make up CGSim-specific details such as config keys, plugin API "
+    "signatures, or version numbers.\n"
+    "- Tell the user that the documentation knowledge base did not contain "
+    "enough information to answer this question reliably.\n"
+    "- Suggest they consult the official CGSim or SimGrid documentation.\n"
+    "- If you can point to a plausible documentation URL, do so — but do not "
+    "invent specific technical values.\n"
+)
+
+_SYSTEM_GENERIC_CGSIM: str = (
+    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "computing simulation.\n"
+    "You have been given the results of one or more tool calls. Synthesise "
+    "a clear, concise answer to the user's question based solely on the "
+    "evidence provided.\n"
+    "Rules:\n"
+    "- Answer in terms of CGSim and SimGrid only. Do not reframe the answer "
+    "in terms of PanDA or ATLAS unless the user explicitly asks.\n"
+    "- Do not infer or fabricate values not present in the evidence.\n"
+    "- If the evidence shows errors or empty results, explain that clearly.\n"
+    "- Be concise and prefer bullet points for multi-part answers.\n"
+)
+
+_PLUGIN_RAG_PROMPTS: dict[str, tuple[str, str, str]] = {
+    # plugin_id -> (SYSTEM_RAG, SYSTEM_RAG_NO_CONTEXT, SYSTEM_GENERIC)
+    "cgsim": (_SYSTEM_RAG_CGSIM, _SYSTEM_RAG_NO_CONTEXT_CGSIM, _SYSTEM_GENERIC_CGSIM),
+}
+
+# Doc tool names that indicate a RAG retrieval path, keyed by plugin_id.
+_PLUGIN_DOC_TOOLS: dict[str, set[str]] = {
+    "atlas": {"panda_doc_search", "panda_doc_bm25"},
+    "epic": {"panda_doc_search", "panda_doc_bm25"},
+    "cgsim": {"cgsim.doc_search", "cgsim.doc_bm25"},
+}
+_DEFAULT_DOC_TOOLS: set[str] = {"panda_doc_search", "panda_doc_bm25"}
+
 _SYSTEM_JOBS_QUERY: str = (
     "You are AskPanDA, an expert assistant for the PanDA workload management "
     "system and ATLAS experiment workflows at CERN.\n"
@@ -540,7 +604,7 @@ def unpack_tool_result(result: list[MCPContent]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _pick_synthesis_prompt(tool_names: list[str]) -> str:
+def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> str:
     """Select the most appropriate synthesis system prompt for a set of tools.
 
     The priority order mirrors the original hard-wired routing logic in
@@ -550,10 +614,18 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
     Args:
         tool_names: Names of the tools that were actually called during
             plan execution (in call order).
+        plugin_id: Active plugin identifier, used to select plugin-specific
+            RAG and generic prompts.  Defaults to ``"atlas"``.
 
     Returns:
         System prompt string for the LLM synthesis step.
     """
+    rag_sys, rag_no_ctx_sys, generic_sys = _PLUGIN_RAG_PROMPTS.get(
+        plugin_id,
+        (_SYSTEM_RAG, _SYSTEM_RAG_NO_CONTEXT, _SYSTEM_GENERIC),
+    )
+    doc_tools = _PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS)
+
     if "panda_log_analysis" in tool_names:
         return _SYSTEM_LOG_ANALYSIS
     if "pilot_source_analysis" in tool_names:
@@ -564,7 +636,6 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
         return _SYSTEM_TASK
     if "panda_server_health" in tool_names:
         return _SYSTEM_PANDA_HEALTH
-    # Combined site-health: both harvester and jobs query in the same plan.
     if "panda_harvester_workers" in tool_names and "panda_jobs_query" in tool_names:
         return _SYSTEM_SITE_HEALTH
     if "panda_harvester_workers" in tool_names:
@@ -573,9 +644,9 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
         return _SYSTEM_JOBS_QUERY
     if "cric_query" in tool_names:
         return _SYSTEM_CRIC_QUERY
-    if any(t in tool_names for t in ("panda_doc_search", "panda_doc_bm25")):
-        return _SYSTEM_RAG
-    return _SYSTEM_GENERIC
+    if any(t in tool_names for t in doc_tools):
+        return rag_sys
+    return generic_sys
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +686,7 @@ def _build_synthesis_prompt(
     question: str,
     errors: list[str],
     original_question: str | None = None,
+    plugin_id: str = "atlas",
 ) -> tuple[str, str]:
     """Build the system and user prompts for the synthesis LLM call.
 
@@ -635,12 +707,17 @@ def _build_synthesis_prompt(
         original_question: The user's actual phrasing if it differs from
             ``question`` (e.g. "Tell me more please").  When provided, the
             synthesis prompt uses expansion framing instead of answer framing.
+        plugin_id: Active plugin identifier for prompt selection.
 
     Returns:
         Tuple of ``(system_prompt, user_prompt)`` strings.
     """
-    rag_tools = {"panda_doc_search", "panda_doc_bm25"}
-    plan_is_rag = any(t in rag_tools for t in called_tool_names)
+    rag_sys, rag_no_ctx_sys, generic_sys = _PLUGIN_RAG_PROMPTS.get(
+        plugin_id,
+        (_SYSTEM_RAG, _SYSTEM_RAG_NO_CONTEXT, _SYSTEM_GENERIC),
+    )
+    doc_tools = _PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS)
+    plan_is_rag = any(t in doc_tools for t in called_tool_names)
     is_followup = (
         original_question is not None and original_question != question
     )
@@ -648,7 +725,7 @@ def _build_synthesis_prompt(
     if plan_is_rag:
         rag_context = "\n\n".join(evidence_parts)
         if rag_context:
-            system = _SYSTEM_RAG
+            system = rag_sys
             if is_followup:
                 user = (
                     f"The user asked a follow-up: {repr(original_question)}\n"
@@ -665,10 +742,10 @@ def _build_synthesis_prompt(
                     f"Retrieved documentation excerpts:\n{rag_context}\n"
                 )
         else:
-            system = _SYSTEM_RAG_NO_CONTEXT
+            system = rag_no_ctx_sys
             user = f"User question:\n{question}\n"
     else:
-        system = _pick_synthesis_prompt(called_tool_names)
+        system = _pick_synthesis_prompt(called_tool_names, plugin_id=plugin_id)
         evidence_block = "\n\n".join(evidence_parts)
         user = (
             f"User question:\n{question}\n\n"
@@ -947,6 +1024,7 @@ async def execute_plan(
     history: list[Message],
     include_raw: bool = False,
     original_question: str | None = None,
+    plugin_id: str = "atlas",
 ) -> list[MCPContent]:
     """Execute a validated Plan and return a synthesised answer.
 
@@ -966,6 +1044,7 @@ async def execute_plan(
         original_question: The user's actual phrasing when ``question`` has
             been reformulated (e.g. for content-free follow-ups).  Passed to
             :func:`_build_synthesis_prompt` to enable expansion framing.
+        plugin_id: Active plugin identifier for synthesis prompt selection.
 
     Returns:
         One-element ``list[MCPContent]`` with the synthesised text answer.
@@ -999,6 +1078,7 @@ async def execute_plan(
     system, user = _build_synthesis_prompt(
         called_tool_names, evidence_parts, question, errors,
         original_question=original_question,
+        plugin_id=plugin_id,
     )
 
     async with span(EVENT_SYNTHESIS, tool="bamboo_executor",

@@ -73,7 +73,7 @@ class GeminiLLMClient(LLMClient):
                         "Run: pip install -r requirements-gemini.txt"
                     ) from exc
 
-                genai.configure(api_key=api_key)
+                genai.configure(api_key=api_key)  # type: ignore[attr-defined]
                 self._genai = genai
 
         return self._genai

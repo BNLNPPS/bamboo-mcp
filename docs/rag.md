@@ -195,10 +195,25 @@ askpanda-document-monitor-agent \
 | Environment variable | Default | Description |
 |---|---|---|
 | `BAMBOO_CHROMA_PATH` | `./chroma_db` | Path to the ChromaDB persistent directory |
-| `BAMBOO_CHROMA_COLLECTION` | `bamboo_docs` | Name of the ChromaDB collection to query |
+| `BAMBOO_CHROMA_COLLECTION` | plugin-dependent | Name of the ChromaDB collection to query |
 
-Set these in `bamboo_env.sh` before starting the server. The collection name
-must match exactly (case-sensitive) what was used during ingestion.
+Each plugin defaults `BAMBOO_CHROMA_COLLECTION` to its own collection name if
+the variable is unset, so different plugins can coexist in the same ChromaDB
+directory without interfering:
+
+| Plugin | Default collection name |
+|---|---|
+| `askpanda_atlas` | `atlas_docs` |
+| `askpanda_epic` | `epic_docs` |
+| `cgsim` | `cgsim_docs` |
+
+Set `BAMBOO_CHROMA_COLLECTION` explicitly to override.  The value must match
+exactly (case-sensitive) what was used during ingestion.
+
+Set `ASKPANDA_PLUGIN` to select the active plugin for the TUI and Streamlit
+interfaces (`atlas`, `epic`, or `cgsim`; default: `atlas`).
+
+Set these in `bamboo_env.sh` before starting the server.
 
 ---
 

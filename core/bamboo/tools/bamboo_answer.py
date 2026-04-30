@@ -19,6 +19,7 @@ they do **not** drive routing decisions any more.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Sequence
 
@@ -1016,6 +1017,7 @@ def _build_deterministic_plan(
     question: str,
     task_id: int | None,
     job_id: int | None,
+    plugin_id: str = "atlas",
 ) -> "Plan | None":
     """Build a Plan without an LLM call for unambiguous routing cases.
 
@@ -1029,12 +1031,14 @@ def _build_deterministic_plan(
     3. Task ID                      → ``panda_task_status``        FAST_PATH
     4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
     5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
-    6. No IDs                       → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
+    6. No IDs                       → doc_search + doc_bm25        RETRIEVE
 
     Args:
         question: User question text.
         task_id: Extracted task ID, or None.
         job_id: Extracted job ID, or None.
+        plugin_id: Active plugin identifier; determines which doc tools to use
+            for the fallback RAG retrieval route.
 
     Returns:
         A validated :class:`~bamboo.tools.planner.Plan`, or ``None`` to
@@ -1166,21 +1170,25 @@ def _build_deterministic_plan(
     # No IDs: general knowledge / documentation question → always retrieve.
     # top_k=5 for both to keep synthesis prompt within ~2500 input tokens,
     # well clear of the 30s TUI timeout even on follow-up turns with history.
+    from bamboo.tools.bamboo_executor import _PLUGIN_DOC_TOOLS, _DEFAULT_DOC_TOOLS  # noqa: PLC0415
+    _doc_tools = list(_PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS))
+    doc_search = _doc_tools[0] if _doc_tools else "panda_doc_search"
+    doc_bm25 = _doc_tools[1] if len(_doc_tools) > 1 else "panda_doc_bm25"
     return Plan(
         route=PlanRoute.RETRIEVE,
         confidence=1.0,
         tool_calls=[
             ToolCall(
-                tool="panda_doc_search",
+                tool=doc_search,
                 arguments={"query": question, "top_k": 5},
             ),
             ToolCall(
-                tool="panda_doc_bm25",
+                tool=doc_bm25,
                 arguments={"query": question, "top_k": 5},
             ),
         ],
         reuse_policy=reuse,
-        explain="Deterministic: no task/job ID → RAG retrieval.",
+        explain=f"Deterministic: no task/job ID → RAG retrieval ({doc_search}, {doc_bm25}).",
     )
 
 
@@ -1857,6 +1865,7 @@ class BambooAnswerTool:
             raise ValueError("Either 'question' or non-empty 'messages' must be provided.")
 
         try:
+            plugin_id: str = os.getenv("ASKPANDA_PLUGIN", "atlas").strip().lower()
             history = _extract_history(messages, question) if messages else []
             return await self._route(
                 question=question,
@@ -1865,6 +1874,7 @@ class BambooAnswerTool:
                 bypass_fast_path=bypass_fast_path,
                 include_jobs=include_jobs,
                 include_raw=include_raw,
+                plugin_id=plugin_id,
             )
         except LLMError as exc:
             return text_content(_friendly_llm_error(exc))
@@ -1877,6 +1887,7 @@ class BambooAnswerTool:
         bypass_fast_path: bool,
         include_jobs: bool,
         include_raw: bool,
+        plugin_id: str = "atlas",
     ) -> list[MCPContent]:
         """Route the question to the appropriate synthesis path.
 
@@ -1892,6 +1903,8 @@ class BambooAnswerTool:
                 questions that would normally be short-circuited.
             include_jobs: Passed as a hint to the planner for task-status calls.
             include_raw: Passed as a hint to the planner for error formatting.
+            plugin_id: Active plugin identifier for doc tool selection and
+                synthesis prompt.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
@@ -1927,12 +1940,13 @@ class BambooAnswerTool:
         # Skipped when bypass_fast_path is set so the LLM planner handles all
         # routing — useful for testing planner coverage.
         if not bypass_fast_path:
-            fast_plan = _build_deterministic_plan(rag_query, task_id, job_id)
+            fast_plan = _build_deterministic_plan(rag_query, task_id, job_id, plugin_id=plugin_id)
             if fast_plan is not None:
                 original_question = question if rag_query != question else None
                 return await execute_plan(
                     fast_plan, rag_query, history,
                     original_question=original_question,
+                    plugin_id=plugin_id,
                 )
 
         # LLM planner fallback for ambiguous or multi-step questions.

@@ -43,6 +43,49 @@ async def test_keyword_allow_atlas():
 
 
 @pytest.mark.asyncio
+async def test_keyword_allow_cgsim():
+    """Questions mentioning CGSim are allowed immediately."""
+    result = await check_topic("How does CGSim work?")
+    assert result.allowed is True
+    assert result.reason == "keyword_allow"
+    assert result.llm_used is False
+
+
+@pytest.mark.asyncio
+async def test_keyword_allow_simgrid():
+    """Questions mentioning SimGrid are allowed immediately."""
+    result = await check_topic("What is the SimGrid netzone model?")
+    assert result.allowed is True
+    assert result.reason == "keyword_allow"
+    assert result.llm_used is False
+
+
+@pytest.mark.asyncio
+async def test_keyword_allow_cgsim_plugin_method():
+    """Questions about CGSim plugin API methods are allowed immediately."""
+    result = await check_topic("What arguments does assignJob take?")
+    assert result.allowed is True
+    assert result.reason == "keyword_allow"
+    assert result.llm_used is False
+
+
+@pytest.mark.asyncio
+async def test_keyword_allow_cgsim_calibration():
+    """Questions about CGSim calibration are allowed immediately."""
+    result = await check_topic("How does CGSim calibrate job wall time?")
+    assert result.allowed is True
+    assert result.reason == "keyword_allow"
+    assert result.llm_used is False
+
+
+@pytest.mark.asyncio
+async def test_rejection_message_mentions_cgsim():
+    """Rejection message includes CGSim so users know it is a supported domain."""
+    from bamboo.tools.topic_guard import _REJECTION_MESSAGE
+    assert "CGSim" in _REJECTION_MESSAGE
+
+
+@pytest.mark.asyncio
 async def test_keyword_deny_recipe():
     """Clearly off-topic questions are denied immediately without LLM."""
     result = await check_topic("Give me a recipe for chocolate cake")

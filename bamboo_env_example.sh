@@ -125,18 +125,40 @@ export OPENAI_COMPAT_API_KEY=""
 # export ASKPANDA_OPENAI_COMPAT_BACKOFF_SECONDS="1.0"
 
 ########################################
-# RAG / CHROMADB (panda_doc_search tool)
+# PLUGIN SELECTION
+########################################
+
+# Active experiment plugin for the TUI and Streamlit interfaces.
+# Controls which ui_manifest tool is loaded and which banner/accent is shown.
+# Options: atlas | epic | cgsim   (default: atlas)
+# export ASKPANDA_PLUGIN="atlas"
+
+########################################
+# RAG / CHROMADB (doc_search / doc_bm25 tools)
 ########################################
 
 # Path to the ChromaDB persistent directory created by the ingestion script.
 export BAMBOO_CHROMA_PATH="./chroma_db"
 
 # Name of the ChromaDB collection to query.
-export BAMBOO_CHROMA_COLLECTION="document_monitor_agent"
+# Each plugin has its own default collection name so multiple plugins can
+# coexist in the same ChromaDB directory:
+#   atlas_docs  — ATLAS / PanDA documentation  (askpanda_atlas default)
+#   epic_docs   — ePIC / EIC documentation     (askpanda_epic default)
+#   cgsim_docs  — CGSim / SimGrid documentation (cgsim default)
+# Set this explicitly to override the plugin default.
+export BAMBOO_CHROMA_COLLECTION="atlas_docs"
 
 ########################################
 # DEBUG / SAFETY
 ########################################
+
+# Fast-path routing: deterministic regex-based routing for task/job/pilot
+# questions (faster, no LLM planner call).  Set to 0 to always use the LLM
+# planner instead — useful when experimenting with new plugins like CGSim
+# where the fast-path rules are not yet tuned for the domain.
+# Options: 1 (on, default when unset) | 0 (off — use LLM planner)
+export BAMBOO_FAST_PATH="0"
 
 # Uncomment for verbose debug logs if needed
 # export ASKPANDA_DEBUG="1"

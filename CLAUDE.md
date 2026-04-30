@@ -280,6 +280,33 @@ Public surface:
 - `_fetch_metadata` uses `cached_fetch_jsonish` (60 s TTL).
 - `_fetch_log_text` uses `cached_fetch_log` (infinite TTL).
 
+### CGSim Plugin (`packages/cgsim/`)
+
+Provides documentation search (RAG + BM25) for the CGSim / SimGrid distributed
+computing simulator.  No operational data tools exist yet — they are planned
+once the CGSim SQLite simulation output schema is finalised.
+
+Entry points:
+
+```toml
+[project.entry-points."bamboo.tools"]
+"cgsim.doc_search"  = "cgsim.doc_rag:cgsim_doc_search_tool"
+"cgsim.doc_bm25"    = "cgsim.doc_bm25:cgsim_doc_bm25_tool"
+"cgsim.ui_manifest" = "cgsim.ui_manifest:cgsim_ui_manifest_tool"
+```
+
+Key facts:
+- **Tool names**: `cgsim_doc_search` and `cgsim_doc_bm25` (not prefixed with
+  `panda_` — CGSim is not a PanDA deployment).
+- **Default ChromaDB collection**: `cgsim_docs` — distinct from `atlas_docs`
+  and `epic_docs` so all three can coexist in the same ChromaDB directory.
+- **UI accent**: `green` (ATLAS uses `cyan`).
+- **No deferred import constraint**: the plugin has no bamboo-core imports at
+  module level, consistent with the deferred-import rule for all plugins.
+- **Future tools** (stubs commented out in `pyproject.toml`): `cgsim.sim_query`,
+  `cgsim.site_status`, `cgsim.calibration_results`, `cgsim.event_monitor` —
+  all planned as SQLite interfaces to the CGSim output database.
+
 ### Textual TUI (`interfaces/textual/chat.py`)
 
 #### Slash Commands
@@ -483,6 +510,10 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `BAMBOO_TRACE` | `1` to enable structured tracing (default: off) |
 | `BAMBOO_TRACE_FILE` | Write trace spans to this file instead of stderr |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns held in context (default: 10) |
+| `ASKPANDA_PLUGIN` | Active plugin for TUI / Streamlit: `atlas`, `epic`, or `cgsim` (default: `atlas`) |
+| `BAMBOO_FAST_PATH` | `0`/`off`/`false` to disable deterministic fast-path routing and always use the LLM planner (default: on). Useful for CGSim and other plugins where fast-path rules are not yet tuned. |
+| `BAMBOO_CHROMA_PATH` | Path to the ChromaDB persistent directory (default: `./chroma_db`) |
+| `BAMBOO_CHROMA_COLLECTION` | ChromaDB collection name; each plugin defaults to its own (`atlas_docs` / `epic_docs` / `cgsim_docs`) |
 | `PANDA_MCP_BASE_URL` | Full URL of the PanDA MCP HTTP endpoint, e.g. `https://aipanda120.cern.ch:8443/mcp/`. If unset, PanDA MCP tools return a graceful "server not connected" error. |
 | `PANDA_MCP_TOKEN` | Optional bearer token sent as `Authorization: Bearer <token>` to the PanDA MCP server |
 | `PANDA_MCP_ORIGIN` | Optional VO name sent as `Origin: <vo>` (e.g. `atlas`) to the PanDA MCP server |
