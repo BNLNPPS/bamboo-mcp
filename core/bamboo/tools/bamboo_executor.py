@@ -239,12 +239,14 @@ _PLUGIN_RAG_PROMPTS: dict[str, tuple[str, str, str]] = {
 }
 
 # Doc tool names that indicate a RAG retrieval path, keyed by plugin_id.
-_PLUGIN_DOC_TOOLS: dict[str, set[str]] = {
-    "atlas": {"panda_doc_search", "panda_doc_bm25"},
-    "epic": {"panda_doc_search", "panda_doc_bm25"},
-    "cgsim": {"cgsim.doc_search", "cgsim.doc_bm25"},
+# Ordered lists (vector search first, BM25 second) — order must be stable
+# because bamboo_answer._build_deterministic_plan relies on index 0 / 1.
+_PLUGIN_DOC_TOOLS: dict[str, list[str]] = {
+    "atlas": ["panda_doc_search", "panda_doc_bm25"],
+    "epic": ["panda_doc_search", "panda_doc_bm25"],
+    "cgsim": ["cgsim.doc_search", "cgsim.doc_bm25"],
 }
-_DEFAULT_DOC_TOOLS: set[str] = {"panda_doc_search", "panda_doc_bm25"}
+_DEFAULT_DOC_TOOLS: list[str] = ["panda_doc_search", "panda_doc_bm25"]
 
 _SYSTEM_JOBS_QUERY: str = (
     "You are AskPanDA, an expert assistant for the PanDA workload management "
