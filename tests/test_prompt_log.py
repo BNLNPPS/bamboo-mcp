@@ -300,13 +300,17 @@ class TestLogPromptEnabled:
         doc = captured[0]
 
         # All required keys present
-        for key in ("@timestamp", "session_id", "turn_id", "provider", "model",
+        for key in ("@timestamp", "session_id", "turn_number", "provider", "model",
                     "max_tokens", "system_prompt", "user_prompt", "response",
                     "tools_used", "input_tokens", "output_tokens"):
             assert key in doc, f"Missing key: {key}"
 
         # Correct values passed through
         assert doc["session_id"] == _SESSION_ID
+
+        # turn_number must be a positive integer
+        assert isinstance(doc["turn_number"], int)
+        assert doc["turn_number"] >= 1
         assert doc["provider"] == "gemini"
         assert doc["model"] == "gemini-2.0-flash"
         assert doc["input_tokens"] == 100
@@ -373,6 +377,36 @@ class TestLogPromptEnabled:
 
                 asyncio.run(_run())
 
+    def test_turn_number_increments(self) -> None:
+        """turn_number increments by 1 on each log_prompt call."""
+        captured: list[dict[str, Any]] = []
+
+        def _fake_write(doc: dict[str, Any]) -> None:
+            captured.append(doc)
+
+        with patch.dict(os.environ, {"BAMBOO_OPENSEARCH_PROMPTLOG": "testpw"}):
+            with patch("bamboo.llm.prompt_log._write_document",
+                       side_effect=_fake_write):
+
+                async def _run() -> None:
+                    # Reset counter so test is order-independent
+                    _pl_module._turn_counter = 0
+                    for _ in range(3):
+                        await log_prompt(
+                            system_prompt="You are AskPanDA.",
+                            user_prompt="hello",
+                            response="ok",
+                            tools_used=[],
+                            provider="gemini",
+                            model="gemini-2.0-flash",
+                            max_tokens=512,
+                        )
+                    await asyncio.sleep(0.05)
+
+                asyncio.run(_run())
+
+        assert len(captured) == 3
+        assert [d["turn_number"] for d in captured] == [1, 2, 3]
 
 # ---------------------------------------------------------------------------
 # Circuit breaker

@@ -48,7 +48,7 @@ reference.
 
 When enabled, every LLM synthesis call is logged to a daily-rollover index.
 Only the **current turn** is stored — chat history is deliberately excluded.
-The `session_id` + `turn_id` + `@timestamp` fields are sufficient to
+The `session_id` + `turn_number` fields are sufficient to
 reconstruct a full conversation by joining documents in time order.
 
 All text fields are **pseudonymised before writing** — see the
@@ -104,7 +104,7 @@ Each LLM call produces one document:
 |---|---|---|
 | `@timestamp` | ISO-8601 datetime | UTC time of the LLM call |
 | `session_id` | UUID | Stable for the lifetime of the server process (one TUI session = one session_id) |
-| `turn_id` | UUID | Unique per LLM call — use to identify a single exchange |
+| `turn_number` | int | 1-based counter, incremented per `log_prompt()` call within the process lifetime |
 | `provider` | string | LLM provider: `gemini`, `openai`, `anthropic`, `mistral` |
 | `model` | string | Model name, e.g. `gemini-2.0-flash` |
 | `max_tokens` | int | Token budget passed to the LLM |
@@ -117,13 +117,13 @@ Each LLM call produces one document:
 
 ### Reconstructing a conversation
 
-To replay a full session in chronological order:
+To replay a full session in order:
 
 ```json
 GET bamboomcp-promptlog-*/_search
 {
   "query": { "term": { "session_id": "3f2a1b4c-..." } },
-  "sort":  [ { "@timestamp": "asc" } ]
+  "sort":  [ { "turn_number": "asc" } ]
 }
 ```
 
@@ -149,7 +149,7 @@ PUT _index_template/bamboomcp-promptlog
       "properties": {
         "@timestamp":    { "type": "date" },
         "session_id":    { "type": "keyword" },
-        "turn_id":       { "type": "keyword" },
+        "turn_number":   { "type": "integer" },
         "provider":      { "type": "keyword" },
         "model":         { "type": "keyword" },
         "max_tokens":    { "type": "integer" },

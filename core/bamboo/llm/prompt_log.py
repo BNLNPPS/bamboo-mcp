@@ -57,7 +57,7 @@ Each indexed document contains::
     {
         "@timestamp":    "2026-04-17T14:33:01.123456Z",
         "session_id":    "uuid4 — stable for the process lifetime",
-        "turn_id":       "uuid4 — unique per call_llm() invocation",
+        "turn_number":   1,
         "provider":      "gemini",
         "model":         "gemini-2.0-flash",
         "max_tokens":    2048,
@@ -70,8 +70,9 @@ Each indexed document contains::
     }
 
 Only the current turn is stored.  Chat history is intentionally excluded —
-``session_id`` + ``turn_id`` + ``@timestamp`` let you reconstruct the full
-conversation by joining documents in time order, without any redundancy.
+``session_id`` + ``turn_number`` let you reconstruct the full conversation
+in order, without any redundancy.  ``turn_number`` is a 1-based integer
+incremented once per ``log_prompt()`` call within the process lifetime.
 """
 from __future__ import annotations
 
@@ -91,6 +92,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SESSION_ID: str = str(uuid.uuid4())
+
+#: 1-based turn counter, incremented once per :func:`log_prompt` call.
+#: Combined with ``session_id`` this gives a stable, human-readable reference
+#: for any individual exchange (e.g. "session abc123, turn 3").
+_turn_counter: int = 0
 
 # ---------------------------------------------------------------------------
 # Circuit breaker — disables logging after repeated write failures.
@@ -433,8 +439,8 @@ async def log_prompt(
     by the OpenSearch write.
 
     Only the current turn is stored — chat history is deliberately excluded.
-    ``session_id`` + ``turn_id`` + ``@timestamp`` are sufficient to reconstruct
-    a full conversation by joining documents in time order.
+    ``session_id`` + ``turn_number`` are sufficient to reconstruct a full
+    conversation in order.
 
     If prompt logging is disabled (``BAMBOO_OPENSEARCH_PROMPTLOG`` not set)
     this function is a no-op and returns in microseconds.
@@ -457,13 +463,15 @@ async def log_prompt(
     if not _is_logging_enabled():
         return
 
-    turn_id = str(uuid.uuid4())
+    global _turn_counter  # pylint: disable=global-statement
+    _turn_counter += 1
+    turn_number = _turn_counter
     timestamp = datetime.now(tz=timezone.utc).isoformat()
 
     doc: dict[str, Any] = {
         "@timestamp": timestamp,
         "session_id": _SESSION_ID,
-        "turn_id": turn_id,
+        "turn_number": turn_number,
         "provider": provider,
         "model": model,
         "max_tokens": max_tokens,
@@ -479,7 +487,7 @@ async def log_prompt(
     # create_task: caller gets control back immediately (fire-and-forget).
     asyncio.create_task(  # noqa: RUF006 — intentional fire-and-forget
         asyncio.to_thread(_write_document, doc),
-        name=f"prompt_log_{turn_id[:8]}",
+        name=f"prompt_log_{_SESSION_ID[:8]}_{turn_number}",
     )
 
 
@@ -489,4 +497,5 @@ __all__ = [
     "_SESSION_ID",
     "_DEFAULT_INDEX_BASE",
     "_CIRCUIT_BREAKER_THRESHOLD",
+    "_turn_counter",
 ]
