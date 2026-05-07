@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools, primarily targeting ATLAS/PanDA workflows. LLMs are used for summarisation and explanation, not as sources of truth. Structured evidence is always fetched from BigPanDA, cached, and passed to the LLM; the raw API payload is kept available for inspection.
+**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for AI-assisted scientific tools, targeting ATLAS/PanDA workflows and CGSim distributed computing simulation. LLMs are used for summarisation and explanation, not as sources of truth. Structured evidence is always fetched from tools, cached, and passed to the LLM; the raw API payload is kept available for inspection.
 
 ## Development Setup
 
@@ -12,6 +12,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install core and the ATLAS plugin in editable mode
 pip install -e ./core
 pip install -e ./packages/askpanda_atlas
+
+# Install the ePIC plugin
+pip install -e ./packages/askpanda_epic
+
+# Install the CGSim plugin
+pip install -e ./packages/cgsim
 
 # Install dev dependencies
 pip install -r requirements-dev.txt
@@ -98,7 +104,7 @@ TOOLS = {
 - **`_resolve_contextual_ids(question, task_id, job_id, history)`** — fills in `task_id`/`job_id` from history for contextual follow-ups when the current question has none of its own. Two detection paths:
   1. **Explicit back-reference**: pronouns/demonstratives (`"those"`, `"them"`, `"that task"`, `"it"`) — always scans history.
   2. **Implicit short follow-up**: ≤ 10 words + status-specific domain term (`"failed"`, `"finished"`, `"running"`, etc.) — only applies the found ID if history actually contains one.
-- **`_build_deterministic_plan(rag_query, task_id, job_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; pilot/Harvester signals (no IDs) → `panda_harvester_workers`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval. The pilot rule runs before the jobs DB rule because the word "pilot" can co-occur with jobs DB signal phrases.
+- **`_build_deterministic_plan(rag_query, task_id, job_id, plugin_id)`** — fast-path routing without an LLM call: job ID + analysis keywords → `panda_log_analysis`; job ID → `panda_job_status`; task ID → `panda_task_status`; pilot/Harvester signals (no IDs) → `panda_harvester_workers`; jobs DB signals (no IDs) → `panda_jobs_query`; no IDs → RAG retrieval using the doc tools for `plugin_id` (e.g. `cgsim.doc_search` + `cgsim.doc_bm25` for CGSim, `panda_doc_search` + `panda_doc_bm25` for ATLAS/ePIC). The pilot rule runs before the jobs DB rule because the word "pilot" can co-occur with jobs DB signal phrases.
 - **`_is_pilot_question(question)`** — returns `True` when the question contains pilot/Harvester signal phrases (`"pilot"`, `"pilots"`, `"harvester worker"`, `"nworkers"`, `"pilot count"`, etc.) regardless of site or time expression. Used by the pilot fast-path intercept to bypass the topic guard for clearly on-topic pilot queries.
 - **`_is_jobs_db_question(question)`** — returns `True` when the question contains site/status signal phrases (`"failed at"`, `"top errors"`, `"each status"`, `"last updated"`, etc.) and no `"task"` keyword. Used by the fast-path intercept to skip the topic guard for clearly on-topic jobs DB queries.
 - **`_is_cric_question(question)`** — returns `True` when the question is about CRIC queuedata (queue status, copytools, site resources). Uses two strategies: (1) substring match against `_CRIC_SIGNALS` (phrases like `"cric"`, `"copytool"`, `"brokeroff"`, `"active queues"`, `"queue online"`, etc.); (2) presence of `"queue"`/`"queues"` AND a status word (`"active"`, `"online"`, `"offline"`, `"brokeroff"`) anywhere in the question — catches patterns like `"Which queues at BNL are active?"`. CRIC signals take priority over jobs signals in `_build_deterministic_plan`.
@@ -133,11 +139,13 @@ Routing order in `_route()`:
 - After each successful tool call, the full evidence dict (including `raw_payload`) is stored in `_last_evidence_store[tool_name]`, with `pandaid_list` stripped (can be 50k entries — would cause `/inspect` timeouts). `raw_payload` and `pandaid_list` are both **stripped before LLM synthesis** so the LLM only sees the compact evidence fields. Both are accessible via `/json` and `/inspect` respectively.
 - The compact JSON budget for each evidence block is **12,000 characters** (`_compact_json` limit), truncated with `…` if exceeded and sorted alphabetically. Task-level fields (`task_status`, `task_superstatus`, etc.) are merged first in the evidence dict so they sort before job-level fields.
 - `BambooLastEvidenceTool` (`bamboo_last_evidence`) exposes the store via MCP. Accepts `mode="evidence"` (compact dict, `raw_payload` excluded) or `mode="raw"` (verbatim BigPanDA API response). Used by the TUI `/inspect` and `/json` commands.
-- `_pick_synthesis_prompt(tool_names)` selects the system prompt for synthesis based on which tools ran: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_server_health` → PanDA liveness prompt; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt (two labelled evidence sources); `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `cric_query` → CRIC queuedata prompt; `panda_doc_*` → RAG documentation; other → generic.
+- `_pick_synthesis_prompt(tool_names, plugin_id)` selects the system prompt for synthesis based on which tools ran and the active plugin. For ATLAS/ePIC: `panda_log_analysis` → log diagnostic; `panda_job_status` → job summary; `panda_task_status` → task summary; `panda_server_health` → PanDA liveness prompt; `panda_harvester_workers` + `panda_jobs_query` together → site-health prompt; `panda_harvester_workers` alone → pilot stats prompt; `panda_jobs_query` alone → jobs DB prompt; `cric_query` → CRIC queuedata prompt; `panda_doc_*` → RAG documentation; other → generic. For CGSim (`plugin_id="cgsim"`): `cgsim.doc_search` / `cgsim.doc_bm25` → `_SYSTEM_RAG_CGSIM` (Bamboo identity, PanDA/CGSim correlation in scope); no results → `_SYSTEM_RAG_NO_CONTEXT_CGSIM`; other → `_SYSTEM_GENERIC_CGSIM`. Plugin-specific prompts are registered in `_PLUGIN_RAG_PROMPTS`; doc tool sets in `_PLUGIN_DOC_TOOLS`.
 
 ### LLM Passthrough (`core/bamboo/tools/llm_passthrough.py`)
 
 Returns clean `resp.text` — no debug prefix in the response body. `get_llm_info()` helper exposes `"provider=<p> model=<m>"` for the TUI startup banner; called server-side (via `bamboo_health`) so the LLM selector is guaranteed to be initialised.
+
+Reads `ASKPANDA_PLUGIN` from the environment and passes it as `plugin_id` to `get_bamboo_system_prompt(plugin_id)`, which selects the appropriate identity string from `_PLUGIN_IDENTITY` in `bamboo/prompts/templates.py`. This ensures the top-level LLM identity matches the active plugin (Bamboo/CGSim vs AskPanDA/ATLAS). The `plugin_id` is also threaded through `bamboo_answer.call()` → `_route()` → `_build_deterministic_plan()` → `execute_plan()` → `_build_synthesis_prompt()` → `_pick_synthesis_prompt()` so all synthesis prompts are plugin-aware.
 
 ### Health (`core/bamboo/tools/health.py`)
 
@@ -296,16 +304,34 @@ Entry points:
 ```
 
 Key facts:
-- **Tool names**: `cgsim_doc_search` and `cgsim_doc_bm25` (not prefixed with
-  `panda_` — CGSim is not a PanDA deployment).
-- **Default ChromaDB collection**: `cgsim_docs` — distinct from `atlas_docs`
-  and `epic_docs` so all three can coexist in the same ChromaDB directory.
+- **Tool name convention**: `get_definition()["name"]` must use **dot notation** matching the entry point key (`cgsim.doc_search`, `cgsim.doc_bm25`), not underscores. Core overwrites the name with the entry point key — if `get_definition()` returns `cgsim_doc_search` (underscores) the LLM will try to call the underscore name but the server only exposes the dot name, causing "Unknown tool" errors.
+- **Default ChromaDB collection**: `cgsim_docs` — distinct from `atlas_docs` and `epic_docs` so all three can coexist in the same ChromaDB directory.
 - **UI accent**: `green` (ATLAS uses `cyan`).
-- **No deferred import constraint**: the plugin has no bamboo-core imports at
-  module level, consistent with the deferred-import rule for all plugins.
-- **Future tools** (stubs commented out in `pyproject.toml`): `cgsim.sim_query`,
-  `cgsim.site_status`, `cgsim.calibration_results`, `cgsim.event_monitor` —
-  all planned as SQLite interfaces to the CGSim output database.
+- **Banner height**: 6 lines (block-letter ASCII art) → container height = 6 + 4 = 10. The TUI dynamically sets `#banner` height from `len(banner_lines) + 4` at render time — no manual CSS adjustment needed.
+- **No deferred import constraint**: the plugin has no bamboo-core imports at module level, consistent with the deferred-import rule for all plugins.
+- **PanDA/CGSim corpus**: it is valid and useful to ingest PanDA documentation into `cgsim_docs` alongside CGSim docs. CGSim ingests historical PanDA job records for calibration; questions about the PanDA/CGSim connection are explicitly in scope. The synthesis prompts reflect this.
+- **Future tools** (stubs commented out in `pyproject.toml`): `cgsim.sim_query`, `cgsim.site_status`, `cgsim.calibration_results`, `cgsim.event_monitor` — all planned as SQLite interfaces to the CGSim output database.
+
+#### CGSim synthesis prompts (`core/bamboo/tools/bamboo_executor.py`)
+
+Three plugin-specific synthesis prompts registered in `_PLUGIN_RAG_PROMPTS["cgsim"]`:
+
+- **`_SYSTEM_RAG_CGSIM`** — used when RAG tools return content. Identifies as Bamboo (not AskPanDA), states CGSim/PanDA integration is in scope, instructs LLM not to deflect cross-domain questions.
+- **`_SYSTEM_RAG_NO_CONTEXT_CGSIM`** — used when RAG returns no results. Allows general SimGrid/PanDA guidance clearly labelled as general knowledge; suggests ingesting more documentation.
+- **`_SYSTEM_GENERIC_CGSIM`** — used for non-RAG tool results. Same Bamboo identity; explicitly allows PanDA/CGSim correlation answers.
+
+The `_PLUGIN_DOC_TOOLS["cgsim"]` set is `{"cgsim.doc_search", "cgsim.doc_bm25"}` — used by `_build_synthesis_prompt` and `_pick_synthesis_prompt` to select the RAG prompt path.
+
+#### CGSim `sim_query` security model (planned)
+
+The future `cgsim.sim_query` SQLite tool will enforce read-only access at four independent layers:
+
+1. **SQLite URI flag**: `sqlite3.connect("file:{path}?mode=ro", uri=True)` — refuses writes at the driver level.
+2. **`PRAGMA query_only = ON`**: second enforcement inside the connection.
+3. **sqlglot AST validation**: LLM-generated SQL is parsed and checked against an allow-list of known CGSim table names before execution. DDL, DML, and multi-statement queries are rejected.
+4. **Local-only deployment**: `CGSIM_DB_PATH` is a local filesystem path; no network exposure.
+
+This mirrors the security pattern of `panda_jobs_query` (DuckDB) but uses SQLite since that is what CGSim produces.
 
 ### Textual TUI (`interfaces/textual/chat.py`)
 
@@ -514,6 +540,7 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `BAMBOO_FAST_PATH` | `0`/`off`/`false` to disable deterministic fast-path routing and always use the LLM planner (default: on). Useful for CGSim and other plugins where fast-path rules are not yet tuned. |
 | `BAMBOO_CHROMA_PATH` | Path to the ChromaDB persistent directory (default: `./chroma_db`) |
 | `BAMBOO_CHROMA_COLLECTION` | ChromaDB collection name; each plugin defaults to its own (`atlas_docs` / `epic_docs` / `cgsim_docs`) |
+| `CGSIM_DB_PATH` | Path to the SQLite database produced by a CGSim run. Required by the planned `cgsim.sim_query` tool. Must be a local filesystem path accessible to the MCP server process. |
 | `PANDA_MCP_BASE_URL` | Full URL of the PanDA MCP HTTP endpoint, e.g. `https://aipanda120.cern.ch:8443/mcp/`. If unset, PanDA MCP tools return a graceful "server not connected" error. |
 | `PANDA_MCP_TOKEN` | Optional bearer token sent as `Authorization: Bearer <token>` to the PanDA MCP server |
 | `PANDA_MCP_ORIGIN` | Optional VO name sent as `Origin: <vo>` (e.g. `atlas`) to the PanDA MCP server |

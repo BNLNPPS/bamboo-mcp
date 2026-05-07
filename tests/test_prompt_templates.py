@@ -51,13 +51,25 @@ async def test_cgsim_prompt_does_not_say_askpanda() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cgsim_prompt_discourages_panda_framing() -> None:
-    """CGSim system prompt explicitly instructs not to frame in terms of PanDA/ATLAS."""
+async def test_cgsim_prompt_welcomes_panda_correlation() -> None:
+    """CGSim system prompt explicitly welcomes PanDA/CGSim correlation questions."""
     from bamboo.prompts.templates import get_bamboo_system_prompt
 
     result = await get_bamboo_system_prompt(plugin_id="cgsim")
     text = result["messages"][0]["content"]["text"]
-    assert "Do not frame" in text or "not frame" in text
+    assert "PanDA" in text
+    assert "calibration" in text.lower() or "integration" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_cgsim_prompt_does_not_deflect_panda() -> None:
+    """CGSim system prompt does not tell the LLM to avoid PanDA framing."""
+    from bamboo.prompts.templates import get_bamboo_system_prompt
+
+    result = await get_bamboo_system_prompt(plugin_id="cgsim")
+    text = result["messages"][0]["content"]["text"]
+    assert "Do not frame" not in text
+    assert "nothing to do with PanDA" not in text
 
 
 @pytest.mark.asyncio
