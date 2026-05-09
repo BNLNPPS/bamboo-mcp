@@ -204,6 +204,27 @@ export BAMBOO_FAST_PATH="0"
 echo "AskPanDA LLM environment variables loaded (example configuration)."
 
 ########################################
+# HTTP SERVER (bamboo.entrypoints.http)
+########################################
+
+# Bind host for the HTTP MCP server (python -m bamboo.server_http).
+# 127.0.0.1  → localhost only (default, safe for local development)
+# 0.0.0.0    → all interfaces (required for remote clients)
+# export BAMBOO_HTTP_HOST="127.0.0.1"
+
+# Bind port (default: 8000)
+# export BAMBOO_HTTP_PORT="8000"
+
+# Uvicorn log level: debug | info | warning | error (default: info)
+# export BAMBOO_HTTP_LOG_LEVEL="info"
+
+# Bearer token auth — leave unset for open access (local/testbed use).
+# Option A: tokens file (one entry per line, format: client_id: token)
+# export BAMBOO_MCP_TOKENS_FILE="/etc/bamboo/tokens.txt"
+# Option B: inline comma-separated client_id:token pairs
+# export BAMBOO_MCP_TOKENS="alice:token-abc,bob:token-xyz"
+
+########################################
 # STREAMLIT / HTTP CLIENT
 ########################################
 

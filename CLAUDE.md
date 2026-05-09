@@ -147,6 +147,29 @@ Returns clean `resp.text` — no debug prefix in the response body. `get_llm_inf
 
 Reads `ASKPANDA_PLUGIN` from the environment and passes it as `plugin_id` to `get_bamboo_system_prompt(plugin_id)`, which selects the appropriate identity string from `_PLUGIN_IDENTITY` in `bamboo/prompts/templates.py`. This ensures the top-level LLM identity matches the active plugin (Bamboo/CGSim vs AskPanDA/ATLAS). The `plugin_id` is also threaded through `bamboo_answer.call()` → `_route()` → `_build_deterministic_plan()` → `execute_plan()` → `_build_synthesis_prompt()` → `_pick_synthesis_prompt()` so all synthesis prompts are plugin-aware.
 
+### HTTP Server (`core/bamboo/server_http.py` + `core/bamboo/entrypoints/http.py`)
+
+`python -m bamboo.server_http` is the production entry point for shared HTTP deployments. It wraps uvicorn and reads configuration from env vars or CLI flags, printing a startup banner to stderr.
+
+```bash
+python -m bamboo.server_http --host 0.0.0.0 --port 8000
+# or equivalently:
+uvicorn bamboo.entrypoints.http:app --host 0.0.0.0 --port 8000
+```
+
+The ASGI app lives in `bamboo/entrypoints/http.py`. Key routes:
+
+- **`POST /mcp`** — MCP Streamable HTTP endpoint. Give clients this URL via `MCP_URL` or `--http-url`.
+- **`GET /healthz`** — Liveness probe. Returns `200 ok` (plain text), no auth required. Use for `curl --fail`, Kubernetes probes, and load balancer health checks.
+
+`/healthz` confirms the process is alive and the ASGI app is responsive. It does **not** verify LLM connectivity or PanDA MCP session status — use the `bamboo_health` MCP tool for that.
+
+Install deps before starting: `pip install -r requirements-http.txt` (`uvicorn>=0.29`, `starlette>=0.36`).
+
+Auth is configured via `BAMBOO_MCP_TOKENS_FILE` or `BAMBOO_MCP_TOKENS`. When neither is set the server accepts all requests (suitable for local/testbed use). See `docs/http-server.md` for full deployment guidance.
+
+Env vars: `BAMBOO_HTTP_HOST` (default `127.0.0.1`), `BAMBOO_HTTP_PORT` (default `8000`), `BAMBOO_HTTP_LOG_LEVEL` (default `info`).
+
 ### Health (`core/bamboo/tools/health.py`)
 
 `bamboo_health` includes `- llm_info: provider=<p> model=<m>` in its response text. The TUI parses this line at startup to display the LLM selection once.
@@ -536,6 +559,11 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `BAMBOO_TRACE` | `1` to enable structured tracing (default: off) |
 | `BAMBOO_TRACE_FILE` | Write trace spans to this file instead of stderr |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns held in context (default: 10) |
+| `BAMBOO_HTTP_HOST` | Bind host for HTTP server (default: `127.0.0.1`). Set to `0.0.0.0` for remote access. |
+| `BAMBOO_HTTP_PORT` | Bind port for HTTP server (default: `8000`) |
+| `BAMBOO_HTTP_LOG_LEVEL` | Uvicorn log level: `debug`/`info`/`warning`/`error` (default: `info`) |
+| `BAMBOO_MCP_TOKENS_FILE` | Path to Bearer token allowlist file for HTTP server auth |
+| `BAMBOO_MCP_TOKENS` | Inline comma-separated `client_id:token` list for HTTP server auth |
 | `ASKPANDA_PLUGIN` | Active plugin for TUI / Streamlit: `atlas`, `epic`, or `cgsim` (default: `atlas`) |
 | `BAMBOO_FAST_PATH` | `0`/`off`/`false` to disable deterministic fast-path routing and always use the LLM planner (default: on). Useful for CGSim and other plugins where fast-path rules are not yet tuned. |
 | `BAMBOO_CHROMA_PATH` | Path to the ChromaDB persistent directory (default: `./chroma_db`) |

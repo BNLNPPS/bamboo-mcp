@@ -45,6 +45,36 @@ environment is configured (LLM keys, `PANDA_BASE_URL`, etc.) before starting.
 
 ## Starting the server
 
+There are two equivalent ways to start the HTTP server:
+
+### Option A — `python -m bamboo.server_http` (recommended)
+
+A thin wrapper that reads host/port from env vars or CLI flags and prints a
+startup banner:
+
+```bash
+# Defaults: localhost:8000
+python -m bamboo.server_http
+
+# Custom host and port
+python -m bamboo.server_http --host 0.0.0.0 --port 9000
+
+# All options
+python -m bamboo.server_http --help
+```
+
+Startup banner written to stderr:
+```
+Bamboo MCP HTTP server  v1.0.7
+  MCP endpoint : http://0.0.0.0:8000/mcp
+  Health check : http://0.0.0.0:8000/healthz
+  Workers      : 1
+  Auth         : disabled (open access)
+  Log level    : info
+```
+
+### Option B — uvicorn directly (more control)
+
 ```bash
 uvicorn bamboo.entrypoints.http:app --host 0.0.0.0 --port 8000
 ```
@@ -72,7 +102,7 @@ For a testbed that should survive terminal disconnection:
 
 ```bash
 # With nohup — logs go to bamboo_server.log
-nohup uvicorn bamboo.entrypoints.http:app \
+nohup python -m bamboo.server_http \
   --host 0.0.0.0 --port 8000 \
   > bamboo_server.log 2>&1 &
 
@@ -80,7 +110,7 @@ echo "Server PID: $!"   # note this to kill it later
 
 # With screen — easier to inspect and reattach
 screen -S bamboo-server
-uvicorn bamboo.entrypoints.http:app --host 0.0.0.0 --port 8000
+python -m bamboo.server_http --host 0.0.0.0 --port 8000
 # Ctrl+A D to detach
 # screen -r bamboo-server to reattach
 ```
@@ -143,6 +173,34 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 Run once per user and distribute the token out-of-band.
+
+---
+
+## Health endpoint
+
+The server exposes a lightweight liveness probe at `GET /healthz` — no
+authentication required, no MCP protocol involved:
+
+```bash
+curl http://localhost:8000/healthz
+# → ok
+
+# Non-zero exit code if server is down (useful in scripts)
+curl --fail --silent http://localhost:8000/healthz && echo "server up"
+```
+
+Response: `200 ok` (plain text) when the process is alive.  Returns `404` for
+any other path that is not `/mcp`.
+
+This endpoint is suitable for:
+- **Kubernetes liveness/readiness probes** — `httpGet: path: /healthz`
+- **Load balancer health checks**
+- **Simple monitoring scripts** (`curl --fail`)
+- **Manual verification** that the server started correctly
+
+Note: `/healthz` confirms the process is running and the ASGI app is
+responsive, but does not verify LLM connectivity or PanDA MCP session status.
+Use the `bamboo_health` MCP tool for a deeper status check.
 
 ---
 
@@ -254,11 +312,14 @@ screen -r bamboo-server
 
 All standard Bamboo env vars apply.  HTTP-specific additions:
 
-| Variable | Purpose |
-|---|---|
-| `BAMBOO_MCP_TOKENS_FILE` | Path to tokens file for Bearer auth |
-| `BAMBOO_MCP_TOKENS` | Inline comma-separated `client_id:token` list |
-| `MCP_URL` | Default server URL read by the TUI (`--http-url` default) |
+| Variable | Default | Purpose |
+|---|---|---|
+| `BAMBOO_HTTP_HOST` | `127.0.0.1` | Bind host for `python -m bamboo.server_http` |
+| `BAMBOO_HTTP_PORT` | `8000` | Bind port for `python -m bamboo.server_http` |
+| `BAMBOO_HTTP_LOG_LEVEL` | `info` | Uvicorn log level (`debug`/`info`/`warning`/`error`) |
+| `BAMBOO_MCP_TOKENS_FILE` | — | Path to Bearer token allowlist file |
+| `BAMBOO_MCP_TOKENS` | — | Inline comma-separated `client_id:token` list |
+| `MCP_URL` | — | Default server URL read by TUI (`--http-url` default) |
 
 See `bamboo_env_example.sh` for the full list of LLM, PanDA, and tracing
 variables that also need to be set on the server.

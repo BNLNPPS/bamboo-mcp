@@ -8,25 +8,193 @@ All notable changes to Bamboo are documented here.
 
 ---
 
-## 2026-04-30
-
-### Changed
-
-- **Prompt log `turn_id` replaced by `turn_number`** (`core/bamboo/llm/prompt_log.py`,
-  `docs/opensearch.md`). The per-turn UUID has been replaced with a 1-based
-  integer counter that increments once per `log_prompt()` call within the
-  process lifetime. Combined with `session_id` this gives a stable,
-  human-readable reference for any exchange (e.g. "session `abc123`, turn 3")
-  and makes conversation reconstruction simpler — sort by `turn_number`
-  rather than `@timestamp`.
-
----
-
-## 2026-04-08
+## 2026-04-29
 
 ### Added
 
-- **Docker container support.** Bamboo MCP can now be built and distributed
+- **CGSim plugin (`packages/cgsim/`).** A new Bamboo MCP plugin for the
+  CGSim / SimGrid distributed computing simulator. CGSim is a SimGrid-based
+  framework for simulating large-scale computing grids such as the WLCG; it
+  ingests historical PanDA job records for calibration and is designed to
+  simulate infrastructures managed by PanDA.
+
+  Entry points registered under `bamboo.tools`:
+
+  | Entry point | Tool name | Description |
+  |---|---|---|
+  | `cgsim.doc_search` | `cgsim.doc_search` | ChromaDB vector similarity search over CGSim / SimGrid documentation |
+  | `cgsim.doc_bm25` | `cgsim.doc_bm25` | BM25 keyword search over the same corpus |
+  | `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding: block-letter banner, green accent, "Bamboo – CGSim" display name |
+
+  The default ChromaDB collection name is `cgsim_docs`, distinct from
+  `atlas_docs` and `epic_docs` so all three corpora can coexist in the same
+  ChromaDB directory. Tool names use dot notation throughout (matching the
+  entry point key), which is a requirement for all Bamboo plugins — using
+  underscores in `get_definition()["name"]` causes "Unknown tool" errors
+  because core overwrites the name with the entry point key.
+
+  Future tools are stubbed and commented out in `pyproject.toml`:
+  `cgsim.sim_query`, `cgsim.site_status`, `cgsim.calibration_results`,
+  `cgsim.event_monitor` — all planned as read-only SQLite interfaces to the
+  CGSim simulation output database.
+
+- **`cgsim.sim_query` security model documented.** The planned SQLite tool
+  will enforce read-only access at four independent layers: SQLite URI
+  `mode=ro` flag, `PRAGMA query_only = ON`, sqlglot AST validation against a
+  CGSim table allow-list, and local-only filesystem access via `CGSIM_DB_PATH`.
+  This mirrors the security pattern of `panda_jobs_query` (DuckDB) but uses
+  SQLite since that is what CGSim produces.
+
+- **Plugin-aware synthesis prompts.** `bamboo_executor.py` now selects
+  synthesis system prompts based on the active plugin (`ASKPANDA_PLUGIN`).
+  Three CGSim-specific prompts were added: `_SYSTEM_RAG_CGSIM`,
+  `_SYSTEM_RAG_NO_CONTEXT_CGSIM`, and `_SYSTEM_GENERIC_CGSIM`. These identify
+  the assistant as Bamboo (not AskPanDA), state that CGSim/PanDA correlation
+  questions are explicitly in scope, and instruct the LLM not to deflect
+  cross-domain questions. The `plugin_id` parameter is now threaded through the
+  full call chain: `bamboo_answer.call()` -> `_route()` ->
+  `_build_deterministic_plan()` -> `execute_plan()` ->
+  `_build_synthesis_prompt()` -> `_pick_synthesis_prompt()`.
+
+- **Plugin-aware identity in `templates.py`.** `get_bamboo_system_prompt()`
+  now accepts a `plugin_id` parameter and returns a plugin-appropriate identity
+  string from `_PLUGIN_IDENTITY`. For CGSim the identity names the assistant
+  Bamboo, describes the CGSim/SimGrid/PanDA domain, and explicitly welcomes
+  PanDA/CGSim correlation questions. `llm_passthrough.py` reads
+  `ASKPANDA_PLUGIN` and passes it through.
+
+- **Plugin-aware doc tool routing.** `_PLUGIN_DOC_TOOLS` and
+  `_DEFAULT_DOC_TOOLS` in `bamboo_executor.py` are now ordered lists (not
+  sets) mapping plugin IDs to their doc tool pair, ensuring stable plan
+  ordering (vector search always before BM25). `_build_deterministic_plan()`
+  uses the plugin-appropriate doc tools for the fallback RAG route.
+
+- **`BAMBOO_FAST_PATH` environment variable.** Fast-path routing can now be
+  enabled or disabled at startup via the `BAMBOO_FAST_PATH` env var. Set to
+  `0`, `off`, or `false` to start with the LLM planner handling all routing;
+  any other value (or unset) leaves fast-path on. Both the Textual TUI and
+  Streamlit interface read this at startup. The default in
+  `bamboo_env_example.sh` is `0` (off), recommended for CGSim where fast-path
+  intercepts are tuned for PanDA/ATLAS patterns.
+
+- **`ASKPANDA_PLUGIN` environment variable documented.** Added to
+  `bamboo_env_example.sh` with `atlas`, `epic`, and `cgsim` as documented
+  choices. Added to env var tables in `docs/interfaces.md` and `CLAUDE.md`.
+
+- **CGSim topic guard terms.** `topic_guard.py` now includes CGSim and
+  SimGrid terms in `_ALLOW_TERMS` (`cgsim`, `simgrid`, `assignjob`,
+  `getresourceinformation`, `onjobend`, `onsimulationend`, `netzone`,
+  `calibration`, `job wall time`, `job queue time`, `simulation`, `simulator`,
+  `computing grid`, `distributed computing`). The rejection message and LLM
+  classifier system prompt were updated to name CGSim and SimGrid as in-scope
+  domains.
+
+- **Dynamic banner height in the Textual TUI.** `_render_banner()` and
+  `_render_banner_placeholder()` now set the `#banner` container height
+  programmatically after rendering using `len(banner_lines) + 4` (2 Panel
+  borders + 2 CSS padding rows). This ensures the bottom border is never
+  clipped regardless of plugin banner height. The CGSim block-letter banner is
+  6 lines tall vs the 5-line ATLAS/ePIC banners, which triggered the bug.
+
+- **`python -m bamboo.server_http` entry point** (`core/bamboo/server_http.py`).
+  A dedicated HTTP server launcher that reads `BAMBOO_HTTP_HOST` (default
+  `127.0.0.1`), `BAMBOO_HTTP_PORT` (default `8000`), and
+  `BAMBOO_HTTP_LOG_LEVEL` (default `info`) from environment variables or CLI
+  flags, and prints a startup banner to stderr showing the MCP endpoint URL,
+  health check URL, worker count, and auth status. This replaces the need to
+  memorise the `uvicorn bamboo.entrypoints.http:app` invocation.
+
+- **`requirements-http.txt`** — `uvicorn>=0.29` and `starlette>=0.36`
+  extracted as a named dependency group for the HTTP server transport.
+
+- **`GET /healthz` documented.** The existing liveness endpoint in
+  `bamboo.entrypoints.http` is now prominently documented in
+  `docs/http-server.md`, `README.md`, `CLAUDE.md`, and `bamboo_env_example.sh`.
+  Suitable for Kubernetes liveness/readiness probes (`httpGet: path: /healthz`),
+  load balancer health checks, and `curl --fail` monitoring scripts.
+
+- **`_load_banner` failure logging.** The exception handler in
+  `interfaces/textual/chat.py` that fires when the UI manifest tool call fails
+  now prints a diagnostic message to stderr
+  (`[bamboo] _load_banner failed for tool '<name>': <reason>`) instead of
+  swallowing the error silently.
+
+- **Streamlit plugin selectbox extended.** The sidebar plugin selector now
+  includes `cgsim` alongside `atlas` and `epic`. The default index is derived
+  dynamically from `ASKPANDA_PLUGIN` rather than a hardcoded position.
+
+### Changed
+
+- **`_PLUGIN_DOC_TOOLS` and `_DEFAULT_DOC_TOOLS` changed from sets to lists.**
+  Python sets have no guaranteed iteration order; using `list(set)[0]` to pick
+  doc tools produced non-deterministic plan ordering. Both constants are now
+  ordered lists with vector search (`doc_search`) always at index 0 and BM25
+  (`doc_bm25`) at index 1.
+
+- **CGSim synthesis prompts updated to welcome PanDA/CGSim correlation.**
+  The initial CGSim prompts instructed the LLM to avoid framing answers in
+  terms of PanDA or ATLAS. This was over-cautious: CGSim ingests PanDA job
+  records for calibration and users legitimately ask about the integration.
+  All three CGSim synthesis prompts and the `_PLUGIN_IDENTITY["cgsim"]` string
+  in `templates.py` now explicitly state that CGSim/PanDA correlation questions
+  are in scope and should be answered directly.
+
+- **`bamboo_env_example.sh` RAG section updated.** The default
+  `BAMBOO_CHROMA_COLLECTION` value changed from `document_monitor_agent` to
+  `atlas_docs`, matching the ATLAS plugin default. A new comment lists all
+  three per-plugin defaults (`atlas_docs`, `epic_docs`, `cgsim_docs`).
+
+### Fixed
+
+- **"Unknown tool" errors for CGSim doc tools.** `get_definition()["name"]`
+  in `cgsim/doc_rag.py` and `cgsim/doc_bm25.py` returned underscore names
+  (`cgsim_doc_search`, `cgsim_doc_bm25`). Core overwrites the definition name
+  with the entry point key (dot notation: `cgsim.doc_search`,
+  `cgsim.doc_bm25`), so the LLM was trying to call the underscore names while
+  the server only exposed the dot names. Fixed by aligning `get_definition()`
+  to return dot-notation names matching the entry point keys.
+
+- **PanDA/ATLAS framing in CGSim answers.** Synthesis prompts in
+  `bamboo_executor.py` were hardcoded for PanDA/ATLAS regardless of the active
+  plugin, causing the LLM to begin every CGSim answer with "in the context of
+  PanDA/ATLAS workflows". Fixed by making `_build_synthesis_prompt()`,
+  `_pick_synthesis_prompt()`, and `execute_plan()` plugin-aware, and by adding
+  CGSim-specific prompt constants.
+
+- **CGSim questions rejected by topic guard.** "How does CGSim work?" reached
+  the LLM classifier stage and was denied because `cgsim` and `simgrid` were
+  not in `_ALLOW_TERMS`. Fixed by adding a CGSim/SimGrid keyword section to
+  the allow list.
+
+- **Banner bottom border clipped for CGSim.** The `#banner` CSS rule had a
+  hardcoded `height: 9` sized for the 5-line ATLAS/ePIC banners. The CGSim
+  block-letter banner is 6 lines, causing the bottom border to be cut off.
+  Fixed by computing the height dynamically in `_render_banner()`.
+
+### New files
+
+| File | Purpose |
+|---|---|
+| `packages/cgsim/cgsim/__init__.py` | CGSim plugin package |
+| `packages/cgsim/cgsim/doc_rag.py` | `cgsim.doc_search` tool |
+| `packages/cgsim/cgsim/doc_bm25.py` | `cgsim.doc_bm25` tool |
+| `packages/cgsim/cgsim/ui_manifest.py` | `cgsim.ui_manifest` tool |
+| `packages/cgsim/cgsim/banner.txt` | 6-line block-letter CGSim banner |
+| `packages/cgsim/pyproject.toml` | Plugin entry points and metadata |
+| `packages/cgsim/tests/test_cgsim_plugin.py` | 30 tests covering all three tools |
+| `core/bamboo/server_http.py` | `python -m bamboo.server_http` entry point |
+| `requirements-http.txt` | HTTP server dependencies (uvicorn, starlette) |
+| `tests/test_prompt_templates.py` | 9 tests for plugin-aware system prompts |
+| `docs/tools/cgsim_doc_search.md` | Per-tool reference for `cgsim.doc_search` |
+| `docs/tools/cgsim_doc_bm25.md` | Per-tool reference for `cgsim.doc_bm25` |
+
+---
+
+
+
+## 2026-04-08
+
+### Added Bamboo MCP can now be built and distributed
   as a Docker image, enabling deployment on Kubernetes and easy distribution
   to users who want a self-contained environment.
 
