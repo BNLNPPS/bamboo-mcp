@@ -277,6 +277,104 @@ npx @modelcontextprotocol/inspector \
 
 ## Verifying the server is running
 
+### Quick liveness check
+
+```bash
+curl http://localhost:8000/healthz
+# → ok
+```
+
+### Full MCP handshake verification
+
+A three-step sequence that confirms the MCP protocol is working end-to-end:
+
+```bash
+# Pick a session ID (any UUID — the client chooses it)
+SESSION="bamboo-test-$$"
+
+# Step 1 — initialize the MCP session
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2024-11-05",
+        "capabilities":{},
+        "clientInfo":{"name":"curl","version":"0.1"}}}'
+# → event: message
+# → data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05",
+#           "capabilities":{"prompts":...,"tools":...},"serverInfo":{...}}}
+
+# Step 2 — send the required initialized notification
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+
+# Step 3 — list all registered tools
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+# → event: message
+# → data: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"bamboo_health",...},...]}}
+```
+
+The `notifications/initialized` step (step 2) is required by the MCP spec —
+the server will reject `tools/list` with "received request before
+initialization was complete" if it is skipped.
+
+The session ID is chosen by the client and passed in the `mcp-session-id`
+header on every request in the session.
+
+### Inspecting tool descriptions
+
+The MCP `tools/list` method returns the full tool descriptions that the LLM
+uses for tool selection — useful for verifying that a plugin's tools are
+registered with the expected descriptions after deployment:
+
+```bash
+SESSION="bamboo-inspect-$$"
+
+# Initialize session
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"0.1"}}}' > /dev/null
+
+# Send required initialized notification
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' > /dev/null
+
+# Fetch and print tool names and descriptions
+curl -s -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | grep "^data: " \
+  | sed 's/^data: //' \
+  | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for tool in data['result']['tools']:
+    print(f'=== {tool[\"name\"]} ===')
+    print(tool['description'])
+    print()
+"
+```
+
+The `grep "^data: "` step strips the SSE framing (`event: message\ndata: {...}`)
+so that `python3` receives clean JSON. The `notifications/initialized` step is
+required by the MCP spec — omitting it causes the server to reject `tools/list`
+with "received request before initialization was complete".
+
 ```bash
 # Check the process
 ps aux | grep uvicorn
