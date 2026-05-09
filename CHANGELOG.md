@@ -113,11 +113,26 @@ All notable changes to Bamboo are documented here.
   Suitable for Kubernetes liveness/readiness probes (`httpGet: path: /healthz`),
   load balancer health checks, and `curl --fail` monitoring scripts.
 
-- **`_load_banner` failure logging.** The exception handler in
-  `interfaces/textual/chat.py` that fires when the UI manifest tool call fails
-  now prints a diagnostic message to stderr
-  (`[bamboo] _load_banner failed for tool '<name>': <reason>`) instead of
-  swallowing the error silently.
+- **Plugin-aware tool list filtering (`core/bamboo/core.py`).** The
+  `list_tools` MCP handler now only exposes tools whose entry-point namespace
+  matches the active plugin (`ASKPANDA_PLUGIN`). Core tools in the `TOOLS`
+  dict (`bamboo_health`, `bamboo_answer`, etc.) are always included.
+
+  Before this change, all installed plugins' tool descriptions were sent to the
+  LLM on every call — an ATLAS user was paying token cost for CGSim tool
+  descriptions and vice versa. With three plugins at roughly three tools each,
+  this was approximately nine wasted tool descriptions per call.
+
+  The filtering applies only to `list_tools`. `call_tool` is unaffected — all
+  plugin tools remain callable regardless of `ASKPANDA_PLUGIN`. The namespace
+  used for filtering is the part of the entry-point key before the first dot
+  (`atlas.task_status` → namespace `atlas`). This means the namespace in the
+  entry-point key must exactly match the value set in `ASKPANDA_PLUGIN`; if
+  they differ the plugin's tools will never appear in `list_tools`.
+
+- **`tests/test_plugin_tool_filter.py`** — 10 tests covering the filtering
+  logic: correct tools included per plugin, cross-plugin tools excluded,
+  unknown plugin returns empty, env var drives filter, default is `atlas`.
 
 - **Streamlit plugin selectbox extended.** The sidebar plugin selector now
   includes `cgsim` alongside `atlas` and `epic`. The default index is derived
@@ -145,6 +160,13 @@ All notable changes to Bamboo are documented here.
   three per-plugin defaults (`atlas_docs`, `epic_docs`, `cgsim_docs`).
 
 ### Fixed
+
+- **All plugins' tool descriptions sent to LLM on every call (token waste).**
+  `list_tools` was returning entry-point tools from all installed plugins
+  regardless of `ASKPANDA_PLUGIN`. With ATLAS, ePIC, and CGSim all installed,
+  every LLM call received approximately nine extra tool descriptions it would
+  never use. Fixed by filtering in `list_tools` to the active plugin's
+  namespace only.
 
 - **"Unknown tool" errors for CGSim doc tools.** `get_definition()["name"]`
   in `cgsim/doc_rag.py` and `cgsim/doc_bm25.py` returned underscore names
@@ -185,6 +207,7 @@ All notable changes to Bamboo are documented here.
 | `core/bamboo/server_http.py` | `python -m bamboo.server_http` entry point |
 | `requirements-http.txt` | HTTP server dependencies (uvicorn, starlette) |
 | `tests/test_prompt_templates.py` | 9 tests for plugin-aware system prompts |
+| `tests/test_plugin_tool_filter.py` | 10 tests for plugin-aware tool list filtering |
 | `docs/tools/cgsim_doc_search.md` | Per-tool reference for `cgsim.doc_search` |
 | `docs/tools/cgsim_doc_bm25.md` | Per-tool reference for `cgsim.doc_bm25` |
 

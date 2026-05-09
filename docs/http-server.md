@@ -333,7 +333,12 @@ header on every request in the session.
 
 The MCP `tools/list` method returns the full tool descriptions that the LLM
 uses for tool selection — useful for verifying that a plugin's tools are
-registered with the expected descriptions after deployment:
+registered with the expected descriptions after deployment.
+
+Note: the response only contains tools for the **active plugin** (set by
+`ASKPANDA_PLUGIN`). This is intentional — sending all plugins' tool
+descriptions to the LLM wastes tokens. Set `ASKPANDA_PLUGIN` before starting
+the server to control which plugin's tools are returned:
 
 ```bash
 SESSION="bamboo-inspect-$$"

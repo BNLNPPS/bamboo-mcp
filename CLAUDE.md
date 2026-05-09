@@ -64,7 +64,7 @@ python -m interfaces.textual.chat
 
 ### Core (`core/bamboo/`)
 
-- **`core.py`** — Builds the MCP `Server` instance. Registers all built-in tools (see TOOLS registry below) and loads plugin tools via Python entry points (`bamboo.tools`). Implements all MCP handlers (`list_tools`, `call_tool`, `list_prompts`, `get_prompt`).
+- **`core.py`** — Builds the MCP `Server` instance. Registers all built-in tools (see TOOLS registry below) and loads plugin tools via Python entry points (`bamboo.tools`). Implements all MCP handlers (`list_tools`, `call_tool`, `list_prompts`, `get_prompt`). The `list_tools` handler filters plugin tools by `ASKPANDA_PLUGIN` so only the active plugin's tools are sent to the LLM (cost reduction).
 - **`server.py`** — Stdio transport entry point.
 - **`config.py`** — Frozen `Config` dataclass driven entirely by environment variables (prefixed `ASKPANDA_*`).
 - **`tracing.py`** — Structured request/response lifecycle tracing (opt-in via `BAMBOO_TRACE=1`). Emits NDJSON spans to stderr or a file (`BAMBOO_TRACE_FILE`). File and stderr are mutually exclusive — when the file is set, stderr is left clean (required for TUI compatibility). See `docs/tracing.md`.
@@ -185,7 +185,33 @@ Tools are registered via `pyproject.toml` entry points under `bamboo.tools`:
 "atlas.jobs_query"  = "askpanda_atlas.jobs_query:panda_jobs_query_tool"
 ```
 
-Each plugin is a separate installable package under `packages/`. Core discovers plugins at startup via `importlib.metadata.entry_points`. The `TOOLS` dict keys (e.g. `"panda_task_status"`) are internal identifiers; MCP-exposed names come from `get_definition()["name"]`.
+Each plugin is a separate installable package under `packages/`. Core discovers
+plugins at startup via `importlib.metadata.entry_points`. The `TOOLS` dict keys
+(e.g. `"panda_task_status"`) are internal identifiers; MCP-exposed names come
+from `get_definition()["name"]`.
+
+#### Plugin tool filtering (`list_tools`)
+
+The `list_tools` MCP handler only exposes tools whose entry-point namespace
+matches the active plugin (determined by `ASKPANDA_PLUGIN`, default `atlas`).
+Core tools in the `TOOLS` dict are always included — they are plugin-agnostic.
+
+The namespace is the part of the entry-point key before the first dot:
+`atlas.task_status` → namespace `atlas`, `cgsim.doc_search` → namespace `cgsim`.
+
+This means:
+- An ATLAS user's LLM never sees CGSim or ePIC tool descriptions.
+- A CGSim user's LLM never sees ATLAS or ePIC tool descriptions.
+- Token cost is proportional to the active plugin's tool count, not the total
+  across all installed plugins.
+- `curl … tools/list` against the HTTP server returns only the active plugin's
+  tools — useful for verifying the correct plugin is loaded after deployment.
+
+All installed plugins are still fully callable via `call_tool` regardless of
+`ASKPANDA_PLUGIN` — the filter only applies to `list_tools`. This means the
+server does not need to be restarted to switch plugins; only `ASKPANDA_PLUGIN`
+needs to change (and a new client session started, since the TUI caches the
+tool list at connect time).
 
 ### ATLAS Plugin (`packages/askpanda_atlas/`)
 
