@@ -733,7 +733,7 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
             _render_raw_expander(st.session_state["last_raw"])
 
     # Chat input — must be the last widget
-    question = st.chat_input("Ask AskPanDA…")
+    question = st.chat_input("Ask PanDA")
     if question:
         st.session_state["messages"].append({"role": "user", "content": question})
         st.session_state["pending_question"] = question
