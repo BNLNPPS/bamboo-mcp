@@ -125,18 +125,40 @@ export OPENAI_COMPAT_API_KEY=""
 # export ASKPANDA_OPENAI_COMPAT_BACKOFF_SECONDS="1.0"
 
 ########################################
-# RAG / CHROMADB (panda_doc_search tool)
+# PLUGIN SELECTION
+########################################
+
+# Active experiment plugin for the TUI and Streamlit interfaces.
+# Controls which ui_manifest tool is loaded and which banner/accent is shown.
+# Options: atlas | epic | cgsim   (default: atlas)
+# export ASKPANDA_PLUGIN="atlas"
+
+########################################
+# RAG / CHROMADB (doc_search / doc_bm25 tools)
 ########################################
 
 # Path to the ChromaDB persistent directory created by the ingestion script.
 export BAMBOO_CHROMA_PATH="./chroma_db"
 
 # Name of the ChromaDB collection to query.
-export BAMBOO_CHROMA_COLLECTION="document_monitor_agent"
+# Each plugin has its own default collection name so multiple plugins can
+# coexist in the same ChromaDB directory:
+#   atlas_docs  — ATLAS / PanDA documentation  (askpanda_atlas default)
+#   epic_docs   — ePIC / EIC documentation     (askpanda_epic default)
+#   cgsim_docs  — CGSim / SimGrid documentation (cgsim default)
+# Set this explicitly to override the plugin default.
+export BAMBOO_CHROMA_COLLECTION="atlas_docs"
 
 ########################################
 # DEBUG / SAFETY
 ########################################
+
+# Fast-path routing: deterministic regex-based routing for task/job/pilot
+# questions (faster, no LLM planner call).  Set to 0 to always use the LLM
+# planner instead — useful when experimenting with new plugins like CGSim
+# where the fast-path rules are not yet tuned for the domain.
+# Options: 1 (on, default when unset) | 0 (off — use LLM planner)
+export BAMBOO_FAST_PATH="0"
 
 # Uncomment for verbose debug logs if needed
 # export ASKPANDA_DEBUG="1"
@@ -180,6 +202,27 @@ export BAMBOO_CHROMA_COLLECTION="document_monitor_agent"
 # export BAMBOO_FOLLOWUP_MAX_TOKENS="600"     # follow-up expansions (default: 600)
 
 echo "AskPanDA LLM environment variables loaded (example configuration)."
+
+########################################
+# HTTP SERVER (bamboo.entrypoints.http)
+########################################
+
+# Bind host for the HTTP MCP server (python -m bamboo.server_http).
+# 127.0.0.1  → localhost only (default, safe for local development)
+# 0.0.0.0    → all interfaces (required for remote clients)
+# export BAMBOO_HTTP_HOST="127.0.0.1"
+
+# Bind port (default: 8000)
+# export BAMBOO_HTTP_PORT="8000"
+
+# Uvicorn log level: debug | info | warning | error (default: info)
+# export BAMBOO_HTTP_LOG_LEVEL="info"
+
+# Bearer token auth — leave unset for open access (local/testbed use).
+# Option A: tokens file (one entry per line, format: client_id: token)
+# export BAMBOO_MCP_TOKENS_FILE="/etc/bamboo/tokens.txt"
+# Option B: inline comma-separated client_id:token pairs
+# export BAMBOO_MCP_TOKENS="alice:token-abc,bob:token-xyz"
 
 ########################################
 # STREAMLIT / HTTP CLIENT

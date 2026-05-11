@@ -60,6 +60,11 @@ _ACTIVE_FILES: list[tuple[str, str, str]] = [
         'version = "{old}"',
         'version = "{new}"',
     ),
+    (
+        "packages/askpanda_epic/pyproject.toml",
+        'version = "{old}"',
+        'version = "{new}"',
+    ),
     # Inactive — uncomment when these packages are versioned alongside atlas:
     # (
     #     "packages/askpanda_epic/pyproject.toml",

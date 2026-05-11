@@ -315,9 +315,11 @@ def _get_mcp_client(
 
 def _init_session() -> None:
     """Initialise all required session state keys on first run."""
+    _fp_env = os.getenv("BAMBOO_FAST_PATH", "1").strip().lower()
+    _fast_path_default: bool = _fp_env not in ("0", "off", "false")
     defaults: dict[str, Any] = {
         "messages": [],
-        "fast_path": True,
+        "fast_path": _fast_path_default,
         "tool_names": [],
         "display_name": "AskPanDA",
         "llm_info": "",
@@ -412,10 +414,16 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
         help="Leave empty if the server has no auth configured.",
     )
 
+    _plugin_options = ["atlas", "epic", "cgsim"]
+    _plugin_default_index = (
+        _plugin_options.index(_DEFAULT_PLUGIN)
+        if _DEFAULT_PLUGIN in _plugin_options
+        else 0
+    )
     plugin_id = st.sidebar.selectbox(
         "Experiment / plugin",
-        ["atlas", "epic"],
-        index=0 if _DEFAULT_PLUGIN == "atlas" else 1,
+        _plugin_options,
+        index=_plugin_default_index,
         help="Selects the ui_manifest tool and display name.",
     )
 

@@ -1,0 +1,12 @@
+# HTTP server dependencies for Bamboo MCP
+# Install with: pip install -r requirements-http.txt
+#
+# These are needed to run the Streamable HTTP transport:
+#   uvicorn bamboo.entrypoints.http:app --host 0.0.0.0 --port 8000
+# or:
+#   python -m bamboo.server_http
+#
+# starlette is a transitive dependency of the MCP SDK's streamable HTTP
+# transport — installing it explicitly pins a compatible version.
+uvicorn>=0.29
+starlette>=0.36

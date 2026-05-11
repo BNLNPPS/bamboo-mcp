@@ -26,6 +26,7 @@ import os
 import re
 from typing import Any, cast
 
+from bamboo.tools._sqlite_compat import ensure_sqlite_compat
 from bamboo.tools.base import text_content
 
 _DEFAULT_CHROMA_PATH = "./chroma_db"
@@ -173,6 +174,12 @@ class PandaDocBM25Tool:
             ``None`` on success, or a human-readable error string on failure.
         """
         # --- import guards ---------------------------------------------------
+        if not ensure_sqlite_compat():
+            return (
+                "System SQLite is too old for ChromaDB (need >= 3.35.0) and "
+                "pysqlite3-binary is not installed.  "
+                "Run: pip install pysqlite3-binary"
+            )
         try:
             import chromadb  # type: ignore[import-untyped]  # optional dep
         except ImportError:

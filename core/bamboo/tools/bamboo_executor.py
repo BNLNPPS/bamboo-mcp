@@ -61,6 +61,29 @@ _SYSTEM_LOG_ANALYSIS: str = (
     "- Keep it under ~10 bullet points.\n"
 )
 
+_SYSTEM_PILOT_SOURCE: str = (
+    "You are AskPanDA for the ATLAS experiment.\n"
+    "You have fetched the pilot3 source code from GitHub for the functions "
+    "named in a job failure traceback.\n"
+    "The evidence contains:\n"
+    "- exception: the exception string that was raised.\n"
+    "- traceback_frames: list of {pilot_path, func} dicts from the traceback.\n"
+    "- source_snippets: dict keyed by 'path::function' containing the extracted "
+    "source of each function.\n"
+    "- github_urls: dict keyed by pilot path with links to the GitHub source.\n"
+    "- missing_functions: functions named in the traceback but not found in source.\n"
+    "- fetch_errors: any GitHub fetch failures.\n"
+    "Rules:\n"
+    "- Explain exactly which line in the deepest frame caused the exception and why.\n"
+    "- Quote the relevant source lines from source_snippets.\n"
+    "- Describe whether this is a pilot infrastructure bug or a site configuration "
+    "issue (e.g. missing UID in passwd/LDAP vs. a code defect).\n"
+    "- If the fix is straightforward, suggest a concrete code change or workaround.\n"
+    "- Include GitHub source links from github_urls so developers can navigate directly.\n"
+    "- Do not include a Links section; links are appended automatically.\n"
+    "- Keep it focused — this is a developer-level diagnosis, not a user-facing summary.\n"
+)
+
 _SYSTEM_JOB: str = (
     "You are AskPanDA for the ATLAS experiment.\n"
     "Given a user's question and a JSON evidence object from BigPanDA, "
@@ -158,6 +181,83 @@ _SYSTEM_GENERIC: str = (
     "- Include relevant monitor URLs when available.\n"
     "- Be concise and prefer bullet points for multi-part answers.\n"
 )
+
+# ---------------------------------------------------------------------------
+# Per-plugin synthesis prompt overrides
+# Keys are ASKPANDA_PLUGIN values; missing keys fall back to the defaults above.
+# ---------------------------------------------------------------------------
+
+_SYSTEM_RAG_CGSIM: str = (
+    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
+    "CGSim is a SimGrid-based framework for simulating large-scale computing grids "
+    "such as the WLCG. It ingests historical PanDA job records for calibration and "
+    "is designed to simulate infrastructures managed by PanDA. Questions about the "
+    "PanDA/CGSim connection — such as how to simulate PanDA brokerage, how CGSim "
+    "uses PanDA job logs for calibration, or how to model ATLAS/PanDA workloads in "
+    "CGSim — are explicitly in scope and should be answered directly.\n"
+    "You are given a user question and relevant excerpts retrieved from the "
+    "CGSim / SimGrid / PanDA documentation knowledge base.\n"
+    "Rules:\n"
+    "- Base your answer primarily on the retrieved documentation excerpts.\n"
+    "- When the question involves both PanDA and CGSim, answer it directly — "
+    "do not deflect or suggest the topic is out of scope.\n"
+    "- If the excerpts fully answer the question, do not add unreferenced claims.\n"
+    "- If the excerpts are only partially relevant, supplement with your general "
+    "knowledge of SimGrid and PanDA but clearly distinguish documentation vs. "
+    "general knowledge.\n"
+    "- Be concise and precise. Prefer bullet points for multi-part answers.\n"
+    "- Do not fabricate CGSim-specific details (config keys, plugin method "
+    "signatures, version numbers) that are not in the excerpts.\n"
+)
+
+_SYSTEM_RAG_NO_CONTEXT_CGSIM: str = (
+    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
+    "CGSim ingests historical PanDA job records for calibration and is designed "
+    "to simulate WLCG-scale infrastructures managed by PanDA. Questions about "
+    "the PanDA/CGSim connection are explicitly in scope.\n"
+    "No relevant documentation excerpts were found for this question.\n"
+    "Rules:\n"
+    "- Do NOT make up CGSim-specific details such as config keys, plugin API "
+    "signatures, or version numbers.\n"
+    "- Tell the user that the documentation knowledge base did not contain "
+    "enough information to answer this question reliably.\n"
+    "- If you can offer general guidance based on SimGrid or PanDA principles, "
+    "do so clearly labelled as general knowledge rather than documentation.\n"
+    "- Suggest they consult the official CGSim or SimGrid documentation, or "
+    "ingest additional CGSim/PanDA integration documentation into the corpus.\n"
+)
+
+_SYSTEM_GENERIC_CGSIM: str = (
+    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
+    "CGSim ingests historical PanDA job records for calibration and is designed "
+    "to simulate WLCG-scale infrastructures managed by PanDA. Questions about "
+    "the PanDA/CGSim connection are explicitly in scope.\n"
+    "You have been given the results of one or more tool calls. Synthesise "
+    "a clear, concise answer to the user's question based solely on the "
+    "evidence provided.\n"
+    "Rules:\n"
+    "- Answer PanDA/CGSim correlation questions directly — do not deflect.\n"
+    "- Do not infer or fabricate values not present in the evidence.\n"
+    "- If the evidence shows errors or empty results, explain that clearly.\n"
+    "- Be concise and prefer bullet points for multi-part answers.\n"
+)
+
+_PLUGIN_RAG_PROMPTS: dict[str, tuple[str, str, str]] = {
+    # plugin_id -> (SYSTEM_RAG, SYSTEM_RAG_NO_CONTEXT, SYSTEM_GENERIC)
+    "cgsim": (_SYSTEM_RAG_CGSIM, _SYSTEM_RAG_NO_CONTEXT_CGSIM, _SYSTEM_GENERIC_CGSIM),
+}
+
+# Doc tool names that indicate a RAG retrieval path, keyed by plugin_id.
+_PLUGIN_DOC_TOOLS: dict[str, list[str]] = {
+    # Order: vector search first, BM25 second — must be stable for plan tool ordering.
+    "atlas": ["panda_doc_search", "panda_doc_bm25"],
+    "epic": ["panda_doc_search", "panda_doc_bm25"],
+    "cgsim": ["cgsim.doc_search", "cgsim.doc_bm25"],
+}
+_DEFAULT_DOC_TOOLS: list[str] = ["panda_doc_search", "panda_doc_bm25"]
 
 _SYSTEM_JOBS_QUERY: str = (
     "You are AskPanDA, an expert assistant for the PanDA workload management "
@@ -517,7 +617,7 @@ def unpack_tool_result(result: list[MCPContent]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _pick_synthesis_prompt(tool_names: list[str]) -> str:
+def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> str:
     """Select the most appropriate synthesis system prompt for a set of tools.
 
     The priority order mirrors the original hard-wired routing logic in
@@ -527,19 +627,28 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
     Args:
         tool_names: Names of the tools that were actually called during
             plan execution (in call order).
+        plugin_id: Active plugin identifier, used to select plugin-specific
+            RAG and generic prompts.  Defaults to ``"atlas"``.
 
     Returns:
         System prompt string for the LLM synthesis step.
     """
+    rag_sys, rag_no_ctx_sys, generic_sys = _PLUGIN_RAG_PROMPTS.get(
+        plugin_id,
+        (_SYSTEM_RAG, _SYSTEM_RAG_NO_CONTEXT, _SYSTEM_GENERIC),
+    )
+    doc_tools = _PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS)
+
     if "panda_log_analysis" in tool_names:
         return _SYSTEM_LOG_ANALYSIS
+    if "pilot_source_analysis" in tool_names:
+        return _SYSTEM_PILOT_SOURCE
     if "panda_job_status" in tool_names:
         return _SYSTEM_JOB
     if "panda_task_status" in tool_names:
         return _SYSTEM_TASK
     if "panda_server_health" in tool_names:
         return _SYSTEM_PANDA_HEALTH
-    # Combined site-health: both harvester and jobs query in the same plan.
     if "panda_harvester_workers" in tool_names and "panda_jobs_query" in tool_names:
         return _SYSTEM_SITE_HEALTH
     if "panda_harvester_workers" in tool_names:
@@ -548,9 +657,9 @@ def _pick_synthesis_prompt(tool_names: list[str]) -> str:
         return _SYSTEM_JOBS_QUERY
     if "cric_query" in tool_names:
         return _SYSTEM_CRIC_QUERY
-    if any(t in tool_names for t in ("panda_doc_search", "panda_doc_bm25")):
-        return _SYSTEM_RAG
-    return _SYSTEM_GENERIC
+    if any(t in tool_names for t in doc_tools):
+        return rag_sys
+    return generic_sys
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +699,7 @@ def _build_synthesis_prompt(
     question: str,
     errors: list[str],
     original_question: str | None = None,
+    plugin_id: str = "atlas",
 ) -> tuple[str, str]:
     """Build the system and user prompts for the synthesis LLM call.
 
@@ -610,12 +720,17 @@ def _build_synthesis_prompt(
         original_question: The user's actual phrasing if it differs from
             ``question`` (e.g. "Tell me more please").  When provided, the
             synthesis prompt uses expansion framing instead of answer framing.
+        plugin_id: Active plugin identifier for prompt selection.
 
     Returns:
         Tuple of ``(system_prompt, user_prompt)`` strings.
     """
-    rag_tools = {"panda_doc_search", "panda_doc_bm25"}
-    plan_is_rag = any(t in rag_tools for t in called_tool_names)
+    rag_sys, rag_no_ctx_sys, generic_sys = _PLUGIN_RAG_PROMPTS.get(
+        plugin_id,
+        (_SYSTEM_RAG, _SYSTEM_RAG_NO_CONTEXT, _SYSTEM_GENERIC),
+    )
+    doc_tools = _PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS)
+    plan_is_rag = any(t in doc_tools for t in called_tool_names)
     is_followup = (
         original_question is not None and original_question != question
     )
@@ -623,7 +738,7 @@ def _build_synthesis_prompt(
     if plan_is_rag:
         rag_context = "\n\n".join(evidence_parts)
         if rag_context:
-            system = _SYSTEM_RAG
+            system = rag_sys
             if is_followup:
                 user = (
                     f"The user asked a follow-up: {repr(original_question)}\n"
@@ -640,10 +755,10 @@ def _build_synthesis_prompt(
                     f"Retrieved documentation excerpts:\n{rag_context}\n"
                 )
         else:
-            system = _SYSTEM_RAG_NO_CONTEXT
+            system = rag_no_ctx_sys
             user = f"User question:\n{question}\n"
     else:
-        system = _pick_synthesis_prompt(called_tool_names)
+        system = _pick_synthesis_prompt(called_tool_names, plugin_id=plugin_id)
         evidence_block = "\n\n".join(evidence_parts)
         user = (
             f"User question:\n{question}\n\n"
@@ -922,6 +1037,7 @@ async def execute_plan(
     history: list[Message],
     include_raw: bool = False,
     original_question: str | None = None,
+    plugin_id: str = "atlas",
 ) -> list[MCPContent]:
     """Execute a validated Plan and return a synthesised answer.
 
@@ -941,6 +1057,7 @@ async def execute_plan(
         original_question: The user's actual phrasing when ``question`` has
             been reformulated (e.g. for content-free follow-ups).  Passed to
             :func:`_build_synthesis_prompt` to enable expansion framing.
+        plugin_id: Active plugin identifier for synthesis prompt selection.
 
     Returns:
         One-element ``list[MCPContent]`` with the synthesised text answer.
@@ -974,6 +1091,7 @@ async def execute_plan(
     system, user = _build_synthesis_prompt(
         called_tool_names, evidence_parts, question, errors,
         original_question=original_question,
+        plugin_id=plugin_id,
     )
 
     async with span(EVENT_SYNTHESIS, tool="bamboo_executor",
@@ -1042,6 +1160,29 @@ def _db_footnote(tool_names: list[str]) -> str:
     return ""
 
 
+def get_last_pilot_monitoring_evidence() -> dict[str, Any] | None:
+    """Return the stored panda_log_analysis evidence if the last failure was a pilot_monitoring_error.
+
+    Used by ``bamboo_answer._build_deterministic_plan`` to detect whether a
+    follow-up question should be routed to ``pilot_source_analysis`` rather
+    than the default job-status path.
+
+    Returns:
+        The ``evidence`` sub-dict from the last ``panda_log_analysis`` call
+        when ``failure_type == "pilot_monitoring_error"`` and a non-empty
+        ``log_excerpt`` is present; ``None`` otherwise.
+    """
+    stored = _last_evidence_store.get("panda_log_analysis", {})
+    evidence = stored.get("evidence", stored)
+    if (
+        isinstance(evidence, dict)
+        and evidence.get("failure_type") == "pilot_monitoring_error"
+        and evidence.get("log_excerpt")
+    ):
+        return evidence
+    return None
+
+
 def _compact_json(obj: Any, limit: int = 12000) -> str:
     """Compact JSON for prompts, bounded to ``limit`` characters.
 
@@ -1067,7 +1208,9 @@ __all__ = [
     "unpack_tool_result",
     "retrieve_rag_context",
     "_pick_synthesis_prompt",
+    "get_last_pilot_monitoring_evidence",
     "_SYSTEM_LOG_ANALYSIS",
+    "_SYSTEM_PILOT_SOURCE",
     "_SYSTEM_JOB",
     "_SYSTEM_TASK",
     "_SYSTEM_RAG",

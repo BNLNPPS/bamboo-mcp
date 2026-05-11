@@ -39,8 +39,10 @@ These tools search the PanDA/Bamboo documentation corpus for conceptual question
 
 | Tool | Document | Description |
 |---|---|---|
-| `panda_doc_search` | [panda_doc_search.md](panda_doc_search.md) | Vector similarity search (ChromaDB). |
-| `panda_doc_bm25` | [panda_doc_bm25.md](panda_doc_bm25.md) | BM25 keyword search over the same corpus. |
+| `panda_doc_search` | [panda_doc_search.md](panda_doc_search.md) | Vector similarity search (ChromaDB) — ATLAS / ePIC corpus. |
+| `panda_doc_bm25` | [panda_doc_bm25.md](panda_doc_bm25.md) | BM25 keyword search over the same ATLAS / ePIC corpus. |
+| `cgsim.doc_search` | [cgsim.doc_search.md](cgsim.doc_search.md) | Vector similarity search over the CGSim / SimGrid corpus. |
+| `cgsim.doc_bm25` | [cgsim.doc_bm25.md](cgsim.doc_bm25.md) | BM25 keyword search over the same CGSim corpus. |
 
 ---
 
@@ -95,6 +97,22 @@ The following tools have no ePIC equivalent and are absent from the `askpanda_ep
 | Tool tags | `"atlas"`, `"bigpanda"` | `"epic"`, `"eic"` |
 
 The log extraction, failure classification, stderr fetching, and evidence structure are identical in both packages.
+
+### `cgsim` plugin tools
+
+The `cgsim` package provides documentation search tools for the CGSim /
+SimGrid distributed computing simulator.  It does not include any operational
+data tools (task status, log analysis, etc.) — those are planned for future
+releases once the CGSim SQLite simulation output schema is finalised.
+
+| Entry point | Tool name | Description |
+|---|---|---|
+| `cgsim.doc_search` | `cgsim.doc_search` | Vector similarity search over CGSim / SimGrid documentation |
+| `cgsim.doc_bm25` | `cgsim.doc_bm25` | BM25 keyword search over the same corpus |
+| `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding (banner, accent `green`, display name) |
+
+Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs` and `ASKPANDA_PLUGIN=cgsim` when
+running a CGSim deployment.
 
 ### Entry point naming
 

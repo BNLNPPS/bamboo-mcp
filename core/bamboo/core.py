@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import inspect
 import asyncio
+import os
 from typing import Any, cast
 
 from mcp.server import Server
@@ -268,18 +269,30 @@ def create_server() -> Server:  # pylint: disable=too-complex  # noqa: C901
 
     @app.list_tools()
     async def list_tools() -> Any:
-        """Return the set of registered tools.
+        """Return the set of registered tools for the active plugin.
 
-        The MCP `Tool` representation may be a runtime model/class or a
-        TypedDict; handle both by inspecting the imported `Tool` symbol.
+        Core tools (those in the ``TOOLS`` dict) are always included.
+        Plugin tools discovered via Python entry points are filtered to only
+        those whose namespace matches the active plugin, as determined by the
+        ``ASKPANDA_PLUGIN`` environment variable (default: ``atlas``).
+
+        This keeps the tool list sent to the LLM minimal — an ATLAS user does
+        not pay token cost for CGSim tool descriptions, and vice versa.
 
         Returns:
             Union[List[Tool], ListToolsResult, List[Dict[str, Any]]]: The tool
             list in the appropriate shape for the MCP server/client contract.
         """
+        active_plugin: str = os.getenv("ASKPANDA_PLUGIN", "atlas").strip().lower()
+
         defs: list[dict[str, Any]] = [tool.get_definition() for tool in TOOLS.values()]
-        # Also include plugin-provided tools discovered via Python entry points.
-        defs.extend(_load_entrypoint_tool_definitions())
+
+        # Include only plugin tools whose namespace matches the active plugin.
+        for ep_def in _load_entrypoint_tool_definitions():
+            tool_name: str = ep_def.get("name", "")
+            namespace: str = tool_name.split(".", 1)[0] if "." in tool_name else ""
+            if namespace == active_plugin:
+                defs.append(ep_def)
 
         # If Tool is a real class/model, return Tool objects.
         if inspect.isclass(Tool):

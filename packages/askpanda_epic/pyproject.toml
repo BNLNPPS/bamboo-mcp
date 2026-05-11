@@ -1,6 +1,6 @@
 [project]
 name = "askpanda_epic"
-version = "0.0.1"
+version = "1.0.6"
 description = "ePIC / EIC AskPanDA plugin"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
 "epic.ui_manifest" = "askpanda_epic.ui_manifest:epic_ui_manifest_tool"
 "epic.doc_search" = "askpanda_epic.doc_rag:epic_doc_search_tool"
 "epic.doc_bm25" = "askpanda_epic.doc_bm25:epic_doc_bm25_tool"
+"epic.pilot_source_analysis" = "askpanda_epic.pilot_source_analysis:pilot_source_analysis_tool"
 
 [build-system]
 requires = ["setuptools>=69"]

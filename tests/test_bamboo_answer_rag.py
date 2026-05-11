@@ -41,8 +41,11 @@ def test_no_ids_returns_retrieve_plan():
     plan = _build_deterministic_plan("What is PanDA?", None, None)
     assert plan is not None
     assert plan.route == PlanRoute.RETRIEVE
-    assert plan.tool_calls[0].tool == "panda_doc_search"
-    assert plan.tool_calls[1].tool == "panda_doc_bm25"
+    tools = [tc.tool for tc in plan.tool_calls]
+    assert "panda_doc_search" in tools
+    assert "panda_doc_bm25" in tools
+    # Vector search must come before BM25 (stable ordering from _DEFAULT_DOC_TOOLS)
+    assert tools.index("panda_doc_search") < tools.index("panda_doc_bm25")
 
 
 def test_task_id_returns_task_plan():

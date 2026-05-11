@@ -33,7 +33,7 @@ Streamlit opens a browser tab at `http://localhost:8501`.
 | **Transport** | `http` — connect to a running uvicorn server. `stdio` — Streamlit spawns its own server subprocess. |
 | **Server URL** | MCP endpoint, e.g. `http://hostname:8000/mcp`. Reads `MCP_URL` env var as default. |
 | **Bearer token** | Optional auth token. Reads `MCP_BEARER_TOKEN` env var as default. Sent as `Authorization: Bearer <token>`. |
-| **Experiment / plugin** | Selects `atlas` or `epic`. Loads display name from `<plugin>.ui_manifest`. |
+| **Experiment / plugin** | Selects `atlas`, `epic`, or `cgsim`. Loads display name from `<plugin>.ui_manifest`. |
 | **Fast-path routing** | ON (default) — deterministic routing for task/job/pilot questions. OFF — all questions go through the LLM planner. |
 | **Reconnect** | Clears the cached MCP connection and reconnects. |
 | **Clear chat** | Clears conversation history. |
@@ -62,6 +62,8 @@ After each assistant response, four expandable panels appear below the answer:
 |---|---|
 | `MCP_URL` | Default server URL (overridden by the Server URL field) |
 | `MCP_BEARER_TOKEN` | Default bearer token (overridden by the Bearer token field) |
+| `ASKPANDA_PLUGIN` | Default plugin selection: `atlas`, `epic`, or `cgsim` (default: `atlas`) |
+| `BAMBOO_FAST_PATH` | `0`/`off`/`false` to start with fast-path routing disabled (default: on). Togglable at runtime via the sidebar or `/fastpath`. |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns in context (default: 10) |
 | `BAMBOO_MCP_CLIENT_TIMEOUT` | Timeout in seconds for MCP tool calls (default: 120). Raise for large task fetches. |
 

@@ -11,6 +11,7 @@ Use-cases:
 """
 from __future__ import annotations
 
+import os
 from typing import Any, cast
 
 from bamboo.prompts.templates import get_bamboo_system_prompt
@@ -123,7 +124,8 @@ class LLMPassthroughTool:
         max_tokens_int = int(max_tokens) if max_tokens is not None else None
 
         # Build message list.
-        sys_prompt = await get_bamboo_system_prompt()
+        plugin_id: str = os.getenv("ASKPANDA_PLUGIN", "atlas").strip().lower()
+        sys_prompt = await get_bamboo_system_prompt(plugin_id=plugin_id)
         sys_text = getattr(sys_prompt, "text", None) or getattr(sys_prompt, "content", None)
         if isinstance(sys_text, list):
             # Some MCP prompt objects use content items.

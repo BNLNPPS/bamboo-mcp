@@ -15,7 +15,7 @@ Environment variables:
   - LLM_DEFAULT_MODEL
   - ASKPANDA_LLM_DEFAULT_PROVIDER (also forwarded)
   - ASKPANDA_LLM_DEFAULT_MODEL (also forwarded)
-  - ASKPANDA_PLUGIN (default plugin id, e.g. "atlas")
+  - ASKPANDA_PLUGIN (default plugin id, e.g. "atlas", "epic", "cgsim")
 
 Examples:
   python3 interfaces/textual/chat.py --transport stdio
@@ -512,7 +512,10 @@ class BambooTui(App):
         self.help_text: str = "Enter to send • /help"
 
         self.debug_mode: bool = False
-        self.fast_path_mode: bool = True  # False → bypass deterministic intercepts, use LLM planner
+        # Initialise fast-path from env var; default True when unset.
+        # Set BAMBOO_FAST_PATH=0 (or off/false) to start with LLM planner.
+        _fp_env = os.getenv("BAMBOO_FAST_PATH", "1").strip().lower()
+        self.fast_path_mode: bool = _fp_env not in ("0", "off", "false")
         self._history: List[Dict[str, str]] = []  # In-memory chat history for multi-turn context
         self._mcp_ready: bool = False
         self._last_raw_result: Any = None  # Most recent raw MCP tool result for /json
@@ -732,6 +735,11 @@ class BambooTui(App):
                 expand=True,
             )
         )
+        n_lines = len(FALLBACK_BANNER)
+        target_height = n_lines + 4
+        banner_container = self.query_one("#banner")
+        banner_container.styles.height = target_height
+        banner_container.styles.min_height = target_height
 
     def action_scroll_up(self) -> None:
         """Scroll the transcript up by one page."""
@@ -881,13 +889,20 @@ class BambooTui(App):
                 help_text = manifest.get("help")
                 if isinstance(help_text, str) and help_text.strip():
                     self.help_text = help_text.strip()
-        except Exception:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            import sys as _sys
+            print(f"[bamboo] _load_banner failed for tool '{tool}': {exc}", file=_sys.stderr)
             self.banner_lines = FALLBACK_BANNER[:]
             self.display_name = f"AskPanDA – {self.plugin_id.upper()}"
             self.help_text = "Enter to send • /help"
 
     def _render_banner(self) -> None:
-        """Render the banner panel."""
+        """Render the banner panel and resize the container to fit.
+
+        Height formula: 2 (Panel borders) + 2 (CSS padding top+bottom) +
+        number of banner lines.  This ensures the bottom border is always
+        visible regardless of how tall the plugin's banner art is.
+        """
         if not self.banner_widget:
             return
         banner_text = "\n".join(self.banner_lines)
@@ -901,6 +916,12 @@ class BambooTui(App):
                 expand=True,
             )
         )
+        # Resize the outer Vertical container so the bottom border is never clipped.
+        n_lines = len(self.banner_lines)
+        target_height = n_lines + 4  # 2 Panel borders + 2 CSS padding rows
+        banner_container = self.query_one("#banner")
+        banner_container.styles.height = target_height
+        banner_container.styles.min_height = target_height
 
     async def on_key(self, event: Key) -> None:
         """Handle arrow-up/down for command history recall in the input field.

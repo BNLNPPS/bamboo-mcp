@@ -1,16 +1,18 @@
 # Bamboo
 
 **Bamboo** is a lightweight MCP-based runtime with a plugin architecture for
-AI-assisted scientific tools, targeting PanDA/ATLAS and ePIC/EIC workflows.
+AI-assisted scientific tools, targeting PanDA/ATLAS workflows, ePIC/EIC
+experiment operations, and CGSim distributed computing simulation.
 
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (April 2026):** core infrastructure is stable; the ePIC plugin is
-> newly added and expanding. The ATLAS plugin now includes `cric_query` for
-> natural-language queries against the CRIC Computing Resource Information
-> Catalogue. The current focus is multi-experiment support and orchestration
-> using tool families and planning for complex multi-step prompts.
+> **Status (April 2026):** core infrastructure is stable. The ATLAS plugin
+> includes `cric_query` for natural-language queries against the CRIC Computing
+> Resource Information Catalogue. The CGSim plugin is newly added, providing
+> documentation search (RAG + BM25) for the SimGrid-based CGSim distributed
+> computing simulator. The current focus is multi-experiment support and
+> orchestration using tool families and planning for complex multi-step prompts.
 
 ---
 
@@ -75,11 +77,20 @@ pip install -e ./packages/askpanda_atlas
 # ePIC / EIC plugin
 pip install -e ./packages/askpanda_epic
 
+# CGSim plugin
+pip install -e ./packages/cgsim
+
 # Root package — required for the TUI and Streamlit UI
 pip install -e .
 
 # TUI interface
 pip install -r requirements-textual.txt
+
+# Streamlit web UI
+pip install -r requirements-ui.txt
+
+# HTTP server (for shared/testbed deployments)
+pip install -r requirements-http.txt
 
 # RAG tools (ChromaDB vector search + BM25)
 pip install -r requirements-rag.txt
@@ -113,14 +124,51 @@ export LLM_DEFAULT_MODEL="mistral-large-latest"
 export MISTRAL_API_KEY="your-key-here"         # whichever provider you chose
 ```
 
-### 4. Launch the TUI
+### 4. Launch
+
+**Textual TUI (stdio — recommended for local use):**
 
 ```bash
-# Alternate screen (recommended)
-python interfaces/textual/chat.py --transport stdio --no-inline
+# From core/ directory
+cd core
+python ../interfaces/textual/chat.py --transport stdio --no-inline
+```
 
-# Inline — stays in terminal scrollback, easier copy/paste
-python interfaces/textual/chat.py --transport stdio --inline
+**Streamlit web UI:**
+
+```bash
+cd core
+streamlit run ../interfaces/streamlit/chat.py
+```
+
+**HTTP server (shared / testbed deployments):**
+
+```bash
+# Install deps first: pip install -r requirements-http.txt
+python -m bamboo.server_http --host 0.0.0.0 --port 8000
+# MCP endpoint: http://<host>:8000/mcp
+# Health check: curl http://<host>:8000/healthz
+```
+
+Then connect the TUI or Streamlit to the running server:
+
+```bash
+export MCP_URL="http://<host>:8000/mcp"
+python interfaces/textual/chat.py --transport http
+```
+
+See [`docs/http-server.md`](docs/http-server.md) for auth, firewall, and
+persistent-mode configuration.
+
+**Running in CGSim mode:**
+
+```bash
+export ASKPANDA_PLUGIN="cgsim"
+export BAMBOO_FAST_PATH="0"             # recommended for CGSim
+export BAMBOO_CHROMA_COLLECTION="cgsim_docs"
+export BAMBOO_CHROMA_PATH="/path/to/chromadb-cgsim"
+cd core
+python ../interfaces/textual/chat.py --transport stdio --no-inline
 ```
 
 Type any question and press Enter.
@@ -159,21 +207,30 @@ See [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) for ready-to-pa
 - **Plugin architecture** — experiment-specific logic lives in plugins, not in core
 - **Narrow waist** — every tool returns `list[MCPContent]`; the MCP wire format is JSON-RPC 2.0
 - **Context memory** — multi-turn chat history is maintained in the client and threaded into every LLM call
-- **Deterministic routing** — `bamboo_answer` selects tools by regex, not by LLM
+- **Configurable routing** — `bamboo_answer` uses deterministic fast-path routing by default; set `BAMBOO_FAST_PATH=0` to route all questions through the LLM planner (recommended for CGSim)
 
 ---
 
-## Inspecting the server
+## Inspecting and running the server
 
 ```bash
 # List available tools
 python -m bamboo tools list
 
-# Start the MCP server directly (stdio)
+# Start the MCP server (stdio — spawned automatically by TUI)
 python -m bamboo.server
 
-# Interactive inspection via MCP Inspector
+# Start the HTTP server (shared deployments)
+python -m bamboo.server_http --host 0.0.0.0 --port 8000
+
+# Health check (HTTP server only)
+curl http://localhost:8000/healthz   # → ok
+
+# Interactive inspection via MCP Inspector (stdio)
 npx @modelcontextprotocol/inspector python3 -m bamboo.server
+
+# Interactive inspection via MCP Inspector (HTTP)
+npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 ```
 
 ---
@@ -192,6 +249,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
+| [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — harvester timeseries, prompt logging, GDPR pseudonymisation |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
 | [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions for every tool and routing path |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
@@ -205,7 +263,7 @@ npx @modelcontextprotocol/inspector python3 -m bamboo.server
 | `askpanda_atlas` | Active | ATLAS / PanDA workflows |
 | `askpanda_epic` | Active | ePIC / EIC experiment at BNL |
 | `askpanda_verarubin` | Planned | Vera Rubin Observatory |
-| `cgsim` | Planned | SimGrid-based workflows (non-PanDA) |
+| `cgsim` | Active | CGSim / SimGrid distributed computing simulator |
 
 ### ATLAS plugin tools
 
@@ -237,3 +295,14 @@ point the doc tools at the ATLAS vector store.
 
 Set `BAMBOO_CHROMA_COLLECTION=epic_docs` when running the ePIC deployment to
 point the doc tools at the ePIC vector store.
+
+### CGSim plugin tools
+
+| Entry point | Tool name | Description |
+|---|---|---|
+| `cgsim.doc_search` | `cgsim.doc_search` | Vector similarity search over CGSim / SimGrid documentation |
+| `cgsim.doc_bm25` | `cgsim.doc_bm25` | BM25 keyword search over CGSim / SimGrid documentation |
+| `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding (banner, accent colour, display name) |
+
+Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs` and `ASKPANDA_PLUGIN=cgsim` when
+running the CGSim deployment to point the doc tools at the CGSim vector store.

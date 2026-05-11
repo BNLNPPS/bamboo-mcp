@@ -19,6 +19,7 @@ they do **not** drive routing decisions any more.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Sequence
 
@@ -26,7 +27,7 @@ from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
-from bamboo.tools.bamboo_executor import execute_plan
+from bamboo.tools.bamboo_executor import execute_plan, get_last_pilot_monitoring_evidence
 from bamboo.tools.planner import (
     bamboo_plan_tool,
     Plan,
@@ -46,8 +47,96 @@ _LOG_PATTERN = re.compile(
     r"(?i)(?:analyz?e|analys[ei]|why|fail|log|diagnos)[^.]{0,60}"
     r"\bjob[:#/\-\s]+([0-9]{4,12})\b"
 )
+# Matches questions that are conceptual/definitional in nature — the user is
+# asking what something *means* or *is*, not requesting fresh job/task data.
+# A job or task ID in the same question is incidental context from a prior
+# turn and must not trigger an operational tool call.
+# Examples that should match:
+#   "what does it mean that a job is looping?"
+#   "what is a looping job?"
+#   "what does stagein_timeout mean?"
+#   "can you explain what pilot error 1305 is?"
+#   "what's a reassigned job?"
+_CONCEPTUAL_RE: re.Pattern[str] = re.compile(
+    r"(?i)"
+    r"(?:"
+    # "what does it/that/this mean"
+    r"what\s+does\s+(?:it|that|this)\s+mean"
+    r"|"
+    # "what is a/an X" — requires indefinite article so "what is the status" is excluded
+    r"what\s+(?:is|are)\s+(?:a\s+|an\s+)"
+    r"|"
+    # "what's a/an X"
+    r"what'?s\s+(?:a\s+|an\s+)"
+    r"|"
+    # "can you explain/describe/define/tell me what"
+    r"can\s+you\s+(?:explain|describe|define|tell\s+me\s+what)"
+    r"|"
+    # "explain/define/describe what"
+    r"(?:explain|define|describe)\s+what"
+    r"|"
+    # "what does/do X mean" (X = one or more words up to ~30 chars)
+    r"what\s+do(?:es)?\s+\w[\w\s]{0,30}mean"
+    r")"
+)
 # Matches PanDA server liveness questions — \"is panda alive\", \"is the panda server ok\", etc.
 # Deliberately avoids matching task/job/site questions that mention \"panda\" incidentally.
+# Signal phrases that indicate the user wants source-level analysis of a
+# pilot_monitoring_error.  Only consulted after confirming the last tool call
+# was panda_log_analysis with failure_type='pilot_monitoring_error'.
+_PILOT_SOURCE_SIGNALS: frozenset[str] = frozenset({
+    "pilot code",
+    "pilot source",
+    "source code",
+    "show me the source",
+    "show the source",
+    "the source",
+    "why did the pilot",
+    "why the pilot",
+    "pilot raise",
+    "pilot threw",
+    "pilot exception",
+    "fix the pilot",
+    "fix this",
+    "can it be fixed",
+    "can this be fixed",
+    "how to fix",
+    "patch",
+    "workaround",
+    "the function",
+    "that function",
+    "the code",
+    "that code",
+    "deeper",
+    "deep dive",
+    "deep-dive",
+    "drill down",
+    "more detail",
+    "more details",
+    "list_processes",
+    "getpwuid",
+    "psutils",
+})
+
+
+def _is_pilot_source_request(question: str) -> bool:
+    """Return True if the question is asking for pilot source-level analysis.
+
+    Only meaningful when the last panda_log_analysis call returned
+    failure_type='pilot_monitoring_error'.  The function is intentionally
+    permissive — it is always guarded by the evidence check so false positives
+    cannot misfire when there is no prior pilot_monitoring_error in context.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        True if the question contains a pilot-source signal phrase.
+    """
+    q = question.lower()
+    return any(sig in q for sig in _PILOT_SOURCE_SIGNALS)
+
+
 _PANDA_HEALTH_RE: re.Pattern[str] = re.compile(
     r"(?i)"
     r"(?:"
@@ -186,6 +275,24 @@ def _is_log_analysis_request(text: str) -> bool:
         True if analysis keywords are present alongside a job reference.
     """
     return bool(_LOG_PATTERN.search(text or ""))
+
+
+def _is_conceptual_question(text: str) -> bool:
+    """Return True if the question is definitional/conceptual rather than operational.
+
+    A conceptual question asks what something *means* or *is* — e.g. "what
+    does it mean that a job is looping?" or "what is a stagein_timeout?".
+    Any job or task ID present in the question is incidental context from a
+    prior turn and must not cause the router to call an operational tool
+    (``panda_job_status``, ``panda_log_analysis``, etc.).
+
+    Args:
+        text: User question text.
+
+    Returns:
+        True if the question matches a definitional/conceptual phrasing.
+    """
+    return bool(_CONCEPTUAL_RE.search(text or ""))
 
 
 def _extract_history(messages: list[Message], current_question: str) -> list[Message]:
@@ -910,6 +1017,7 @@ def _build_deterministic_plan(
     question: str,
     task_id: int | None,
     job_id: int | None,
+    plugin_id: str = "atlas",
 ) -> "Plan | None":
     """Build a Plan without an LLM call for unambiguous routing cases.
 
@@ -917,23 +1025,54 @@ def _build_deterministic_plan(
     the question is ambiguous enough to need the LLM planner.
 
     Fast-path rules (in priority order):
-    1. Job ID + analysis keywords → ``panda_log_analysis``       FAST_PATH
-    2. Job ID (no task ID)        → ``panda_job_status``         FAST_PATH
-    3. Task ID                    → ``panda_task_status``         FAST_PATH
-    4. Pilot/Harvester signals    → ``panda_harvester_workers``  FAST_PATH
-    5. Jobs DB signals (no IDs)   → ``panda_jobs_query``         FAST_PATH
-    6. No IDs                     → ``panda_doc_search`` + ``panda_doc_bm25`` RETRIEVE
+    1b. Job ID + pilot-source signals + stored pilot_monitoring_error → ``pilot_source_analysis`` FAST_PATH
+    1. Job ID + analysis keywords   → ``panda_log_analysis``       FAST_PATH
+    2. Job ID (no task ID)          → ``panda_job_status``         FAST_PATH
+    3. Task ID                      → ``panda_task_status``        FAST_PATH
+    4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
+    5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
+    6. No IDs                       → doc_search + doc_bm25        RETRIEVE
 
     Args:
         question: User question text.
         task_id: Extracted task ID, or None.
         job_id: Extracted job ID, or None.
+        plugin_id: Active plugin identifier; determines which doc tools to use
+            for the fallback RAG retrieval route.
 
     Returns:
         A validated :class:`~bamboo.tools.planner.Plan`, or ``None`` to
         signal that the LLM planner should be used instead.
     """
     reuse = ReusePolicy()
+
+    # Rule 1b: follow-up pilot source analysis — checked FIRST.
+    # If the last panda_log_analysis returned pilot_monitoring_error and the
+    # question contains pilot-source signals, route to pilot_source_analysis
+    # using the stored log_excerpt.  This must come before rule 1 (log analysis)
+    # because questions like "Why did the pilot code raise that? job 7099503721"
+    # match _is_log_analysis_request ("why" + job ID) and would otherwise
+    # re-run panda_log_analysis instead of fetching the pilot source.
+    if job_id and _is_pilot_source_request(question):
+        monitoring_evidence = get_last_pilot_monitoring_evidence()
+        if monitoring_evidence is not None:
+            return Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=1.0,
+                tool_calls=[ToolCall(
+                    tool="pilot_source_analysis",
+                    arguments={
+                        "job_id": job_id,
+                        "log_excerpt": monitoring_evidence.get("log_excerpt", ""),
+                        "pilot_error_diag": monitoring_evidence.get("piloterrordiag", ""),
+                    },
+                )],
+                reuse_policy=reuse,
+                explain=(
+                    "Deterministic: job ID + pilot-source keywords + prior "
+                    "pilot_monitoring_error evidence → pilot source analysis."
+                ),
+            )
 
     if job_id and _is_log_analysis_request(question):
         return Plan(
@@ -948,16 +1087,21 @@ def _build_deterministic_plan(
         )
 
     if job_id and not task_id:
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_job_status",
-                arguments={"job_id": job_id, "query": question},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: job ID, no task ID → job status.",
-        )
+        # Guard: if the question is conceptual/definitional ("what does X mean",
+        # "what is a looping job") the job ID is incidental context from a prior
+        # turn.  Fall through to the LLM planner so it can answer from docs/RAG
+        # instead of fetching fresh (and irrelevant) job status data.
+        if not _is_conceptual_question(question):
+            return Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=1.0,
+                tool_calls=[ToolCall(
+                    tool="panda_job_status",
+                    arguments={"job_id": job_id, "query": question},
+                )],
+                reuse_policy=reuse,
+                explain="Deterministic: job ID, no task ID → job status.",
+            )
 
     if task_id:
         return Plan(
@@ -1026,21 +1170,25 @@ def _build_deterministic_plan(
     # No IDs: general knowledge / documentation question → always retrieve.
     # top_k=5 for both to keep synthesis prompt within ~2500 input tokens,
     # well clear of the 30s TUI timeout even on follow-up turns with history.
+    from bamboo.tools.bamboo_executor import _PLUGIN_DOC_TOOLS, _DEFAULT_DOC_TOOLS  # noqa: PLC0415
+    _doc_tools = list(_PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS))
+    doc_search = _doc_tools[0] if _doc_tools else "panda_doc_search"
+    doc_bm25 = _doc_tools[1] if len(_doc_tools) > 1 else "panda_doc_bm25"
     return Plan(
         route=PlanRoute.RETRIEVE,
         confidence=1.0,
         tool_calls=[
             ToolCall(
-                tool="panda_doc_search",
+                tool=doc_search,
                 arguments={"query": question, "top_k": 5},
             ),
             ToolCall(
-                tool="panda_doc_bm25",
+                tool=doc_bm25,
                 arguments={"query": question, "top_k": 5},
             ),
         ],
         reuse_policy=reuse,
-        explain="Deterministic: no task/job ID → RAG retrieval.",
+        explain=f"Deterministic: no task/job ID → RAG retrieval ({doc_search}, {doc_bm25}).",
     )
 
 
@@ -1717,6 +1865,7 @@ class BambooAnswerTool:
             raise ValueError("Either 'question' or non-empty 'messages' must be provided.")
 
         try:
+            plugin_id: str = os.getenv("ASKPANDA_PLUGIN", "atlas").strip().lower()
             history = _extract_history(messages, question) if messages else []
             return await self._route(
                 question=question,
@@ -1725,6 +1874,7 @@ class BambooAnswerTool:
                 bypass_fast_path=bypass_fast_path,
                 include_jobs=include_jobs,
                 include_raw=include_raw,
+                plugin_id=plugin_id,
             )
         except LLMError as exc:
             return text_content(_friendly_llm_error(exc))
@@ -1737,6 +1887,7 @@ class BambooAnswerTool:
         bypass_fast_path: bool,
         include_jobs: bool,
         include_raw: bool,
+        plugin_id: str = "atlas",
     ) -> list[MCPContent]:
         """Route the question to the appropriate synthesis path.
 
@@ -1752,6 +1903,8 @@ class BambooAnswerTool:
                 questions that would normally be short-circuited.
             include_jobs: Passed as a hint to the planner for task-status calls.
             include_raw: Passed as a hint to the planner for error formatting.
+            plugin_id: Active plugin identifier for doc tool selection and
+                synthesis prompt.
 
         Returns:
             List[MCPContent]: One-element MCP text content list.
@@ -1787,12 +1940,13 @@ class BambooAnswerTool:
         # Skipped when bypass_fast_path is set so the LLM planner handles all
         # routing — useful for testing planner coverage.
         if not bypass_fast_path:
-            fast_plan = _build_deterministic_plan(rag_query, task_id, job_id)
+            fast_plan = _build_deterministic_plan(rag_query, task_id, job_id, plugin_id=plugin_id)
             if fast_plan is not None:
                 original_question = question if rag_query != question else None
                 return await execute_plan(
                     fast_plan, rag_query, history,
                     original_question=original_question,
+                    plugin_id=plugin_id,
                 )
 
         # LLM planner fallback for ambiguous or multi-step questions.
@@ -1828,9 +1982,13 @@ __all__ = [
     "_build_clarification_response",
     "_is_jobs_db_question",
     "_is_cric_question",
+    "_is_conceptual_question",
+    "_CONCEPTUAL_RE",
     "_is_pilot_question",
     "_is_site_health_question",
     "_is_panda_health_question",
+    "_is_pilot_source_request",
+    "_PILOT_SOURCE_SIGNALS",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_run_db_query_fast_path",
