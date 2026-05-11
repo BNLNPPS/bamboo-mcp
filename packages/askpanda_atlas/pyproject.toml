@@ -1,6 +1,6 @@
 [project]
 name = "askpanda_atlas"
-version = "1.0.7"
+version = "1.0.6"
 requires-python = ">=3.10"
 dependencies = [
   "requests>=2.0",

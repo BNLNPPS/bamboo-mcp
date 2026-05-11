@@ -8,6 +8,17 @@ All notable changes to Bamboo are documented here.
 
 ---
 
+## 2026-05-11
+
+### Fixed
+- ChromaDB RAG tools (panda_doc_search, panda_doc_bm25, and their ePIC and
+  CGSim equivalents) now work on systems with SQLite < 3.35.0, such as CERN
+  lxplus (AlmaLinux 9 / RHEL 9). A new compatibility shim
+  (bamboo/tools/_sqlite_compat.py) monkey-patches pysqlite3-binary into
+  sys.modules before ChromaDB is imported when the system SQLite is too old.
+  The fix is a no-op on systems where the system SQLite is already sufficient.
+  Add pysqlite3-binary to your environment: pip install -r requirements-rag.txt
+
 ## 2026-04-29
 
 ### Added
