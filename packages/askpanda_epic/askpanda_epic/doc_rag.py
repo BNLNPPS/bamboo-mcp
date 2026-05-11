@@ -25,6 +25,7 @@ import os
 from typing import Any
 
 from bamboo.tools.doc_rag import PandaDocSearchTool  # type: ignore[import-untyped]
+from bamboo.tools._sqlite_compat import ensure_sqlite_compat  # type: ignore[import-untyped]
 
 _DEFAULT_CHROMA_PATH = "./chroma_db"
 _EPIC_DEFAULT_COLLECTION = "epic_docs"
@@ -86,6 +87,12 @@ class EpicDocSearchTool(PandaDocSearchTool):
         if self._collection is not None:
             return None
 
+        if not ensure_sqlite_compat():
+            return (
+                "System SQLite is too old for ChromaDB (need >= 3.35.0) and "
+                "pysqlite3-binary is not installed.  "
+                "Run: pip install pysqlite3-binary"
+            )
         try:
             import chromadb  # type: ignore[import-untyped]
         except ImportError:

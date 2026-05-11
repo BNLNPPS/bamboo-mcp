@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from bamboo.tools._sqlite_compat import ensure_sqlite_compat
 from bamboo.tools.base import text_content
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,12 @@ class PandaDocSearchTool:
             return None
 
         # --- import guard ---------------------------------------------------
+        if not ensure_sqlite_compat():
+            return (
+                "System SQLite is too old for ChromaDB (need >= 3.35.0) and "
+                "pysqlite3-binary is not installed.  "
+                "Run: pip install pysqlite3-binary"
+            )
         try:
             import chromadb  # type: ignore[import-untyped]  # optional dep
         except ImportError:

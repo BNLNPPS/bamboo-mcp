@@ -3,3 +3,7 @@
 # Install with: pip install -r requirements-rag.txt
 chromadb>=0.4.0
 rank_bm25>=0.2.2
+# Bundled modern SQLite for systems where the OS ships SQLite < 3.35.0
+# (e.g. RHEL 8/9, AlmaLinux 9, CERN lxplus).  ChromaDB requires >= 3.35.0.
+# Safe to install on all platforms — the shim is only activated when needed.
+pysqlite3-binary>=0.5.3
