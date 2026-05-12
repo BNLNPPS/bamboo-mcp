@@ -497,15 +497,15 @@ Example queries:
 - "How many jobs failed at BNL? (filter _queue ILIKE 'BNL%')" →
   SELECT COUNT(*) AS n FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed' LIMIT 500
 - "What are the most common job failures at BNL?" →
-  SELECT piloterrorcode, exeerrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+  SELECT piloterrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
   FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed'
-  AND (piloterrorcode != 0 OR exeerrorcode != 0)
-  GROUP BY piloterrorcode, exeerrorcode ORDER BY n DESC LIMIT 10
+  AND piloterrorcode != 0
+  GROUP BY piloterrorcode ORDER BY n DESC LIMIT 10
 - "What are the top errors at SWT2_CPB?" →
-  SELECT piloterrorcode, exeerrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+  SELECT piloterrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
   FROM jobs WHERE _queue ILIKE 'SWT2_CPB%' AND jobstatus = 'failed'
-  AND (piloterrorcode != 0 OR exeerrorcode != 0)
-  GROUP BY piloterrorcode, exeerrorcode ORDER BY n DESC LIMIT 10
+  AND piloterrorcode != 0
+  GROUP BY piloterrorcode ORDER BY n DESC LIMIT 10
 - "Which error codes affect the most jobs across all sites?" →
   SELECT error, codename, codeval, SUM(count) AS total_count, MIN(diag) AS diag FROM errors_by_count GROUP BY error, codename, codeval ORDER BY total_count DESC LIMIT 10
 - "Which queues have the most failed jobs?" →
