@@ -8,6 +8,48 @@ All notable changes to Bamboo are documented here.
 
 ---
 
+## 2026-05-12
+
+### Fixed
+
+- **`panda_jobs_query`: site-scoped queries returned 0 rows (bamboo_answer.py,
+  jobs_query_impl.py, jobs_query_schema.py).** Two bugs combined to produce
+  empty results for any site-scoped jobs query such as "Show me 10 jobs at BNL
+  that failed with pilot error code 1324".
+
+  Bug 1 (bamboo_answer.py): the solo `panda_jobs_query` fast-path never
+  extracted the site name from the question and never populated the `queue`
+  argument, even though the combined site-health path (panda_harvester_workers
+  + panda_jobs_query) already did this correctly. The fix calls
+  `_extract_site_from_question()` and sets `jobs_args["queue"] = site`
+  in the fast-path, mirroring the site-health path.
+
+  Bug 2 (jobs_query_schema.py): the SQL system prompt examples used exact
+  equality (`_queue = 'BNL'`) for site filtering, but the actual `_queue`
+  column values are full queue names such as `BNL_ATLAS_TIER1` and
+  `BNL_ATLAS_TIER1-condor`. The LLM faithfully followed the examples and
+  generated non-matching WHERE clauses. Fixed by updating all prompt examples
+  and rules to use `ILIKE 'SITE%'` prefix matching, and by changing the queue
+  hint appended in `jobs_query_impl.call()` from `(focus on queue: SITE)` to
+  the explicit SQL instruction `(filter _queue ILIKE 'SITE%')`.
+
+- **`panda_jobs_query`: site error counts were under-reported when querying
+  `errors_by_count` for sites with multiple queues (jobs_query_schema.py,
+  docs/jobs-database.md).** `errors_by_count.count` is a per-queue value
+  (one row per error code per ingestion queue, not per site). For sites like
+  BNL that have multiple queues, querying `ORDER BY count DESC` returned only
+  the highest single-queue row rather than the site total. For example, "most
+  common failures at BNL" reported pilot:1150 as 7 jobs while a direct
+  `jobs`-table query for the same error at BNL returned 10 rows.
+
+  Fixed by adding an explicit rule and worked example to the SQL system prompt
+  requiring `SUM(count) GROUP BY error, codename, codeval` whenever
+  `errors_by_count` is filtered by site with ILIKE, and by updating the
+  `count` column description in the fallback schema to document the per-queue
+  semantics. The docs example for "top errors at a site" is updated to match.
+
+---
+
 ## 2026-05-11
 
 ### Fixed

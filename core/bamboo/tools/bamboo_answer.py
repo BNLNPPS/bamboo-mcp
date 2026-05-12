@@ -1156,12 +1156,16 @@ def _build_deterministic_plan(
 
     # Jobs DB fast-path: no IDs but the question is about live job stats.
     if _is_jobs_db_question(question):
+        jobs_args: dict[str, str] = {"question": question}
+        site = _extract_site_from_question(question)
+        if site:
+            jobs_args["queue"] = site
         return Plan(
             route=PlanRoute.FAST_PATH,
             confidence=0.9,
             tool_calls=[ToolCall(
                 tool="panda_jobs_query",
-                arguments={"question": question},
+                arguments=jobs_args,
             )],
             reuse_policy=reuse,
             explain="Deterministic: jobs DB signals, no task/job ID → jobs query.",

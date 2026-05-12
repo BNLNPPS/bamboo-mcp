@@ -73,6 +73,37 @@ def test_job_id_with_analysis_returns_log_plan():
     assert plan.tool_calls[0].tool == "panda_log_analysis"
 
 
+def test_jobs_db_question_sets_queue_when_site_present():
+    """Jobs-DB fast-path includes 'queue' argument when site is in the question.
+
+    Regression test for the bug where the solo panda_jobs_query fast-path
+    omitted the 'queue' argument even when a site name was present, causing
+    the LLM to generate ``_queue = 'BNL'`` (exact match) instead of
+    ``_queue ILIKE 'BNL%'``, which returned 0 rows.
+    """
+    plan = _build_deterministic_plan(
+        "Show me 10 jobs at BNL that failed with pilot error code 1324", None, None
+    )
+    assert plan is not None
+    assert plan.route == PlanRoute.FAST_PATH
+    assert plan.tool_calls[0].tool == "panda_jobs_query"
+    args = plan.tool_calls[0].arguments
+    assert "queue" in args, "queue argument must be set when site is in question"
+    assert args["queue"] == "BNL"
+
+
+def test_jobs_db_question_no_site_omits_queue():
+    """Jobs-DB fast-path omits 'queue' argument when no site is detectable."""
+    plan = _build_deterministic_plan(
+        "How many failed jobs are there right now?", None, None
+    )
+    assert plan is not None
+    assert plan.route == PlanRoute.FAST_PATH
+    assert plan.tool_calls[0].tool == "panda_jobs_query"
+    args = plan.tool_calls[0].arguments
+    assert "queue" not in args, "queue must be absent when no site is in the question"
+
+
 # ---------------------------------------------------------------------------
 # execute_plan boundary tests
 # ---------------------------------------------------------------------------
