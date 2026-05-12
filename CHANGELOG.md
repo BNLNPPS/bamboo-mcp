@@ -57,6 +57,15 @@ All notable changes to Bamboo are documented here.
   `"job failures"`, `"job error"`, `"job errors"`, `"common failure"`, and
   `"common error"` to both `_JOBS_DB_SIGNALS` and `_JOBS_DB_SPECIFIC_SIGNALS`.
 
+- **`cric_query`: copytool follow-up questions routed to RAG instead of CRIC
+  (bamboo_answer.py).** Questions like "Are any other sites using object
+  stores?" or "Which sites use rucio?" were not recognised as CRIC questions
+  because copytool names and object-store vocabulary were absent from
+  `_CRIC_SIGNALS`. Added `"objectstore"`, `"object store"`, `"gfalcopy"`,
+  `"rucio copytool"`, `"using rucio"`, `"using objectstore"`, and
+  `"using gfal"` to `_CRIC_SIGNALS` so these route directly to `cric_query`
+  without depending on the narrower follow-up regex.
+
 ---
 
 ## 2026-05-11

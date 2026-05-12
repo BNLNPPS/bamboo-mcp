@@ -645,6 +645,14 @@ _CRIC_SIGNALS: frozenset[str] = frozenset({
     "corecount",
     "cpu slots",
     "brokeroff",
+    # Copytool names and object-store vocabulary — only appear in CRIC context
+    "objectstore",
+    "object store",
+    "gfalcopy",
+    "rucio copytool",
+    "using rucio",
+    "using objectstore",
+    "using gfal",
     # Unambiguous list-all-queues phrasing — no status/site filter,
     # clearly asking for the full queue inventory from CRIC.
     "all queues",
