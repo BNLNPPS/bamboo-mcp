@@ -33,20 +33,21 @@ All notable changes to Bamboo are documented here.
   hint appended in `jobs_query_impl.call()` from `(focus on queue: SITE)` to
   the explicit SQL instruction `(filter _queue ILIKE 'SITE%')`.
 
-- **`panda_jobs_query`: site error counts were under-reported when querying
-  `errors_by_count` for sites with multiple queues (jobs_query_schema.py,
-  docs/jobs-database.md).** `errors_by_count.count` is a per-queue value
-  (one row per error code per ingestion queue, not per site). For sites like
-  BNL that have multiple queues, querying `ORDER BY count DESC` returned only
-  the highest single-queue row rather than the site total. For example, "most
-  common failures at BNL" reported pilot:1150 as 7 jobs while a direct
-  `jobs`-table query for the same error at BNL returned 10 rows.
+- **`panda_jobs_query`: site error counts were wrong when querying
+  `errors_by_count` for site-scoped questions (jobs_query_schema.py,
+  docs/jobs-database.md).** `errors_by_count` is populated from a separate
+  BigPanDA summary endpoint and its `count` values do not match `COUNT(*)`
+  on the `jobs` table. For example, "most common failures at BNL" via
+  `errors_by_count` reported pilot:1150 as 7 jobs, while aggregating the
+  `jobs` table directly found 42.
 
-  Fixed by adding an explicit rule and worked example to the SQL system prompt
-  requiring `SUM(count) GROUP BY error, codename, codeval` whenever
-  `errors_by_count` is filtered by site with ILIKE, and by updating the
-  `count` column description in the fallback schema to document the per-queue
-  semantics. The docs example for "top errors at a site" is updated to match.
+  Fixed by updating the SQL system prompt to always use `COUNT(*) GROUP BY`
+  on the `jobs` table for site-scoped failure frequency questions, and to
+  reserve `errors_by_count` only for global cross-queue rankings (no site
+  filter). New example queries for "most common failures at SITE" and "top
+  errors at SITE" now use `jobs` with `GROUP BY piloterrorcode, exeerrorcode`.
+  The fallback schema description for `errors_by_count.count` is updated to
+  document the separate-source semantics.
 
 - **`panda_jobs_query`: "most common failures" questions routed to RAG instead
   of the jobs DB (bamboo_answer.py).** Phrases like "most common job failures

@@ -422,7 +422,7 @@ def _build_context_uncached(tables: list[str]) -> str:
             ("codename", "VARCHAR", "Symbolic error name."),
             ("codeval", "INTEGER", "Numeric error code."),
             ("diag", "VARCHAR", "Diagnostic string."),
-            ("count", "INTEGER", "Number of jobs with this error IN THIS QUEUE ONLY. Use SUM(count) GROUP BY error,codename,codeval when filtering by site with ILIKE."),
+            ("count", "INTEGER", "Jobs affected IN THIS QUEUE from a separate BigPanDA summary endpoint. Do NOT use for site-scoped frequency questions — use COUNT(*) on the jobs table instead."),
             ("example_pandaid", "BIGINT", "A representative job with this error."),
             ("_queue", "VARCHAR", "Source queue (full queue name, e.g. 'BNL_ATLAS_TIER1'). Use ILIKE 'SITE%' for site-level filtering."),
             ("_fetched_utc", "TIMESTAMP", "When this snapshot was fetched."),
@@ -471,13 +471,15 @@ Rules:
   When the question says "(filter _queue ILIKE 'SITE%')", use that pattern exactly.
   Otherwise use ILIKE with a '%' wildcard suffix: _queue ILIKE 'BNL%'.
   Never use exact equality (= 'BNL') for site-level filtering.
-- IMPORTANT: errors_by_count.count is a per-queue count (one row per error per
-  queue, not per site). A single site like BNL has multiple queues
-  (BNL_ATLAS_TIER1, BNL_ATLAS_TIER1-condor, etc.), so when asking for the top
-  errors at a site you MUST aggregate: SUM(count) GROUP BY error, codename,
-  codeval. Never use bare "count" or ORDER BY count when a site filter with ILIKE
-  is applied — that returns only the highest single-queue row, not the site total.
-  Use MIN(diag) to pick a representative diagnostic string for each error group.
+- IMPORTANT: for "most common failures / top errors" questions scoped to a
+  site, ALWAYS query the jobs table directly using COUNT(*) GROUP BY on the
+  error code columns (piloterrorcode, exeerrorcode, transexitcode). Never use
+  errors_by_count for site-scoped frequency questions — its counts come from a
+  different data source and will not match the jobs table. Only use
+  errors_by_count for global (no site filter) cross-queue rankings.
+- IMPORTANT: errors_by_count.count is a per-queue value from a separate
+  BigPanDA summary endpoint, not derived from the jobs rows. It may differ
+  from COUNT(*) on the jobs table.
 - The database contains jobs from approximately the last hour per queue.
 - Use _fetched_utc for freshness checks; use statechangetime for job state history.
 - jobstatus values: defined, waiting, sent, starting, running, holding, merging,
@@ -495,9 +497,17 @@ Example queries:
 - "How many jobs failed at BNL? (filter _queue ILIKE 'BNL%')" →
   SELECT COUNT(*) AS n FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed' LIMIT 500
 - "What are the most common job failures at BNL?" →
-  SELECT error, codename, codeval, SUM(count) AS total_count, MIN(diag) AS diag FROM errors_by_count WHERE _queue ILIKE 'BNL%' GROUP BY error, codename, codeval ORDER BY total_count DESC LIMIT 10
+  SELECT piloterrorcode, exeerrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+  FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed'
+  AND (piloterrorcode != 0 OR exeerrorcode != 0)
+  GROUP BY piloterrorcode, exeerrorcode ORDER BY n DESC LIMIT 10
 - "What are the top errors at SWT2_CPB?" →
-  SELECT error, codename, codeval, SUM(count) AS total_count, MIN(diag) AS diag FROM errors_by_count WHERE _queue ILIKE 'SWT2_CPB%' GROUP BY error, codename, codeval ORDER BY total_count DESC LIMIT 10
+  SELECT piloterrorcode, exeerrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+  FROM jobs WHERE _queue ILIKE 'SWT2_CPB%' AND jobstatus = 'failed'
+  AND (piloterrorcode != 0 OR exeerrorcode != 0)
+  GROUP BY piloterrorcode, exeerrorcode ORDER BY n DESC LIMIT 10
+- "Which error codes affect the most jobs across all sites?" →
+  SELECT error, codename, codeval, SUM(count) AS total_count, MIN(diag) AS diag FROM errors_by_count GROUP BY error, codename, codeval ORDER BY total_count DESC LIMIT 10
 - "Which queues have the most failed jobs?" →
   SELECT _queue, COUNT(*) AS failed_jobs FROM jobs WHERE jobstatus = 'failed' GROUP BY _queue ORDER BY failed_jobs DESC LIMIT 500
 - "Which jobs are running at BNL?" →
