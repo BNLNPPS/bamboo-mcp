@@ -48,6 +48,14 @@ All notable changes to Bamboo are documented here.
   `count` column description in the fallback schema to document the per-queue
   semantics. The docs example for "top errors at a site" is updated to match.
 
+- **`panda_jobs_query`: "most common failures" questions routed to RAG instead
+  of the jobs DB (bamboo_answer.py).** Phrases like "most common job failures
+  at BNL" and "top failures at AGLT2" were not in `_JOBS_DB_SIGNALS` so they
+  fell through to RAG retrieval, returning documentation text instead of live
+  DB results. Added `"failures at"`, `"top failures"`, `"job failure"`,
+  `"job failures"`, `"job error"`, `"job errors"`, `"common failure"`, and
+  `"common error"` to both `_JOBS_DB_SIGNALS` and `_JOBS_DB_SPECIFIC_SIGNALS`.
+
 ---
 
 ## 2026-05-11

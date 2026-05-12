@@ -531,6 +531,14 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "starting at",
     "errors at",
     "top errors",
+    "failures at",
+    "top failures",
+    "job failure",
+    "job failures",
+    "job error",
+    "job errors",
+    "common failure",
+    "common error",
     "job status at",
     "which jobs",
     "jobs at",
@@ -589,6 +597,10 @@ _JOBS_DB_SPECIFIC_SIGNALS: frozenset[str] = frozenset({
     "each status",
     "by status",
     "status breakdown",
+    "failures at",
+    "top failures",
+    "common failure",
+    "common error",
 })
 
 
