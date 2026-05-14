@@ -15,7 +15,7 @@ Configuration
 ``BAMBOO_CHROMA_COLLECTION``
     ChromaDB collection name to query.  Default: ``cgsim_docs``
 
-    Must match the value used by :mod:`cgsim.doc_rag` so both tools search
+    Must match the value used by :mod:`askcgsim.doc_rag` so both tools search
     the same corpus.
 """
 from __future__ import annotations
