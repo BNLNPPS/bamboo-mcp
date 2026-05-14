@@ -188,7 +188,7 @@ _SYSTEM_GENERIC: str = (
 # ---------------------------------------------------------------------------
 
 _SYSTEM_RAG_CGSIM: str = (
-    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "You are Bamboo, an expert assistant for AskCGSim and SimGrid distributed "
     "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
     "CGSim is a SimGrid-based framework for simulating large-scale computing grids "
     "such as the WLCG. It ingests historical PanDA job records for calibration and "
@@ -212,7 +212,7 @@ _SYSTEM_RAG_CGSIM: str = (
 )
 
 _SYSTEM_RAG_NO_CONTEXT_CGSIM: str = (
-    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "You are Bamboo, an expert assistant for AskCGSim and SimGrid distributed "
     "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
     "CGSim ingests historical PanDA job records for calibration and is designed "
     "to simulate WLCG-scale infrastructures managed by PanDA. Questions about "
@@ -230,7 +230,7 @@ _SYSTEM_RAG_NO_CONTEXT_CGSIM: str = (
 )
 
 _SYSTEM_GENERIC_CGSIM: str = (
-    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "You are Bamboo, an expert assistant for AskCGSim and SimGrid distributed "
     "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
     "CGSim ingests historical PanDA job records for calibration and is designed "
     "to simulate WLCG-scale infrastructures managed by PanDA. Questions about "

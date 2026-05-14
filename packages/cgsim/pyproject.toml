@@ -1,7 +1,7 @@
 [project]
 name = "cgsim"
 version = "0.1.0"
-description = "CGSim Bamboo MCP plugin — SimGrid-based distributed computing simulator"
+description = "AskCGSim Bamboo MCP plugin — SimGrid-based distributed computing simulator"
 requires-python = ">=3.10"
 dependencies = []
 

@@ -446,13 +446,13 @@ class TestCgsimUiManifestTool:
 
     @pytest.mark.asyncio
     async def test_manifest_display_name(self) -> None:
-        """Manifest ``display_name`` contains 'CGSim'."""
+        """Manifest ``display_name`` contains 'AskCGSim'."""
         from cgsim.ui_manifest import CgsimUiManifestTool
 
         tool = CgsimUiManifestTool()
         result = await tool.call({})
         payload = json.loads(result[0]["text"])
-        assert "CGSim" in payload["display_name"]
+        assert "AskCGSim" in payload["display_name"]
 
     @pytest.mark.asyncio
     async def test_manifest_accent_is_green(self) -> None:

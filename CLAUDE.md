@@ -16,8 +16,8 @@ pip install -e ./packages/askpanda_atlas
 # Install the ePIC plugin
 pip install -e ./packages/askpanda_epic
 
-# Install the CGSim plugin
-pip install -e ./packages/cgsim
+# Install the AskCGSim plugin
+pip install -e ./packages/askcgsim
 
 # Install dev dependencies
 pip install -r requirements-dev.txt
@@ -337,7 +337,7 @@ Public surface:
 - `_fetch_metadata` uses `cached_fetch_jsonish` (60 s TTL).
 - `_fetch_log_text` uses `cached_fetch_log` (infinite TTL).
 
-### CGSim Plugin (`packages/cgsim/`)
+### AskCGSim Plugin (`packages/askcgsim/`)
 
 Provides documentation search (RAG + BM25) for the CGSim / SimGrid distributed
 computing simulator.  No operational data tools exist yet — they are planned
@@ -361,7 +361,7 @@ Key facts:
 - **PanDA/CGSim corpus**: it is valid and useful to ingest PanDA documentation into `cgsim_docs` alongside CGSim docs. CGSim ingests historical PanDA job records for calibration; questions about the PanDA/CGSim connection are explicitly in scope. The synthesis prompts reflect this.
 - **Future tools** (stubs commented out in `pyproject.toml`): `cgsim.sim_query`, `cgsim.site_status`, `cgsim.calibration_results`, `cgsim.event_monitor` — all planned as SQLite interfaces to the CGSim output database.
 
-#### CGSim synthesis prompts (`core/bamboo/tools/bamboo_executor.py`)
+#### AskCGSim synthesis prompts (`core/bamboo/tools/bamboo_executor.py`)
 
 Three plugin-specific synthesis prompts registered in `_PLUGIN_RAG_PROMPTS["cgsim"]`:
 
@@ -371,7 +371,7 @@ Three plugin-specific synthesis prompts registered in `_PLUGIN_RAG_PROMPTS["cgsi
 
 The `_PLUGIN_DOC_TOOLS["cgsim"]` set is `{"cgsim.doc_search", "cgsim.doc_bm25"}` — used by `_build_synthesis_prompt` and `_pick_synthesis_prompt` to select the RAG prompt path.
 
-#### CGSim `sim_query` security model (planned)
+#### AskCGSim `sim_query` security model (planned)
 
 The future `cgsim.sim_query` SQLite tool will enforce read-only access at four independent layers:
 

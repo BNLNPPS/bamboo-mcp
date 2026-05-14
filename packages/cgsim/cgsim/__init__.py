@@ -1,4 +1,4 @@
-"""CGSim Bamboo plugin package.
+"""AskCGSim Bamboo plugin package.
 
 Provides MCP tools for querying CGSim documentation and (in future releases)
 the SQLite simulation output database produced by CGSim runs.

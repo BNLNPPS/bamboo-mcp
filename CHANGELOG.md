@@ -83,7 +83,7 @@ All notable changes to Bamboo are documented here.
 
 ### Added
 
-- **CGSim plugin (`packages/cgsim/`).** A new Bamboo MCP plugin for the
+- **CGSim plugin (`packages/askcgsim/`).** A new Bamboo MCP plugin for the
   CGSim / SimGrid distributed computing simulator. CGSim is a SimGrid-based
   framework for simulating large-scale computing grids such as the WLCG; it
   ingests historical PanDA job records for calibration and is designed to
@@ -95,7 +95,7 @@ All notable changes to Bamboo are documented here.
   |---|---|---|
   | `cgsim.doc_search` | `cgsim.doc_search` | ChromaDB vector similarity search over CGSim / SimGrid documentation |
   | `cgsim.doc_bm25` | `cgsim.doc_bm25` | BM25 keyword search over the same corpus |
-  | `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding: block-letter banner, green accent, "Bamboo – CGSim" display name |
+  | `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding: block-letter banner, green accent, "Bamboo – AskCGSim" display name |
 
   The default ChromaDB collection name is `cgsim_docs`, distinct from
   `atlas_docs` and `epic_docs` so all three corpora can coexist in the same
@@ -217,11 +217,11 @@ All notable changes to Bamboo are documented here.
   ordered lists with vector search (`doc_search`) always at index 0 and BM25
   (`doc_bm25`) at index 1.
 
-- **CGSim synthesis prompts updated to welcome PanDA/CGSim correlation.**
+- **AskCGSim synthesis prompts updated to welcome PanDA/CGSim correlation.**
   The initial CGSim prompts instructed the LLM to avoid framing answers in
   terms of PanDA or ATLAS. This was over-cautious: CGSim ingests PanDA job
   records for calibration and users legitimately ask about the integration.
-  All three CGSim synthesis prompts and the `_PLUGIN_IDENTITY["cgsim"]` string
+  All three AskCGSim synthesis prompts and the `_PLUGIN_IDENTITY["cgsim"]` string
   in `templates.py` now explicitly state that CGSim/PanDA correlation questions
   are in scope and should be answered directly.
 
@@ -268,13 +268,13 @@ All notable changes to Bamboo are documented here.
 
 | File | Purpose |
 |---|---|
-| `packages/cgsim/cgsim/__init__.py` | CGSim plugin package |
-| `packages/cgsim/cgsim/doc_rag.py` | `cgsim.doc_search` tool |
-| `packages/cgsim/cgsim/doc_bm25.py` | `cgsim.doc_bm25` tool |
-| `packages/cgsim/cgsim/ui_manifest.py` | `cgsim.ui_manifest` tool |
-| `packages/cgsim/cgsim/banner.txt` | 6-line block-letter CGSim banner |
-| `packages/cgsim/pyproject.toml` | Plugin entry points and metadata |
-| `packages/cgsim/tests/test_cgsim_plugin.py` | 30 tests covering all three tools |
+| `packages/askcgsim/askcgsim/__init__.py` | AskCGSim plugin package |
+| `packages/askcgsim/askcgsim/doc_rag.py` | `cgsim.doc_search` tool |
+| `packages/askcgsim/askcgsim/doc_bm25.py` | `cgsim.doc_bm25` tool |
+| `packages/askcgsim/askcgsim/ui_manifest.py` | `cgsim.ui_manifest` tool |
+| `packages/askcgsim/askcgsim/banner.txt` | 6-line block-letter CGSim banner |
+| `packages/askcgsim/pyproject.toml` | Plugin entry points and metadata |
+| `packages/askcgsim/tests/test_cgsim_plugin.py` | 30 tests covering all three tools |
 | `core/bamboo/server_http.py` | `python -m bamboo.server_http` entry point |
 | `requirements-http.txt` | HTTP server dependencies (uvicorn, starlette) |
 | `tests/test_prompt_templates.py` | 9 tests for plugin-aware system prompts |

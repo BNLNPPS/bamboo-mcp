@@ -25,7 +25,7 @@ Inactive (commented out — update manually when those packages are released):
 
 - ``packages/askpanda_epic/pyproject.toml``
 - ``packages/askpanda_verarubin/pyproject.toml``
-- ``packages/cgsim/pyproject.toml``
+- ``packages/askcgsim/pyproject.toml``
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ _ACTIVE_FILES: list[tuple[str, str, str]] = [
     #     'version = "{new}"',
     # ),
     # (
-    #     "packages/cgsim/pyproject.toml",
+    #     "packages/askcgsim/pyproject.toml",
     #     'version = "{old}"',
     #     'version = "{new}"',
     # ),

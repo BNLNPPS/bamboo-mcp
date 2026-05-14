@@ -80,9 +80,9 @@ async def test_keyword_allow_cgsim_calibration():
 
 @pytest.mark.asyncio
 async def test_rejection_message_mentions_cgsim():
-    """Rejection message includes CGSim so users know it is a supported domain."""
+    """Rejection message includes AskCGSim so users know it is a supported domain."""
     from bamboo.tools.topic_guard import _REJECTION_MESSAGE
-    assert "CGSim" in _REJECTION_MESSAGE
+    assert "AskCGSim" in _REJECTION_MESSAGE
 
 
 @pytest.mark.asyncio

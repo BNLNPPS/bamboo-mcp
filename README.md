@@ -9,7 +9,7 @@ Structured evidence is always returned alongside natural-language answers.
 
 > **Status (April 2026):** core infrastructure is stable. The ATLAS plugin
 > includes `cric_query` for natural-language queries against the CRIC Computing
-> Resource Information Catalogue. The CGSim plugin is newly added, providing
+> Resource Information Catalogue. The AskCGSim plugin is newly added, providing
 > documentation search (RAG + BM25) for the SimGrid-based CGSim distributed
 > computing simulator. The current focus is multi-experiment support and
 > orchestration using tool families and planning for complex multi-step prompts.
@@ -77,8 +77,8 @@ pip install -e ./packages/askpanda_atlas
 # ePIC / EIC plugin
 pip install -e ./packages/askpanda_epic
 
-# CGSim plugin
-pip install -e ./packages/cgsim
+# AskCGSim plugin
+pip install -e ./packages/askcgsim
 
 # Root package — required for the TUI and Streamlit UI
 pip install -e .
@@ -160,7 +160,7 @@ python interfaces/textual/chat.py --transport http
 See [`docs/http-server.md`](docs/http-server.md) for auth, firewall, and
 persistent-mode configuration.
 
-**Running in CGSim mode:**
+**Running in AskCGSim mode:**
 
 ```bash
 export ASKPANDA_PLUGIN="cgsim"
@@ -296,7 +296,7 @@ point the doc tools at the ATLAS vector store.
 Set `BAMBOO_CHROMA_COLLECTION=epic_docs` when running the ePIC deployment to
 point the doc tools at the ePIC vector store.
 
-### CGSim plugin tools
+### AskCGSim plugin tools
 
 | Entry point | Tool name | Description |
 |---|---|---|
@@ -305,4 +305,4 @@ point the doc tools at the ePIC vector store.
 | `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding (banner, accent colour, display name) |
 
 Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs` and `ASKPANDA_PLUGIN=cgsim` when
-running the CGSim deployment to point the doc tools at the CGSim vector store.
+running the AskCGSim deployment to point the doc tools at the CGSim vector store.
