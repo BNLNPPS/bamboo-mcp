@@ -193,15 +193,20 @@ def test_extract_log_excerpt_uses_pattern_for_pilotlog() -> None:
 
 
 def test_extract_log_excerpt_uses_tail_for_payload() -> None:
-    """extract_log_excerpt returns tail for payload.stdout (code 1305)."""
-    long_log = "\n".join(f"line{i}" for i in range(500))
+    """extract_log_excerpt returns char-tail for payload.stdout (code 1305).
+
+    Uses 700 lines so the total length (~5 500 chars) exceeds the
+    _STDOUT_CHAR_TAIL budget (4 000 chars), ensuring early lines are
+    genuinely truncated from the tail.
+    """
+    long_log = "\n".join(f"line{i}" for i in range(700))
     excerpt = extract_log_excerpt(
         long_log, "payload.stdout",
         pilot_error_code=1305,
         pilot_error_diag="",
     )
-    # Should contain the end of the log, not the beginning
-    assert "line499" in excerpt
+    # Tail should contain the end of the log but not the very beginning.
+    assert "line699" in excerpt
     assert "line0" not in excerpt
 
 

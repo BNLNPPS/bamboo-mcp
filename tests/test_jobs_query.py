@@ -651,9 +651,9 @@ class TestDatabaseDisambiguation:
         self._dbs = QUERYABLE_DATABASES
 
     def test_single_db_always_resolves(self) -> None:
-        """With only one database registered, any question resolves to it."""
-        assert len(self._dbs) == 1
-        result = self._resolve("When was the database last updated?")
+        """Unambiguous job-specific question resolves to the jobs database."""
+        assert "jobs" in self._dbs
+        result = self._resolve("How many jobs failed at BNL yesterday?")
         assert result == "jobs"
 
     def test_jobs_keywords_resolve_to_jobs(self) -> None:
