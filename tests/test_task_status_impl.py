@@ -561,7 +561,8 @@ class TestFetchAndAnalyse:
         with patch("askpanda_atlas._cache.cached_fetch_jsonish", _capture):
             fetch_and_analyse("https://bigpanda.cern.ch", 12345)
 
-        assert len(captured) == 1
+        # fetch_and_analyse makes two requests: /jobs/ then /task/<id>/
+        assert len(captured) == 2
         assert "/jobs/" in captured[0]
         assert "jeditaskid=12345" in captured[0]
 

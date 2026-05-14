@@ -212,7 +212,8 @@ def test_task_status_url_uses_jobs_endpoint(
 
     asyncio.run(ts_mod.panda_task_status_tool.call({"task_id": 42}))
 
-    assert len(captured) == 1
+    # fetch_and_analyse makes two requests: /jobs/ then /task/<id>/
+    assert len(captured) == 2
     assert "/jobs/" in captured[0]
     assert "jeditaskid=42" in captured[0]
     assert "json" in captured[0]

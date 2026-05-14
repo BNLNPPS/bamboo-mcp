@@ -313,7 +313,11 @@ def test_log_analysis_invalid_arguments() -> None:
 
 
 def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pilot error 1305 (payload failure) fetches payload.stdout, not pilotlog.txt."""
+    """Pilot error 1305 (payload failure) fetches payload.stdout and payload.stderr.
+
+    setup.stdout is explicitly zero-length in the file index so the fail-open
+    policy in _file_is_nonempty does not cause it to be downloaded.
+    """
     fetched_filenames: list[str] = []
 
     def _capture_log(job_id: int, filename: str, base_url: str, timeout: int) -> str:
@@ -325,9 +329,20 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
     )
     monkeypatch.setattr("askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log)
+    # Provide a concrete file index so _file_is_nonempty does not fall back to
+    # fail-open (None).  setup.stdout is zero-length -> skipped; payload logs
+    # are non-empty -> downloaded.
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            "setup.stdout": 0,
+            "payload.stdout": 1000,
+            "payload.stderr": 500,
+        },
+    )
 
     asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
-    assert fetched_filenames == ["payload.stdout"]
+    assert fetched_filenames == ["payload.stdout", "payload.stderr"]
 
 
 def test_get_definition() -> None:
