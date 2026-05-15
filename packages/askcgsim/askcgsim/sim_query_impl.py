@@ -250,7 +250,7 @@ async def _call_llm_for_sql(question: str, schema_context: str) -> str:
     ) as s:
         resp = await client.generate(
             messages=messages,
-            params=GenerateParams(temperature=0.0, max_tokens=512),
+            params=GenerateParams(temperature=0.0, max_tokens=1024),
         )
         usage = resp.usage
         s.set(

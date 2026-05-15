@@ -251,6 +251,8 @@ def _build_cgsim_planner_prompt(schema_compact: str) -> str:
         "simulation database — use cgsim.sim_query. route=FAST_PATH. "
         "This includes generic questions like 'show me all jobs', 'list all job IDs', "
         "'what happened during the simulation', 'which site was busiest'.\n"
+        "  IMPORTANT: pass the user's question to cgsim.sim_query VERBATIM — do not "
+        "expand, rephrase, or add detail. The tool handles its own SQL generation.\n"
         "- If the question asks about how CGSim or SimGrid works, plugin APIs, "
         "configuration options, or concepts (e.g. 'what is a netzone?', "
         "'how do I write a plugin?', 'what does assignJob do?'): "
@@ -373,12 +375,40 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
         "bamboo_health",
     })
 
-    # 1) Statically-registered core tools — always included, except internals.
+    # Core tools that belong to the PanDA/ATLAS domain.  When a non-PanDA
+    # namespace is active (e.g. "cgsim") these are excluded from the catalog
+    # so the LLM planner cannot accidentally pick them.
+    _PANDA_CORE_TOOLS: frozenset[str] = frozenset({
+        "panda_task_status",
+        "panda_job_status",
+        "panda_log_analysis",
+        "panda_jobs_query",
+        "panda_harvester_workers",
+        "panda_server_health",
+        "panda_doc_search",
+        "panda_doc_bm25",
+        "panda_queue_info",
+        "cric_query",
+        "pilot_source_analysis",
+    })
+
+    # Determine whether to exclude PanDA core tools.
+    # "atlas" and "epic" are PanDA-family plugins; all others are not.
+    _PANDA_PLUGIN_NAMESPACES: frozenset[str] = frozenset({"atlas", "epic", ""})
+    _exclude_panda = bool(namespaces) and not any(
+        ns in _PANDA_PLUGIN_NAMESPACES for ns in namespaces
+    )
+
+    # 1) Statically-registered core tools — always included, except internals
+    # and PanDA tools when a non-PanDA namespace is active.
     try:
         from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
         for tool_name, tool_obj in TOOLS.items():
-            if tool_name not in _INTERNAL_TOOLS:
-                _add(tool_obj, fallback_name=tool_name)
+            if tool_name in _INTERNAL_TOOLS:
+                continue
+            if _exclude_panda and tool_name in _PANDA_CORE_TOOLS:
+                continue
+            _add(tool_obj, fallback_name=tool_name)
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 

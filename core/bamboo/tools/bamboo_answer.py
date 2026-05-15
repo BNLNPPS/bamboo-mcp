@@ -2028,6 +2028,13 @@ class BambooAnswerTool:
             "messages": [*history, {"role": "user", "content": question}],
             "plugin_id": plugin_id,
         }
+        # Restrict the planner tool catalog to the active plugin's namespace
+        # so the LLM cannot select tools from other plugins.  Without this,
+        # the full catalog (including panda_job_status, panda_log_analysis,
+        # etc.) is visible and the LLM picks PanDA tools for questions that
+        # contain job IDs, even when the CGSim plugin is active.
+        if plugin_id and plugin_id not in ("atlas", ""):
+            plan_args["namespaces"] = [plugin_id]
         if hints:
             plan_args["hints"] = hints
 

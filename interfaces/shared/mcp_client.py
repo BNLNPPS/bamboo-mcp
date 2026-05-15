@@ -163,31 +163,58 @@ class MCPAsyncClient:
                 ) from e
 
         else:
-            # Build HTTP client if headers are needed (auth, etc.)
-            timeout = httpx.Timeout(self.cfg.http_timeout_s)
-            self._http_client = httpx.AsyncClient(headers=self.cfg.http_headers, timeout=timeout)
-
-            # Dynamically import the helper using importlib and getattr to avoid static attribute access checks
+            # Dynamically import the helper — the function was renamed and its
+            # signature changed between mcp SDK versions:
+            #   < 1.x:  streamable_http_client(url, *, http_client, terminate_on_close)
+            #   >= 1.x: streamablehttp_client(url, *, headers, timeout, terminate_on_close)
+            # We detect which version is present and call accordingly.
             import importlib  # pylint: disable=import-outside-toplevel
+            import inspect  # pylint: disable=import-outside-toplevel
             try:
                 _mod = importlib.import_module("mcp.client.streamable_http")
-                func = getattr(_mod, "streamable_http_client", None)
+                func = (
+                    getattr(_mod, "streamablehttp_client", None)
+                    or getattr(_mod, "streamable_http_client", None)
+                )
             except Exception:  # pylint: disable=broad-exception-caught
                 func = None
 
             if func is None:
                 raise RuntimeError("streamable_http_client is not available in this environment")
 
-            # streamable_http_client yields (read_stream, write_stream, get_session_id_callback)
-            self._transport_cm = func(
-                self.cfg.http_url,
-                http_client=self._http_client,
-                terminate_on_close=self.cfg.terminate_on_close,
-            )
-            read_stream, write_stream, get_session_id = await self._transport_cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
-            try:
-                self.http_session_id = get_session_id()
-            except Exception:  # pylint: disable=broad-exception-caught
+            # Detect signature to handle both old and new mcp SDK versions.
+            _params = inspect.signature(func).parameters
+            timeout = httpx.Timeout(self.cfg.http_timeout_s)
+            if "http_client" in _params:
+                # Old signature: pass a pre-built httpx.AsyncClient.
+                self._http_client = httpx.AsyncClient(
+                    headers=self.cfg.http_headers, timeout=timeout
+                )
+                self._transport_cm = func(
+                    self.cfg.http_url,
+                    http_client=self._http_client,
+                    terminate_on_close=self.cfg.terminate_on_close,
+                )
+            else:
+                # New signature (mcp >= 1.x): pass headers and timeout directly.
+                self._transport_cm = func(
+                    self.cfg.http_url,
+                    headers=self.cfg.http_headers,
+                    timeout=self.cfg.http_timeout_s,
+                    terminate_on_close=self.cfg.terminate_on_close,
+                )
+
+            # New SDK yields (read_stream, write_stream, get_session_id_callback);
+            # older SDK yields only (read_stream, write_stream).
+            _entered = await self._transport_cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
+            if len(_entered) == 3:
+                read_stream, write_stream, get_session_id = _entered
+                try:
+                    self.http_session_id = get_session_id()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    self.http_session_id = None
+            else:
+                read_stream, write_stream = _entered
                 self.http_session_id = None
 
         self._session = ClientSession(read_stream, write_stream)
