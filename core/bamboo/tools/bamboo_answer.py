@@ -1066,52 +1066,63 @@ def _build_deterministic_plan(
     """
     reuse = ReusePolicy()
 
-    # Rule 1b: follow-up pilot source analysis — checked FIRST.
-    # If the last panda_log_analysis returned pilot_monitoring_error and the
-    # question contains pilot-source signals, route to pilot_source_analysis
-    # using the stored log_excerpt.  This must come before rule 1 (log analysis)
-    # because questions like "Why did the pilot code raise that? job 7099503721"
-    # match _is_log_analysis_request ("why" + job ID) and would otherwise
-    # re-run panda_log_analysis instead of fetching the pilot source.
-    if job_id and _is_pilot_source_request(question):
-        monitoring_evidence = get_last_pilot_monitoring_evidence()
-        if monitoring_evidence is not None:
+    # PanDA-specific routing rules (job status, log analysis, task status,
+    # pilot workers) only apply to PanDA-family plugins.  Non-PanDA plugins
+    # (e.g. "cgsim") skip this entire block: numeric IDs in their questions
+    # are domain identifiers (simulation job IDs, etc.), not PanDA job IDs,
+    # and routing them to panda_* tools would produce nonsensical responses.
+    # Adding a new non-PanDA plugin: include its plugin_id in _PANDA_PLUGINS
+    # only if it should use PanDA job/task/pilot routing; otherwise leave it
+    # out and it will fall through to its own fast-path below.
+    _PANDA_PLUGINS: frozenset[str] = frozenset({"atlas", "epic"})
+    if plugin_id in _PANDA_PLUGINS:
+        # Rule 1b: follow-up pilot source analysis — checked FIRST.
+        # If the last panda_log_analysis returned pilot_monitoring_error and the
+        # question contains pilot-source signals, route to pilot_source_analysis
+        # using the stored log_excerpt.  This must come before rule 1 (log analysis)
+        # because questions like "Why did the pilot code raise that? job 7099503721"
+        # match _is_log_analysis_request ("why" + job ID) and would otherwise
+        # re-run panda_log_analysis instead of fetching the pilot source.
+        if job_id and _is_pilot_source_request(question):
+            monitoring_evidence = get_last_pilot_monitoring_evidence()
+            if monitoring_evidence is not None:
+                return Plan(
+                    route=PlanRoute.FAST_PATH,
+                    confidence=1.0,
+                    tool_calls=[ToolCall(
+                        tool="pilot_source_analysis",
+                        arguments={
+                            "job_id": job_id,
+                            "log_excerpt": monitoring_evidence.get("log_excerpt", ""),
+                            "pilot_error_diag": monitoring_evidence.get("piloterrordiag", ""),
+                        },
+                    )],
+                    reuse_policy=reuse,
+                    explain=(
+                        "Deterministic: job ID + pilot-source keywords + prior "
+                        "pilot_monitoring_error evidence → pilot source analysis."
+                    ),
+                )
+
+        # Rule 1: job ID + analysis keywords → log analysis.
+        if job_id and _is_log_analysis_request(question):
             return Plan(
                 route=PlanRoute.FAST_PATH,
                 confidence=1.0,
                 tool_calls=[ToolCall(
-                    tool="pilot_source_analysis",
-                    arguments={
-                        "job_id": job_id,
-                        "log_excerpt": monitoring_evidence.get("log_excerpt", ""),
-                        "pilot_error_diag": monitoring_evidence.get("piloterrordiag", ""),
-                    },
+                    tool="panda_log_analysis",
+                    arguments={"job_id": job_id, "query": question, "context": ""},
                 )],
                 reuse_policy=reuse,
-                explain=(
-                    "Deterministic: job ID + pilot-source keywords + prior "
-                    "pilot_monitoring_error evidence → pilot source analysis."
-                ),
+                explain="Deterministic: job ID + analysis keywords → log analysis.",
             )
 
-    if job_id and _is_log_analysis_request(question):
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_log_analysis",
-                arguments={"job_id": job_id, "query": question, "context": ""},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: job ID + analysis keywords → log analysis.",
-        )
-
-    if job_id and not task_id:
+        # Rule 2: job ID (no task ID) → job status.
         # Guard: if the question is conceptual/definitional ("what does X mean",
         # "what is a looping job") the job ID is incidental context from a prior
         # turn.  Fall through to the LLM planner so it can answer from docs/RAG
         # instead of fetching fresh (and irrelevant) job status data.
-        if not _is_conceptual_question(question):
+        if job_id and not task_id and not _is_conceptual_question(question):
             return Plan(
                 route=PlanRoute.FAST_PATH,
                 confidence=1.0,
@@ -1123,17 +1134,18 @@ def _build_deterministic_plan(
                 explain="Deterministic: job ID, no task ID → job status.",
             )
 
-    if task_id:
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_task_status",
-                arguments={"task_id": task_id, "query": question, "include_jobs": True},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: task ID present → task status.",
-        )
+        # Rule 3: task ID → task status.
+        if task_id:
+            return Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=1.0,
+                tool_calls=[ToolCall(
+                    tool="panda_task_status",
+                    arguments={"task_id": task_id, "query": question, "include_jobs": True},
+                )],
+                reuse_policy=reuse,
+                explain="Deterministic: task ID present → task status.",
+            )
 
     # Pilot / Harvester fast-path: pilot-specific signal phrases are unambiguously
     # on-topic and resolve to panda_harvester_workers without a topic-guard LLM call.

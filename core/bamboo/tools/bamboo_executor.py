@@ -325,7 +325,13 @@ _SYSTEM_CGSIM_SIM_QUERY: str = (
     "speed and bandwidth values are in FLOP/s or bytes/s. "
     "Utilisation fractions are in [0.0, 1.0] — multiply by 100 for percent.\n"
     "Rules:\n"
-    "- If summary is non-null, you MAY use it as a starting point but verify it against the rows.\n"
+    "- LIST RULE: If the user's question explicitly asks to list, show, or enumerate specific "
+    "identifiers or records (e.g. 'show me all job IDs', 'list all sites', 'what are the job IDs'), "
+    "AND truncated is false, reproduce every value from the relevant column(s) in the rows — "
+    "do NOT summarise or give only a range. State the total count (row_count) as a header line "
+    "and then list all values. If truncated is true, enumerate what is present and note more exist.\n"
+    "- If summary is non-null, you MAY use it as a starting point but always verify it against "
+    "the rows — never trust summary alone when the rows are available.\n"
     "- Answer directly and concisely from the rows and row_count in the evidence.\n"
     "- If error is null and rows are present, give the answer confidently.\n"
     "- If row_count is 0, say the query matched no simulation events.\n"
@@ -1054,6 +1060,31 @@ def _strip_llm_links_section(body: str) -> str:
     return stripped.rstrip()
 
 
+_ENUMERATION_PHRASES: tuple[str, ...] = (
+    "show me all", "list all", "list every", "show all",
+    "what are all", "what are the", "give me all", "get all",
+    "enumerate", "show every", "all job id", "all jobs",
+    "all site", "all disk", "all host",
+)
+
+
+def _is_enumeration_question(question: str) -> bool:
+    """Return ``True`` when the question is asking to list or enumerate records.
+
+    Used to suppress the CGSim summary bypass so the synthesis LLM's LIST RULE
+    can force verbatim enumeration from the raw ``rows`` rather than accepting
+    the pre-generated summary which may condense values into a range or count.
+
+    Args:
+        question: User question text (case-insensitive).
+
+    Returns:
+        ``True`` if the question matches a known enumeration pattern.
+    """
+    q = question.lower()
+    return any(phrase in q for phrase in _ENUMERATION_PHRASES)
+
+
 async def execute_plan(
     plan: Plan,
     question: str,
@@ -1114,11 +1145,16 @@ async def execute_plan(
     # Summary bypass: cgsim.sim_query already ran an LLM summarisation call
     # internally.  When a non-empty summary is present, return it directly
     # rather than paying for another LLM synthesis call.
+    # Exception: enumeration questions ("show me all job IDs", "list all X")
+    # must fall through to the synthesis LLM so the LIST RULE in
+    # _SYSTEM_CGSIM_SIM_QUERY can force verbatim enumeration of the rows.
+    # The inner summarisation call does not reliably honour the LIST RULE
+    # because it cannot always detect the user's intent from the summary prompt.
     if called_tool_names == ["cgsim.sim_query"]:
         _cgsim_stored = _last_evidence_store.get("cgsim.sim_query", {})
         _cgsim_evidence = _cgsim_stored.get("evidence", _cgsim_stored)
         _cgsim_summary = _cgsim_evidence.get("summary") if isinstance(_cgsim_evidence, dict) else None
-        if _cgsim_summary:
+        if _cgsim_summary and not _is_enumeration_question(question):
             async with span(EVENT_SYNTHESIS, tool="bamboo_executor",
                             tools=called_tool_names, route=plan.route.value,
                             bypass="cgsim_summary"):

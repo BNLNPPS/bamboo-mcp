@@ -87,6 +87,46 @@ _MODEL_COST_PER_MTOK: dict[str, tuple[float, float]] = {
 _DEFAULT_COST: tuple[float, float] = (1.00, 3.00)
 
 # ---------------------------------------------------------------------------
+# Plot support
+# ---------------------------------------------------------------------------
+
+#: Tools whose evidence is rich-nested rather than flat columns/rows.
+#: These never trigger the plot expander regardless of their evidence shape.
+#: Add entries here when new non-tabular tools are introduced.
+_PLOT_UNSUPPORTED_TOOLS: frozenset[str] = frozenset({
+    "panda_task_status",
+    "panda_job_status",
+    "panda_log_analysis",
+    "pilot_source_analysis",
+    "panda_server_health",
+    "bamboo_health",
+})
+
+#: Known column names mapped to display units for axis labels.
+#: Applied regardless of which tool produced the evidence.
+_COLUMN_UNIT_MAP: dict[str, str] = {
+    "duration": "s",
+    "total_queue_time": "s",
+    "resource_waiting_queue_time": "s",
+    "file_transfer_queue_time": "s",
+    "total_io_read_time": "s",
+    "execution_time_ms": "ms",
+    "size": "bytes",
+    "bandwidth": "bytes/s",
+    "speed": "FLOP/s",
+    "flops": "FLOP",
+    "site_cpu_util": "fraction",
+    "grid_cpu_util": "fraction",
+    "site_storage_util": "fraction",
+    "grid_storage_util": "fraction",
+    "nworkers": "workers",
+    "duration_s": "s",
+    "wall_time_s": "s",
+    "queue_time_s": "s",
+    "io_time_s": "s",
+}
+
+# ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
 
@@ -321,12 +361,14 @@ def _init_session() -> None:
         "messages": [],
         "fast_path": _fast_path_default,
         "tool_names": [],
-        "display_name": "AskPanDA",
+        "display_name": "",
         "llm_info": "",
         "server_ok": False,
         "last_spans": [],
         "last_evidence": None,
         "last_raw": None,
+        "last_tool": None,
+        "last_plugin_id": None,
         "trace_file": os.path.join(
             tempfile.gettempdir(), f"bamboo_streamlit_{os.getpid()}.jsonl"
         ),
@@ -372,12 +414,12 @@ def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
             manifest = json.loads(_extract_text(raw) or "{}")
             if isinstance(manifest, dict):
                 st.session_state["display_name"] = str(
-                    manifest.get("display_name") or f"AskPanDA – {plugin_id.upper()}"
+                    manifest.get("display_name") or plugin_id.upper()
                 )
         except Exception:  # pylint: disable=broad-exception-caught
-            st.session_state["display_name"] = f"AskPanDA – {plugin_id.upper()}"
+            st.session_state["display_name"] = plugin_id.upper()
     else:
-        st.session_state["display_name"] = f"AskPanDA – {plugin_id.upper()}"
+        st.session_state["display_name"] = plugin_id.upper()
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +432,7 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
     Returns:
         Tuple of ``(transport, http_url, bearer_token, plugin_id, stdio_command)``.
     """
-    st.sidebar.title("AskPanDA")
+    st.sidebar.title(st.session_state.get("display_name", "AskPanDA"))
 
     # --- Connection ---
     st.sidebar.header("Connection")
@@ -462,7 +504,7 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
     if st.sidebar.button("🔄  Reconnect", use_container_width=True):
         st.cache_resource.clear()
         for key in ("server_ok", "tool_names", "display_name", "llm_info",
-                    "last_spans", "last_evidence", "last_raw"):
+                    "last_spans", "last_evidence", "last_raw", "last_tool"):
             st.session_state.pop(key, None)
         st.rerun()
 
@@ -471,6 +513,7 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
         st.session_state["last_spans"] = []
         st.session_state["last_evidence"] = None
         st.session_state["last_raw"] = None
+        st.session_state["last_tool"] = None
         st.rerun()
 
     with st.sidebar.expander("Tools registered on server"):
@@ -621,7 +664,7 @@ def _render_raw_expander(raw: Any) -> None:
         st.json(raw)
 
 
-def _fetch_evidence(mcp: MCPClientSync) -> tuple[Any, Any]:
+def _fetch_evidence(mcp: MCPClientSync) -> tuple[Any, Any, str | None]:
     """Fetch compact evidence and raw payload from the server.
 
     Calls ``bamboo_last_evidence`` twice — once for the compact evidence dict
@@ -631,17 +674,22 @@ def _fetch_evidence(mcp: MCPClientSync) -> tuple[Any, Any]:
         mcp: Connected MCP client.
 
     Returns:
-        Tuple of ``(evidence_dict_or_None, raw_payload_or_None)``.
+        Tuple of ``(evidence_dict_or_None, raw_payload_or_None, tool_name_or_None)``.
     """
     evidence = None
     raw = None
+    tool_name: str | None = None
     try:
         ev_raw = mcp.call_tool("bamboo_last_evidence", {"mode": "evidence"})
         ev_text = _extract_text(ev_raw)
         if ev_text:
             parsed = json.loads(ev_text)
+            tool_name = parsed.get("tool") or None
+            # bamboo_last_evidence wraps: {"tool":..., "evidence": {"evidence": {...}}}
+            # Two unwraps are needed to reach the actual columns/rows dict.
             inner = parsed.get("evidence", parsed)
-            if inner and not (isinstance(inner, dict) and "error" in inner):
+            inner = inner.get("evidence", inner) if isinstance(inner, dict) else inner
+            if inner and not (isinstance(inner, dict) and inner.get("error")):
                 evidence = inner
     except Exception:  # pylint: disable=broad-exception-caught
         pass
@@ -652,12 +700,235 @@ def _fetch_evidence(mcp: MCPClientSync) -> tuple[Any, Any]:
         if raw_text:
             parsed_raw = json.loads(raw_text)
             inner_raw = parsed_raw.get("evidence", parsed_raw)
-            if inner_raw and not (isinstance(inner_raw, dict) and "error" in inner_raw):
+            if inner_raw and not (isinstance(inner_raw, dict) and inner_raw.get("error")):
                 raw = inner_raw
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
-    return evidence, raw
+    return evidence, raw, tool_name
+
+
+def _column_label(col: str) -> str:
+    """Convert a snake_case column name to a readable axis label with units.
+
+    Strips common SQL aggregate prefixes (``avg_``, ``sum_``, etc.) before
+    looking up the bare name in :data:`_COLUMN_UNIT_MAP`.
+
+    Args:
+        col: Raw column name from a query result (e.g. ``"avg_duration_s"``).
+
+    Returns:
+        Human-readable label string, e.g. ``"Duration (s)"`` or ``"Site"``.
+    """
+    bare = col
+    for prefix in ("avg_", "sum_", "min_", "max_", "count_", "total_"):
+        if col.startswith(prefix):
+            bare = col[len(prefix):]
+            break
+    readable = bare.replace("_", " ").title()
+    unit = _COLUMN_UNIT_MAP.get(bare)
+    return f"{readable} ({unit})" if unit else readable
+
+
+def _detect_plot(
+    columns: list[str],
+    rows: list[dict[str, Any]],
+) -> tuple[str, str, str | None, str | None] | None:
+    """Detect what kind of Plotly chart can be drawn from tabular evidence.
+
+    Inspects column names and row values to classify each column as text or
+    numeric, then selects a chart type from recognised patterns.  Returns
+    ``None`` when no pattern matches.
+
+    Columns whose names end in ``_id`` or equal ``JOB_ID`` / ``_ID`` are
+    excluded from classification — they are identifiers, not plottable axes.
+
+    Recognised patterns (checked in priority order):
+
+    1. **Scatter with colour**: one text column + exactly two numeric columns
+       → scatter plot with the text column as colour grouping.
+    2. **Bar**: one text column + exactly one numeric column → horizontal bar.
+    3. **Histogram**: one numeric column with ≥ 4 rows → distribution histogram.
+    4. **Scatter**: exactly two numeric columns → scatter plot.
+
+    Args:
+        columns: Ordered list of column names from the query result.
+        rows: List of row dicts from the query result.
+
+    Returns:
+        4-tuple ``(chart_type, x_col, y_col, color_col)`` or ``None``.
+    """
+    if not columns or not rows:
+        return None
+
+    def _is_id_col(col: str) -> bool:
+        """Return True when a column looks like an identifier, not a value.
+
+        Args:
+            col: Column name to test.
+
+        Returns:
+            True if the column should be excluded from chart axis selection.
+        """
+        lower = col.lower()
+        return lower.endswith("_id") or lower in ("job_id", "_id", "id")
+
+    text_cols: list[str] = []
+    numeric_cols: list[str] = []
+    for col in columns:
+        if _is_id_col(col):
+            continue
+        for row in rows:
+            val = row.get(col)
+            if val is None:
+                continue
+            if isinstance(val, (int, float)):
+                numeric_cols.append(col)
+            else:
+                text_cols.append(col)
+            break
+
+    # Pattern 1: one text + two or more numerics → scatter coloured by the text
+    # column, using the first two numeric columns as axes.  Checked before bar
+    # so that multi-numeric queries (e.g. avg queue time AND avg execution time
+    # per site) get a scatter rather than a bar showing only the first numeric.
+    if len(text_cols) == 1 and len(numeric_cols) >= 2:
+        return ("scatter", numeric_cols[0], numeric_cols[1], text_cols[0])
+
+    # Pattern 2: one text + one numeric → horizontal bar chart.
+    if len(text_cols) == 1 and len(numeric_cols) == 1:
+        return ("bar", text_cols[0], numeric_cols[0], None)
+
+    # Pattern 3: one numeric, enough rows → histogram of distribution.
+    if len(text_cols) == 0 and len(numeric_cols) == 1 and len(rows) >= 4:
+        return ("histogram", numeric_cols[0], None, None)
+
+    # Pattern 4: two numerics, no label → scatter.
+    if len(text_cols) == 0 and len(numeric_cols) == 2:
+        return ("scatter", numeric_cols[0], numeric_cols[1], None)
+
+    return None
+
+
+def _build_plot_figure(
+    chart_type: str,
+    x_col: str,
+    y_col: str | None,
+    color_col: str | None,
+    rows: list[dict[str, Any]],
+) -> Any:
+    """Build and return a Plotly figure from tabular evidence rows.
+
+    Args:
+        chart_type: One of ``"bar"``, ``"histogram"``, or ``"scatter"``.
+        x_col: Column for the x-axis (value axis for bar; single axis for
+            histogram).
+        y_col: Column for the y-axis.  ``None`` for histograms.
+        color_col: Column for colour grouping.  ``None`` when not wanted.
+        rows: List of row dicts from the query result.
+
+    Returns:
+        Plotly figure object ready to pass to ``st.plotly_chart``.
+    """
+    import plotly.express as px  # type: ignore[import]
+
+    if chart_type == "bar":
+        fig = px.bar(
+            rows,
+            x=y_col,
+            y=x_col,
+            orientation="h",
+            labels={x_col: _column_label(x_col), y_col: _column_label(y_col)},
+            title=_column_label(y_col),
+        )
+        fig.update_layout(yaxis={"categoryorder": "total ascending"})
+    elif chart_type == "histogram":
+        fig = px.histogram(
+            rows,
+            x=x_col,
+            labels={x_col: _column_label(x_col)},
+            title=f"Distribution of {_column_label(x_col)}",
+            nbins=min(20, len(rows)),
+        )
+    else:  # scatter
+        colour_labels = {color_col: _column_label(color_col)} if color_col else {}
+        fig = px.scatter(
+            rows,
+            x=x_col,
+            y=y_col,
+            color=color_col,
+            labels={
+                x_col: _column_label(x_col),
+                y_col: _column_label(y_col),
+                **colour_labels,
+            },
+            title=f"{_column_label(y_col)} vs {_column_label(x_col)}",
+        )
+        fig.update_traces(marker={"size": 10, "opacity": 0.85, "line": {"width": 1, "color": "white"}})
+        # Hide the colour legend when it has many entries — it crowds the plot
+        # area without adding information when points overlap or are uniform.
+        n_legend = len(set(row.get(color_col) for row in rows)) if color_col else 0
+        fig.update_layout(showlegend=(n_legend <= 8))
+
+    fig.update_layout(margin={"t": 40, "b": 20, "l": 20, "r": 20}, height=400)
+    return fig
+
+
+def _render_plot_expander(evidence: Any, tool_name: str | None) -> None:
+    """Render an interactive Plotly chart from flat tabular evidence.
+
+    Appears as a collapsible **\u2603\ufe0f Plot** expander below the assistant reply
+    whenever the evidence has a plottable ``columns``/``rows`` shape.  No
+    plugin name is hard-coded: the expander fires for any tool whose evidence
+    is flat-tabular and not in :data:`_PLOT_UNSUPPORTED_TOOLS`.
+
+    Silently renders nothing when plotly is not installed, the tool is in
+    :data:`_PLOT_UNSUPPORTED_TOOLS`, evidence is absent or erroneous, or
+    the columns do not match a recognised chart pattern.
+
+    Args:
+        evidence: Evidence dict with ``columns``, ``rows``, ``truncated``,
+            and optionally ``sql``.
+        tool_name: Name of the tool that produced the evidence, or ``None``.
+    """
+    if tool_name in _PLOT_UNSUPPORTED_TOOLS:
+        return
+    try:
+        import plotly.express  # type: ignore[import]  # noqa: F401
+    except ImportError:
+        return
+
+    if not isinstance(evidence, dict):
+        return
+    if evidence.get("error"):
+        return
+
+    columns: list[str] = evidence.get("columns") or []
+    rows: list[dict[str, Any]] = evidence.get("rows") or []
+    truncated: bool = bool(evidence.get("truncated"))
+    sql: str = str(evidence.get("sql") or "")
+
+    if not rows:
+        return
+
+    chart_spec = _detect_plot(columns, rows)
+    if chart_spec is None:
+        return
+
+    chart_type, x_col, y_col, color_col = chart_spec
+
+    try:
+        fig = _build_plot_figure(chart_type, x_col, y_col, color_col, rows)
+        st.plotly_chart(fig, use_container_width=True)
+        if truncated:
+            st.caption(
+                "⚠️ Chart shows a partial result — the query was capped. "
+                "Refine your question to see the full dataset."
+            )
+        if sql:
+            st.caption(f"SQL: `{sql}`")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        st.warning(f"Plot could not be rendered: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -706,9 +977,10 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         st.session_state["last_spans"] = spans
 
         # Fetch evidence from server store
-        evidence, raw = _fetch_evidence(mcp)
+        evidence, raw, last_tool = _fetch_evidence(mcp)
         st.session_state["last_evidence"] = evidence
         st.session_state["last_raw"] = raw
+        st.session_state["last_tool"] = last_tool
 
         # Append assistant reply and cap history
         messages.append({"role": "assistant", "content": answer})
@@ -720,8 +992,12 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Detail expanders below the last assistant reply
+    # After the last assistant reply: inline plot then detail expanders.
     if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
+        _render_plot_expander(
+            st.session_state["last_evidence"],
+            st.session_state.get("last_tool"),
+        )
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             _render_tracing_expander(st.session_state["last_spans"], transport)
@@ -733,7 +1009,7 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
             _render_raw_expander(st.session_state["last_raw"])
 
     # Chat input — must be the last widget
-    question = st.chat_input("Ask PanDA")
+    question = st.chat_input(st.session_state.get("display_name", "Ask PanDA"))
     if question:
         st.session_state["messages"].append({"role": "user", "content": question})
         st.session_state["pending_question"] = question
@@ -746,8 +1022,9 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
 
 def main() -> None:
     """Streamlit app entry point."""
+    # set_page_config must be the first Streamlit call each run.
     st.set_page_config(
-        page_title="AskPanDA",
+        page_title="Bamboo MCP",
         page_icon="🐼",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -777,6 +1054,20 @@ def main() -> None:
 
     transport, http_url, bearer_token, plugin_id, stdio_command = _render_sidebar()
 
+    # Set a pre-connection display name from plugin_id so the UI never shows
+    # a stale or generic label before the server has been contacted.
+    # _connect() will overwrite this with the ui_manifest display_name once
+    # the server responds.
+    if not st.session_state.get("display_name"):
+        st.session_state["display_name"] = plugin_id.upper()
+
+    # If the user switches plugin in the sidebar while connected, the cached
+    # display_name belongs to the old plugin.  Clear it so the pre-connection
+    # label updates immediately to the new plugin_id.
+    if st.session_state.get("last_plugin_id") != plugin_id:
+        st.session_state["display_name"] = plugin_id.upper()
+        st.session_state["last_plugin_id"] = plugin_id
+
     # Build (or retrieve cached) MCP client
     try:
         mcp = _get_mcp_client(
@@ -805,8 +1096,7 @@ def main() -> None:
                 st.stop()
 
     # Page header
-    display_name: str = st.session_state.get("display_name", "AskPanDA")
-    st.title(display_name)
+    st.title(st.session_state.get("display_name", plugin_id.upper()))
     llm_info = st.session_state.get("llm_info", "")
     if llm_info:
         st.caption(f"🤖 {llm_info}")

@@ -576,6 +576,11 @@ LIMIT 200
 """
 
 #: System prompt template for natural-language summarisation (LLM call 2).
+#:
+#: LIST RULE: when the user explicitly asks to enumerate specific values
+#: (e.g. "show me all job IDs"), the model must reproduce every value from
+#: the relevant column(s) rather than summarising or giving only a range.
+#: For all other questions the model summarises concisely as before.
 _SUMMARISE_SYSTEM: str = """\
 You are a scientific computing assistant summarising results from a CGSim \
 simulation database query.
@@ -592,14 +597,19 @@ speed and bandwidth values are in FLOP/s or bytes/s respectively.
 Utilisation fractions are in [0.0, 1.0] (multiply by 100 for percent).
 retries=0 means the job succeeded on its first attempt.
 
-Summarise the results clearly and concisely in natural language.
-Mention the key numbers.
+LIST RULE: If the user's question explicitly asks to list, show, or enumerate \
+specific identifiers or records (e.g. "show me all job IDs", "list all sites", \
+"what are the job IDs"), AND the result set was not truncated, reproduce every \
+value from the relevant column(s) in the rows — do not summarise or give a range. \
+If the result was truncated, enumerate what is available and note that more exist.
+
+For all other questions: summarise the results clearly and concisely in natural \
+language. Mention the key numbers.
 If the result set was truncated (more rows exist than shown), say so.
 If no rows were returned, say the query matched no events.
 If all rows have the same value for an ordered/ranked column (e.g. all sites have \
 the same job count), explicitly say so — do not report only the top row as if it \
-were uniquely the winner.
-Do not reproduce the full raw results verbatim.\
+were uniquely the winner.\
 """
 
 
