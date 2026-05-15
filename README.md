@@ -7,12 +7,13 @@ experiment operations, and CGSim distributed computing simulation.
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (April 2026):** core infrastructure is stable. The ATLAS plugin
+> **Status (May 2026):** core infrastructure is stable. The ATLAS plugin
 > includes `cric_query` for natural-language queries against the CRIC Computing
-> Resource Information Catalogue. The AskCGSim plugin is newly added, providing
-> documentation search (RAG + BM25) for the SimGrid-based CGSim distributed
-> computing simulator. The current focus is multi-experiment support and
-> orchestration using tool families and planning for complex multi-step prompts.
+> Resource Information Catalogue. The AskCGSim plugin provides documentation
+> search (RAG + BM25) and `cgsim.sim_query` for natural-language queries
+> against the CGSim simulation output SQLite database. The current focus is
+> multi-experiment support and orchestration using tool families and planning
+> for complex multi-step prompts.
 
 ---
 
@@ -246,6 +247,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
 | [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
 | [`docs/cric-database.md`](docs/cric-database.md) | CRIC queuedata queries — schema, examples, guard rules, routing, disambiguation |
+| [`docs/cgsim-database.md`](docs/cgsim-database.md) | CGSim simulation DB queries — EVENTS schema, METADATA fields, example SQL, security model |
 | [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
@@ -303,6 +305,8 @@ point the doc tools at the ePIC vector store.
 | `cgsim.doc_search` | `cgsim.doc_search` | Vector similarity search over CGSim / SimGrid documentation |
 | `cgsim.doc_bm25` | `cgsim.doc_bm25` | BM25 keyword search over CGSim / SimGrid documentation |
 | `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding (banner, accent colour, display name) |
+| `cgsim.sim_query` | `cgsim.sim_query` | Natural language → SQL against the CGSim simulation output SQLite database |
 
-Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs` and `ASKPANDA_PLUGIN=cgsim` when
-running the AskCGSim deployment to point the doc tools at the CGSim vector store.
+Set `ASKPANDA_PLUGIN=cgsim` and `CGSIM_DB_PATH=/path/to/cgsim.db` when
+running the AskCGSim deployment.  Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs`
+to point the doc tools at the CGSim vector store.

@@ -255,6 +255,89 @@ Which queues are not online?
 What is the queue status at BNL?
 ```
 
+## CGSim simulation database (`cgsim.sim_query`)
+
+Questions about the results of a CGSim simulation run.  Requires
+`ASKPANDA_PLUGIN=cgsim` and `CGSIM_DB_PATH` to be set.
+
+### Job timing
+
+```
+How long did job J-001 take to execute?
+What was the total wall-clock time for job J-001?
+Why did job J-001 spend so long queuing?
+How much of job J-001's time was spent waiting for file transfers?
+How much time did job J-001 spend waiting for a compute slot?
+```
+
+> **Expected routing:** `route=RETRIEVE` → `cgsim.sim_query` (via LLM planner or deterministic path).
+> **Check with `/inspect`:** evidence shows `sql`, `columns`, `rows`, `summary`.
+> **Units:** all duration values are in **seconds**.
+
+### Site and resource analysis
+
+```
+Which site had the most jobs allocated to it?
+What was the average execution time per site?
+Which site had the highest CPU utilisation?
+Was the grid under heavy load when job J-001 ran?
+How many jobs ran at each site?
+```
+
+> **Expected SQL pattern:** `GROUP BY json_extract(METADATA, '$.site')` with
+> `EVENT='JobAllocation'` or `EVENT='JobExecution'` and `STATE='Finished'`.
+
+### Network congestion and file transfers
+
+```
+Were any file transfers affected by network congestion?
+Which file transfers had the highest link load?
+What was the average file transfer speed?
+Which source/destination site pair had the most transfers?
+What was the total data transferred during the simulation?
+```
+
+> **High link_load** (close to 1.0) signals congestion.  `link_load` is in
+> the `FileTransfer/Started` METADATA.
+
+### I/O bottleneck analysis
+
+```
+Which disk was the I/O bottleneck?
+What was the average disk read throughput?
+Which host had the slowest disk reads?
+How much data was read from disk per job?
+```
+
+> **Disk throughput** = `size / duration` from `FileRead/Finished`.
+> Compare against `disk_read_bw` to see how close to the device limit jobs ran.
+
+### Job health
+
+```
+Did jobs retry frequently?
+How many jobs succeeded on the first attempt?
+Which jobs retried the most?
+What is the retry rate distribution?
+```
+
+> **`retries = 0`** means the job succeeded without a retry.  Available on
+> `JobExecution/Finished`.
+
+### Full job timeline
+
+```
+Show me all events for job J-001.
+What happened to job J-001 from start to finish?
+List the file transfers for job J-001.
+What files did job J-001 read from disk?
+```
+
+> Filter by `JOB_ID = 'J-001'` with no `EVENT` filter to see the full timeline.
+> The `ORDER BY TIME ASC` clause is automatically applied.
+
+---
+
 ## Documentation / RAG (`panda_doc_search` + `panda_doc_bm25`)
 
 General PanDA/ATLAS knowledge questions route to the vector + BM25 retrieval pipeline.

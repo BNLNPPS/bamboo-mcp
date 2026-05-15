@@ -8,6 +8,71 @@ All notable changes to Bamboo are documented here.
 
 ---
 
+## 2026-05-15
+
+### Added
+
+- **`cgsim.sim_query` — natural-language to SQL tool for the CGSim simulation
+  output database (`packages/askcgsim/`).** Answers questions about a CGSim
+  simulation run by translating natural-language questions into SQL, executing
+  them read-only against the local SQLite database, and summarising the results
+  in natural language via a second LLM call.
+
+  New files:
+
+  | File | Purpose |
+  |---|---|
+  | `askcgsim/sim_query_schema.py` | SQL guard (AST allow-list), schema context string, and LLM prompt builders for both the SQL-generation and summarisation calls. Zero bamboo-core dependency. |
+  | `askcgsim/sim_query_impl.py` | Full NL→SQL→execute→NL pipeline. Both LLM calls are async; SQLite execution runs synchronously on the event loop thread (consistent with the DuckDB precedent in `panda_jobs_query`). |
+  | `askcgsim/sim_query.py` | Thin re-export wrapper with `ImportError` fallback if `sqlglot` is absent. |
+  | `askcgsim/cgsim_reader.py` | `cgsim_reader.py` vendored from the `sqlite-reader` repository. Provides typed structured access to the EVENTS table via `CGSimReader` and `EventRow`. |
+  | `tests/test_sim_query.py` | 63 unit tests covering the guard (every rejection rule, LIMIT injection, aggregation cap, CTE allowance), the full pipeline (happy path, cannot-answer, guard rejection, execution error, summarisation failure, truncation), `CgsimSimQueryTool.call()`, schema context caching, and prompt builder shape. |
+
+  Security — four independent read-only layers:
+
+  1. SQLite URI `file:{path}?mode=ro` — the driver refuses any write at the OS level.
+  2. `PRAGMA query_only = ON` — a second enforcement inside the SQLite library.
+  3. sqlglot AST guard (`validate_and_guard`) — parses with the SQLite dialect;
+     enforces single statement, SELECT-only root, no forbidden constructs at any
+     AST depth, no system tables (`sqlite_master`, `sqlite_sequence`, …), and a
+     table allow-list (`events` only). Queries without a LIMIT get `LIMIT 200`
+     injected; aggregation queries (`GROUP BY`) get `LIMIT 1000`.
+  4. Local-only deployment — `CGSIM_DB_PATH` is a local filesystem path.
+
+  Pipeline: LLM call 1 (temperature 0.0, 512 tokens) generates SQL using a
+  system prompt that embeds the full EVENTS schema, all METADATA fields by
+  event type, `json_extract()` guidance, the `CANNOT_ANSWER` sentinel, explicit
+  exclusion of the uncalibrated `cost` field, and eight worked example patterns.
+  The generated SQL is fence-stripped, checked for refusals, and passed through
+  the AST guard before execution. LLM call 2 (temperature 0.2, 1024 tokens)
+  receives the original question, the executed SQL, and the raw results as JSON,
+  and returns a natural-language summary with correct units. LLM call 2 is
+  non-fatal: if it fails, the raw evidence dict is still returned with
+  `summary: null`.
+
+  `pyproject.toml` changes: `cgsim.sim_query` entry point uncommented;
+  `sqlglot>=25.0` added as a package dependency.
+
+- **`cgsim.sim_query` documentation.**
+
+  | File | Description |
+  |---|---|
+  | `docs/cgsim-database.md` | Full reference: EVENTS schema, all METADATA fields by event type, total wall-clock time formula, eight example questions with generated SQL, four-layer security model, two-LLM-call pipeline diagram, and configuration. |
+  | `docs/tools/cgsim_sim_query.md` | Tool reference card: purpose, inputs, data source, pipeline summary, guard rules table, full output key reference, configuration, key design notes. |
+
+  Updated files:
+
+  - `docs/tools/README-mcp_tools.md` — new "CGSim simulation data tools"
+    section with `cgsim.sim_query`; CGSim plugin table updated.
+  - `docs/question-cheatsheet.md` — new `cgsim.sim_query` section with six
+    themed question groups (job timing, site analysis, network congestion, I/O
+    bottleneck, job health, full job timeline).
+  - `README.md` — `docs/cgsim-database.md` added to the docs table;
+    `cgsim.sim_query` added to the AskCGSim plugin tools table; status blurb
+    updated to reflect the new tool.
+
+---
+
 ## 2026-05-12
 
 ### Fixed
