@@ -26,9 +26,101 @@ All notable changes to Bamboo are documented here.
   | `askcgsim/sim_query_impl.py` | Full NL→SQL→execute→NL pipeline. Both LLM calls are async; SQLite execution runs synchronously on the event loop thread (consistent with the DuckDB precedent in `panda_jobs_query`). |
   | `askcgsim/sim_query.py` | Thin re-export wrapper with `ImportError` fallback if `sqlglot` is absent. |
   | `askcgsim/cgsim_reader.py` | `cgsim_reader.py` vendored from the `sqlite-reader` repository. Provides typed structured access to the EVENTS table via `CGSimReader` and `EventRow`. |
-  | `tests/test_sim_query.py` | 63 unit tests covering the guard (every rejection rule, LIMIT injection, aggregation cap, CTE allowance), the full pipeline (happy path, cannot-answer, guard rejection, execution error, summarisation failure, truncation), `CgsimSimQueryTool.call()`, schema context caching, and prompt builder shape. |
+  | `tests/test_sim_query.py` | 64 unit tests covering the guard (every rejection rule, LIMIT injection, aggregation cap, CTE allowance), the full pipeline (happy path, cannot-answer, guard rejection, execution error, wrong database, summarisation failure, truncation), `CgsimSimQueryTool.call()`, schema context caching, and prompt builder shape. |
 
   Security — four independent read-only layers:
+
+  1. SQLite URI `file:{path}?mode=ro` — the driver refuses any write at the OS level.
+  2. `PRAGMA query_only = ON` — a second enforcement inside the SQLite library.
+  3. sqlglot AST guard (`validate_and_guard`) — parses with the SQLite dialect;
+     enforces single statement, SELECT-only root, no forbidden constructs at any
+     AST depth, no system tables (`sqlite_master`, `sqlite_sequence`, …), and a
+     table allow-list (`events` only). Queries without a LIMIT get `LIMIT 200`
+     injected; aggregation queries (`GROUP BY`) get `LIMIT 1000`.
+  4. Local-only deployment — `CGSIM_DB_PATH` is a local filesystem path.
+
+  `pyproject.toml` changes: `cgsim.sim_query` entry point uncommented;
+  `sqlglot>=25.0` added as a package dependency.
+
+- **`cgsim.sim_query` documentation** — `docs/cgsim-database.md`,
+  `docs/tools/cgsim_sim_query.md`; updated `docs/tools/README-mcp_tools.md`,
+  `docs/question-cheatsheet.md`, `README.md`.
+
+### Fixed
+
+- **`cgsim.sim_query` routing** — `plugin_id` was not reaching the fast-path
+  interceptors. `_run_fast_path_intercepts` and `_run_db_query_fast_path` had no
+  `plugin_id` parameter, so every `_build_deterministic_plan` call inside them
+  defaulted to `"atlas"` and routed simulation questions to `panda_jobs_query`.
+  `plugin_id` is now threaded through the full chain:
+  `_route()` → `_run_fast_path_intercepts` → `_run_db_query_fast_path` →
+  `_build_deterministic_plan`. The CGSim branch in `_build_deterministic_plan`
+  was also moved before the `_is_jobs_db_question` check so it takes priority.
+
+- **LLM planner routing for CGSim (fast-path off)** — the planner had no
+  plugin awareness, causing it to select `panda_jobs_query` for simulation
+  questions when `BAMBOO_FAST_PATH=0`. Two changes:
+  - `plugin_id` is now passed from `bamboo_answer.call()` through `plan_args`
+    to `bamboo_plan_tool.call()` and into `build_planner_system_prompt()`.
+  - `build_planner_system_prompt` now dispatches to a plugin-specific prompt
+    builder. The CGSim prompt (`_build_cgsim_planner_prompt`) contains no PanDA
+    vocabulary — it only knows `cgsim.sim_query`, `cgsim.doc_search`, and
+    `cgsim.doc_bm25`, with clear guidance to prefer `cgsim.sim_query` for any
+    simulation-data question.
+
+- **Wrong-database error handling** — when the file at `CGSIM_DB_PATH` exists
+  but contains no `EVENTS` table (empty file, wrong database), the tool now
+  returns a specific `_wrong_database_evidence` error message rather than the
+  generic "query could not be executed" message.
+
+- **SQL generation prompt — ambiguous follow-up questions** — added explicit
+  examples for "show me all jobs" / "list all job IDs" (`SELECT DISTINCT
+  JOB_ID FROM EVENTS`) and strengthened the prompt to state that `EVENTS` is
+  the only permitted table. Without this, follow-up questions like "show me all
+  jobs" were generating PanDA-schema SQL (`SELECT * FROM jobs`) which the AST
+  guard correctly blocked.
+
+- **Summarisation prompt — tie/uniform distribution** — added an explicit
+  instruction to report when all rows share the same ranked value (e.g. all
+  sites have the same job count) rather than reporting only the top row as if
+  it were uniquely the winner.
+
+### Improved
+
+- **`cgsim.sim_query` tracing** — three sub-spans are now emitted inside
+  `fetch_and_analyse` so `/tracing` shows the breakdown between the two LLM
+  calls and the SQLite execution:
+  - `cgsim.sim_query/sql_generation` (`llm_call`) — SQL generation latency and
+    token counts.
+  - `cgsim.sim_query/sqlite_execute` (`tool_call`) — SQLite execution time and
+    row count.
+  - `cgsim.sim_query/summarisation` (`llm_call`) — summarisation latency and
+    token counts.
+  All three spans correctly wrap the operation they measure (the `generate()`
+  call is now *inside* the `async with span(...)` block).
+
+- **Planner tracing fix** — the `bamboo_plan` `llm_call` span previously
+  recorded 0 ms because `client.generate()` was called *before* the span
+  opened. Fixed by moving `generate()` inside the span, consistent with the
+  corrected `cgsim.sim_query` spans.
+
+- **`cgsim.sim_query` synthesis bypass** — when `cgsim.sim_query` returns a
+  non-null `summary`, the executor now returns it directly without a redundant
+  `bamboo_llm_answer` synthesis call. This saves ~3 seconds per query (one
+  full LLM round-trip). The synthesis span is still emitted with
+  `bypass="cgsim_summary"` for tracing consistency. The bypass falls through to
+  normal synthesis if `summary` is null (e.g. summarisation LLM failure).
+
+- **TUI fallback banner** — replaced the AskPanDA ASCII art in `FALLBACK_BANNER`
+  with "Bamboo MCP" ASCII art (standard figlet font, 5-line layout matching the
+  original height). Also updated all transient UI strings that previously said
+  "AskPanDA": the default `display_name`, input placeholder, response panel
+  title, and both error-fallback display names in `_load_banner`. Plugin-specific
+  banners (e.g. AskCGSim) still override the fallback once `ui_manifest` loads.
+
+---
+
+## 2026-05-12  Security — four independent read-only layers:
 
   1. SQLite URI `file:{path}?mode=ro` — the driver refuses any write at the OS level.
   2. `PRAGMA query_only = ON` — a second enforcement inside the SQLite library.

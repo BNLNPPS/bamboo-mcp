@@ -169,16 +169,15 @@ def extract_first_json_object(text: str) -> str:
     raise ValueError("Unable to extract valid JSON object")
 
 
-def build_planner_system_prompt(schema: dict[str, Any]) -> str:
-    """Build the system prompt for the planner.
+def _build_atlas_planner_prompt(schema_compact: str) -> str:
+    """Return the planner system prompt for the ATLAS / ePIC plugin.
 
     Args:
-        schema: JSON schema that the model output must conform to.
+        schema_compact: Compact JSON schema string for the Plan output format.
 
     Returns:
-        str: System prompt text.
+        System prompt string.
     """
-    schema_compact = json.dumps(schema, ensure_ascii=False)
     return (
         "You are a tool planner for an MCP server. "
         "Your job is to output a single JSON object that conforms exactly to the provided JSON Schema.\n\n"
@@ -223,6 +222,62 @@ def build_planner_system_prompt(schema: dict[str, Any]) -> str:
         "Never answer general questions from the LLM alone — always retrieve first.\n\n"
         f"JSON Schema (must match exactly):\n{schema_compact}\n"
     )
+
+
+def _build_cgsim_planner_prompt(schema_compact: str) -> str:
+    """Return the planner system prompt for the CGSim plugin.
+
+    Contains no knowledge of PanDA tools — only CGSim tools.
+
+    Args:
+        schema_compact: Compact JSON schema string for the Plan output format.
+
+    Returns:
+        System prompt string.
+    """
+    return (
+        "You are a tool planner for the CGSim simulation assistant (Bamboo MCP). "
+        "Your job is to output a single JSON object that conforms exactly to the provided JSON Schema.\n\n"
+        "Hard rules:\n"
+        "- Output MUST be valid JSON (no trailing commas).\n"
+        "- Output MUST be a single JSON object, and MUST NOT be wrapped in markdown fences.\n"
+        "- Do not include any explanation outside the JSON object.\n"
+        "- Only propose tools that appear in the provided tool catalog.\n"
+        "- Be conservative: if uncertain, set route='PLAN' and confidence lower.\n\n"
+        "Routing guidance:\n"
+        "- If the question asks about simulation results — job timings, execution durations, "
+        "queue wait times, file transfer speeds, network congestion, site allocation, "
+        "disk I/O, retry rates, CPU/storage utilisation, or any data recorded in the "
+        "simulation database — use cgsim.sim_query. route=FAST_PATH. "
+        "This includes generic questions like 'show me all jobs', 'list all job IDs', "
+        "'what happened during the simulation', 'which site was busiest'.\n"
+        "- If the question asks about how CGSim or SimGrid works, plugin APIs, "
+        "configuration options, or concepts (e.g. 'what is a netzone?', "
+        "'how do I write a plugin?', 'what does assignJob do?'): "
+        "use cgsim.doc_search AND cgsim.doc_bm25 together. route=RETRIEVE.\n"
+        "- When in doubt, prefer cgsim.sim_query over the doc tools — most questions "
+        "in this context are about simulation results, not documentation.\n\n"
+        f"JSON Schema (must match exactly):\n{schema_compact}\n"
+    )
+
+
+def build_planner_system_prompt(schema: dict[str, Any], plugin_id: str = "") -> str:
+    """Build the system prompt for the planner.
+
+    Selects a plugin-specific prompt when *plugin_id* is recognised, falling
+    back to the ATLAS prompt for unknown plugins.
+
+    Args:
+        schema: JSON schema that the model output must conform to.
+        plugin_id: Active plugin identifier (e.g. ``"cgsim"``, ``"atlas"``).
+
+    Returns:
+        str: System prompt text.
+    """
+    schema_compact = json.dumps(schema, ensure_ascii=False)
+    if plugin_id == "cgsim":
+        return _build_cgsim_planner_prompt(schema_compact)
+    return _build_atlas_planner_prompt(schema_compact)
 
 
 def build_planner_user_prompt(
@@ -443,10 +498,12 @@ class BambooPlannerTool:
         hints = arguments.get("hints")
         hints_dict = hints if isinstance(hints, dict) else None
 
+        plugin_id: str = str(arguments.get("plugin_id", "") or "").strip().lower()
+
         schema = get_plan_json_schema()
         tool_catalog = _collect_tool_catalog(namespaces=namespaces_list)
 
-        system = build_planner_system_prompt(schema)
+        system = build_planner_system_prompt(schema, plugin_id=plugin_id)
         user = build_planner_user_prompt(question=question, tool_catalog=tool_catalog, hints=hints_dict)
         planner_messages: list[Message] = [
             {"role": "system", "content": system},
@@ -530,22 +587,24 @@ async def _call_default_llm(messages: list[Message], temperature: float, max_tok
 
     model_spec = registry.get(default_profile)
     client = await manager.get_client(model_spec)
-    resp = await client.generate(
-        messages=messages,
-        params=GenerateParams(temperature=temperature, max_tokens=max_tokens),
-    )
-
-    # Emit a llm_call span so token counts appear in /costs and /tracing.
-    usage = resp.usage
+    # Emit a llm_call span so token counts and wall-clock time appear in
+    # /costs and /tracing.  generate() is called *inside* the span so the
+    # duration reflects the real LLM latency, not zero.
     async with span(
         EVENT_LLM_CALL,
         tool="bamboo_plan",
         provider=getattr(model_spec, "provider", ""),
         model=getattr(model_spec, "model", ""),
-        input_tokens=usage.input_tokens if usage else None,
-        output_tokens=usage.output_tokens if usage else None,
-    ):
-        pass
+    ) as s:
+        resp = await client.generate(
+            messages=messages,
+            params=GenerateParams(temperature=temperature, max_tokens=max_tokens),
+        )
+        usage = resp.usage
+        s.set(
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+        )
 
     return resp.text
 

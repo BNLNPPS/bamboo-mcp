@@ -593,6 +593,25 @@ class TestFetchAndAnalysePipeline:
         assert result["error"] is not None
         assert "not found" in result["error"].lower() or "CGSIM_DB_PATH" in result["error"]
 
+    def test_wrong_database_no_events_table(self, tmp_path: Any) -> None:
+        """A file that exists but has no EVENTS table returns a clear error."""
+        db_file = str(tmp_path / "wrong.db")
+        # Create a SQLite file with a different schema.
+        conn = sqlite3.connect(db_file)
+        conn.execute("CREATE TABLE unrelated (id INTEGER)")
+        conn.commit()
+        conn.close()
+
+        sql = "SELECT COUNT(*) AS n FROM EVENTS LIMIT 200"
+
+        with (
+            patch("askcgsim.sim_query_impl._call_llm_for_sql", _make_llm_patch(sql)),
+        ):
+            result = asyncio.run(fetch_and_analyse("How many events?", db_file))
+
+        assert result["error"] is not None
+        assert "EVENTS" in result["error"] or "cgsim" in result["error"].lower()
+
     def test_llm_sql_fail_returns_structured_evidence(self) -> None:
         """An LLM call failure during SQL generation returns a structured error."""
         failing_llm = AsyncMock(side_effect=RuntimeError("LLM offline"))

@@ -469,11 +469,13 @@ CANNOT_ANSWER_SENTINEL: str = "CANNOT_ANSWER"
 #: System prompt template for SQL generation (LLM call 1).
 _SQL_GENERATION_SYSTEM: str = """\
 You are a read-only SQL assistant for a CGSim simulation database (SQLite dialect).
+The database has ONE table: EVENTS. Every query must use FROM EVENTS.
 
 {schema_context}
 
 RULES:
 - Return ONLY a single SELECT statement. No explanation, no markdown, no code fences.
+- The ONLY permitted table is EVENTS. Never reference any other table name.
 - Use json_extract(METADATA, '$.field') to access any METADATA field.
 - Do not use INSERT, UPDATE, DELETE, DROP, CREATE, or any DDL or DML.
 - Do not reference sqlite_master, sqlite_sequence, or any system tables.
@@ -486,6 +488,12 @@ RULES:
 - If the question cannot be answered from the EVENTS table, reply with exactly: CANNOT_ANSWER
 
 EXAMPLE QUERIES:
+
+-- "Show me all jobs" / "List all jobs" / "What jobs are in the simulation?"
+SELECT DISTINCT JOB_ID FROM EVENTS ORDER BY JOB_ID LIMIT 200
+
+-- "Show me all job IDs" / "What are the job IDs?"
+SELECT DISTINCT JOB_ID FROM EVENTS ORDER BY JOB_ID LIMIT 200
 
 -- "How long did job J-001 take to execute?"
 SELECT json_extract(METADATA, '$.duration') AS execution_duration_s
@@ -515,6 +523,7 @@ WHERE JOB_ID = 'J-001' AND EVENT = 'JobExecution' AND STATE = 'Finished'
 LIMIT 1
 
 -- "Which site had the most jobs allocated to it?"
+-- Return all sites with counts so ties are visible — do NOT use LIMIT 1.
 SELECT json_extract(METADATA, '$.site') AS site, COUNT(*) AS job_count
 FROM EVENTS
 WHERE EVENT = 'JobAllocation' AND STATE = 'Finished'
@@ -583,10 +592,13 @@ speed and bandwidth values are in FLOP/s or bytes/s respectively.
 Utilisation fractions are in [0.0, 1.0] (multiply by 100 for percent).
 retries=0 means the job succeeded on its first attempt.
 
-Summarise the results clearly and concisely in natural language. \
-Mention the key numbers. \
-If the result set was truncated (more rows exist than shown), say so. \
-If no rows were returned, say the query matched no events. \
+Summarise the results clearly and concisely in natural language.
+Mention the key numbers.
+If the result set was truncated (more rows exist than shown), say so.
+If no rows were returned, say the query matched no events.
+If all rows have the same value for an ordered/ranked column (e.g. all sites have \
+the same job count), explicitly say so — do not report only the top row as if it \
+were uniquely the winner.
 Do not reproduce the full raw results verbatim.\
 """
 

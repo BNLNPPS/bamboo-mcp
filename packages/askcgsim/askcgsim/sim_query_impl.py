@@ -231,6 +231,7 @@ async def _call_llm_for_sql(question: str, schema_context: str) -> str:
         RuntimeError: If the LLM manager or selector is not initialised.
     """
     from bamboo.llm.types import GenerateParams, Message  # deferred
+    from bamboo.tracing import EVENT_LLM_CALL, span  # deferred
     from askcgsim.sim_query_schema import build_sql_prompt  # deferred
 
     client = await _get_llm_client()
@@ -241,10 +242,22 @@ async def _call_llm_for_sql(question: str, schema_context: str) -> str:
         for m in messages_raw
     ]
 
-    resp = await client.generate(
-        messages=messages,
-        params=GenerateParams(temperature=0.0, max_tokens=512),
-    )
+    async with span(
+        EVENT_LLM_CALL,
+        tool="cgsim.sim_query/sql_generation",
+        provider=getattr(client, "provider", ""),
+        model=getattr(client, "model", ""),
+    ) as s:
+        resp = await client.generate(
+            messages=messages,
+            params=GenerateParams(temperature=0.0, max_tokens=512),
+        )
+        usage = resp.usage
+        s.set(
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+        )
+
     return resp.text
 
 
@@ -267,6 +280,7 @@ async def _call_llm_for_summary(
         RuntimeError: If the LLM manager or selector is not initialised.
     """
     from bamboo.llm.types import GenerateParams, Message  # deferred
+    from bamboo.tracing import EVENT_LLM_CALL, span  # deferred
     from askcgsim.sim_query_schema import build_summarise_prompt  # deferred
 
     client = await _get_llm_client()
@@ -277,16 +291,47 @@ async def _call_llm_for_summary(
         for m in messages_raw
     ]
 
-    resp = await client.generate(
-        messages=messages,
-        params=GenerateParams(temperature=0.2, max_tokens=1024),
-    )
+    async with span(
+        EVENT_LLM_CALL,
+        tool="cgsim.sim_query/summarisation",
+        provider=getattr(client, "provider", ""),
+        model=getattr(client, "model", ""),
+    ) as s:
+        resp = await client.generate(
+            messages=messages,
+            params=GenerateParams(temperature=0.2, max_tokens=1024),
+        )
+        usage = resp.usage
+        s.set(
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+        )
+
     return resp.text
 
 
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
+def _emit_sqlite_span(execution_time_ms: float, row_count: int, truncated: bool) -> None:
+    """Emit a best-effort tracing span for the SQLite execution step.
+
+    No-op when tracing is disabled or bamboo is not installed.  Never raises —
+    tracing must never block the main pipeline.
+
+    Args:
+        execution_time_ms: Query execution time in milliseconds.
+        row_count: Number of rows returned.
+        truncated: Whether the result was capped at MAX_ROWS.
+    """
+    try:
+        from bamboo.tracing import EVENT_TOOL_CALL, emit_sync  # deferred
+        emit_sync(
+            EVENT_TOOL_CALL,
+            tool="cgsim.sim_query/sqlite_execute",
+            duration_ms=execution_time_ms,
+            row_count=row_count,
+            truncated=truncated,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def fetch_and_analyse(
@@ -403,6 +448,8 @@ async def fetch_and_analyse(
             or "unable to open" in exc_str
         ):
             return _db_unavailable_evidence(question, db_path)
+        if "no such table" in exc_str:
+            return _wrong_database_evidence(question, db_path)
         return _execution_error_evidence(
             question=question,
             sql=sanitised_sql,
@@ -415,6 +462,14 @@ async def fetch_and_analyse(
         exec_result["row_count"],
         exec_result["truncated"],
         exec_result["execution_time_ms"],
+    )
+
+    # Emit a tracing span for the SQLite execution step so it appears in
+    # /tracing alongside the two LLM call spans.
+    _emit_sqlite_span(
+        exec_result["execution_time_ms"],
+        exec_result["row_count"],
+        exec_result["truncated"],
     )
 
     # --- Stage 7: LLM summarisation -----------------------------------------
@@ -476,7 +531,7 @@ def _unable_to_answer_evidence(question: str, db_path: str) -> dict[str, Any]:
         "db_path": db_path,
         "summary": None,
         "error": (
-            "I wasn't able to translate that question into a database query. "
+            "I wasn't able to translate that question into a CGSim database query. "
             "Try rephrasing with a specific job ID, site name, or event type."
         ),
         "guard_rejection": None,
@@ -550,7 +605,7 @@ def _execution_error_evidence(
         "db_path": db_path,
         "summary": None,
         "error": (
-            "The query could not be executed. "
+            "The CGSim simulation database query could not be executed. "
             "Try a more specific question or check that the database file is available."
         ),
         "guard_rejection": None,
@@ -578,9 +633,42 @@ def _db_unavailable_evidence(question: str, db_path: str) -> dict[str, Any]:
         "db_path": db_path,
         "summary": None,
         "error": (
-            f"The CGSim database file was not found at '{db_path}'. "
+            f"The CGSim simulation database file was not found at '{db_path}'. "
             "Set the CGSIM_DB_PATH environment variable to the path of your "
             "simulation output database."
+        ),
+        "guard_rejection": None,
+    }
+
+
+def _wrong_database_evidence(question: str, db_path: str) -> dict[str, Any]:
+    """Return a structured evidence dict when the file exists but lacks the EVENTS table.
+
+    This indicates the file at *db_path* is not a CGSim simulation database —
+    it may be an empty SQLite file, a different application's database, or a
+    placeholder file created before a simulation run.
+
+    Args:
+        question: The original user question.
+        db_path: The path to the SQLite file that was opened.
+
+    Returns:
+        Evidence dict with a user-safe error message.
+    """
+    return {
+        "question": question,
+        "sql": None,
+        "columns": [],
+        "rows": [],
+        "row_count": 0,
+        "truncated": False,
+        "execution_time_ms": 0.0,
+        "db_path": db_path,
+        "summary": None,
+        "error": (
+            f"The file at '{db_path}' does not appear to be a CGSim simulation database "
+            "(the EVENTS table was not found). "
+            "Set CGSIM_DB_PATH to the path of a database produced by a CGSim run."
         ),
         "guard_rejection": None,
     }
