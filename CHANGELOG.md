@@ -8,7 +8,7 @@ All notable changes to Bamboo are documented here.
 
 ---
 
-## 2026-05-15
+## v1.0.7 — 2026-05-15
 
 ### Added
 
