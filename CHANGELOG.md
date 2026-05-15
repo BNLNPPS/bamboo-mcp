@@ -6,6 +6,98 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Streamlit — generic inline plot.** After any tool response with flat tabular
+  evidence (`columns` + `rows`), an interactive Plotly chart is rendered directly
+  in the main chat area.  Chart type is chosen automatically:
+
+  | Column pattern | Chart |
+  |---|---|
+  | One text + two or more numerics | Scatter coloured by the text column |
+  | One text + one numeric | Horizontal bar |
+  | One numeric, ≥ 4 rows | Histogram |
+  | Two numerics, no text | Scatter |
+
+  The plot is suppressed for tools with rich-nested evidence (task status, job
+  status, log analysis, etc.) via `_PLOT_UNSUPPORTED_TOOLS`.  No plugin name is
+  hard-coded — the mechanism works for any current or future tool that returns
+  the `columns`/`rows` shape, including future harvester or jobs-query tools.
+
+  ID-like columns (`*_id`, `JOB_ID`) are excluded from axis/colour selection.
+  Axis labels are derived from column names with units from `_COLUMN_UNIT_MAP`.
+  Requires `plotly>=5.0` (added to `requirements-ui.txt`).
+
+  New functions: `_detect_plot`, `_build_plot_figure`, `_render_plot_expander`,
+  `_column_label`.  New constants: `_PLOT_UNSUPPORTED_TOOLS`, `_COLUMN_UNIT_MAP`.
+
+- **Streamlit — plugin-aware display name.** The sidebar title, page header, and
+  chat input placeholder now always show the plugin's display name (from
+  `ui_manifest`) rather than the generic "AskPanDA".  Before the server connects,
+  the name is derived from `plugin_id` (e.g. "CGSIM"); after connection it is
+  updated to the manifest value (e.g. "Bamboo – AskCGSim").  Switching plugins
+  in the sidebar resets the name immediately via `last_plugin_id` tracker.
+
+### Fixed
+
+- **Plugin tool isolation — PanDA tools no longer visible to non-PanDA plugins.**
+  Two complementary fixes ensure that neither the deterministic fast-path nor the
+  LLM planner can route CGSim (or any future non-PanDA plugin) questions to PanDA
+  tools:
+
+  1. `bamboo_answer.py` — `_build_deterministic_plan` wraps all PanDA-specific
+     rules (pilot source, log analysis, job status, task status) in a single
+     `if plugin_id in _PANDA_PLUGINS` block where
+     `_PANDA_PLUGINS = frozenset({"atlas", "epic"})`.  Adding a new non-PanDA
+     plugin requires no code change.
+
+  2. `bamboo_answer.py` — when falling through to the LLM planner,
+     `namespaces=[plugin_id]` is passed for any non-atlas plugin so the planner
+     receives a restricted tool catalog.
+
+  3. `planner.py` — `_collect_tool_catalog` now also excludes PanDA core tools
+     (`panda_task_status`, `panda_job_status`, `panda_log_analysis`,
+     `panda_jobs_query`, `panda_harvester_workers`, `panda_server_health`,
+     `panda_doc_search`, `panda_doc_bm25`, `panda_queue_info`, `cric_query`,
+     `pilot_source_analysis`) when a non-PanDA namespace is active.  Previously
+     only entry-point tools were namespace-filtered; core tools were always
+     included, allowing the LLM to pick PanDA tools regardless of plugin.
+
+  4. `planner.py` — CGSim planner prompt instructs the LLM to pass the user's
+     question to `cgsim.sim_query` verbatim, preventing the planner from
+     expanding it into a long multi-part string that exceeds the SQL generation
+     token budget and produces truncated/malformed SQL.
+
+- **`cgsim.sim_query` — SQL generation token cap raised from 512 to 1024.**
+  Complex queries (multi-field breakdowns, several `json_extract` calls) were
+  being truncated at 512 tokens, producing malformed SQL with unterminated
+  string literals.
+
+- **`cgsim.sim_query` — enumeration requests now list all values.**  The inner
+  summarisation prompt (`_SUMMARISE_SYSTEM`) and the outer synthesis prompt
+  (`_SYSTEM_CGSIM_SIM_QUERY`) both carry a LIST RULE that forces verbatim
+  enumeration when the question asks to list or show specific identifiers.
+  The summary bypass in `execute_plan` is skipped for enumeration questions
+  (detected by `_is_enumeration_question`) so the LIST RULE fires.
+
+- **Streamlit `_fetch_evidence` — double-nesting and null-error guard.**
+  `bamboo_last_evidence` wraps its payload as
+  `{"tool": ..., "evidence": {"evidence": {...}}}` — two unwraps are needed.
+  The old code stopped after one, so `evidence` was always `None` for
+  `cgsim.sim_query` responses.  The null-error guard was also checking key
+  existence (`"error" in inner`) rather than key value (`inner.get("error")`),
+  causing it to fire on successful responses that include `"error": null`.
+
+- **`interfaces/shared/mcp_client.py` — mcp SDK 1.x compatibility.**
+  The `streamable_http_client` function was renamed to `streamablehttp_client`
+  and its signature changed (headers/timeout as primitives instead of a
+  pre-built `httpx.AsyncClient`).  The client now detects both names and
+  both signatures at runtime via `inspect.signature`, working across mcp SDK
+  versions without requiring a version pin.
+
+- **`requirements-rag.txt` — `pysqlite3-binary` restricted to Linux.**
+  Added `; sys_platform == "linux"` platform marker.  The package has no
+  macOS wheel and is not needed on macOS (system SQLite is modern enough).
 ---
 
 ## v1.0.7 — 2026-05-15
