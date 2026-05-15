@@ -188,7 +188,7 @@ _SYSTEM_GENERIC: str = (
 # ---------------------------------------------------------------------------
 
 _SYSTEM_RAG_CGSIM: str = (
-    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "You are Bamboo, an expert assistant for AskCGSim and SimGrid distributed "
     "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
     "CGSim is a SimGrid-based framework for simulating large-scale computing grids "
     "such as the WLCG. It ingests historical PanDA job records for calibration and "
@@ -212,7 +212,7 @@ _SYSTEM_RAG_CGSIM: str = (
 )
 
 _SYSTEM_RAG_NO_CONTEXT_CGSIM: str = (
-    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "You are Bamboo, an expert assistant for AskCGSim and SimGrid distributed "
     "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
     "CGSim ingests historical PanDA job records for calibration and is designed "
     "to simulate WLCG-scale infrastructures managed by PanDA. Questions about "
@@ -230,7 +230,7 @@ _SYSTEM_RAG_NO_CONTEXT_CGSIM: str = (
 )
 
 _SYSTEM_GENERIC_CGSIM: str = (
-    "You are Bamboo, an expert assistant for CGSim and SimGrid distributed "
+    "You are Bamboo, an expert assistant for AskCGSim and SimGrid distributed "
     "computing simulation, with specific knowledge of the CGSim/PanDA integration.\n"
     "CGSim ingests historical PanDA job records for calibration and is designed "
     "to simulate WLCG-scale infrastructures managed by PanDA. Questions about "
@@ -313,6 +313,27 @@ _SYSTEM_CRIC_QUERY: str = (
     "- Do not include any timestamp, freshness, or 'data as of' text — this is\n"
     "  added automatically as a footnote after your response.\n"
     "- For count questions, lead with the number.\n"
+)
+
+_SYSTEM_CGSIM_SIM_QUERY: str = (
+    "You are Bamboo, an AI assistant for the CGSim distributed computing simulator.\n"
+    "You have queried the CGSim simulation output SQLite database and received structured results.\n"
+    "The evidence contains: the SQL query that was executed, the result rows, row_count, "
+    "truncated (true if the result was capped), summary (a pre-generated natural-language "
+    "summary from a prior LLM call, may be null), and an error field (null means success).\n"
+    "Field units: TIME and duration values are in SECONDS. size values are in BYTES. "
+    "speed and bandwidth values are in FLOP/s or bytes/s. "
+    "Utilisation fractions are in [0.0, 1.0] — multiply by 100 for percent.\n"
+    "Rules:\n"
+    "- If summary is non-null, you MAY use it as a starting point but verify it against the rows.\n"
+    "- Answer directly and concisely from the rows and row_count in the evidence.\n"
+    "- If error is null and rows are present, give the answer confidently.\n"
+    "- If row_count is 0, say the query matched no simulation events.\n"
+    "- If the error field is non-null, explain the problem clearly.\n"
+    "- If truncated is true, note the result was capped and suggest a more specific question.\n"
+    "- Always include units in your answer (seconds, bytes, FLOP/s, %).\n"
+    "- Do not fabricate values not present in the rows.\n"
+    "- PanDA/CGSim correlation questions are explicitly in scope — do not deflect them.\n"
 )
 
 _SYSTEM_HARVESTER_WORKERS: str = (
@@ -657,6 +678,8 @@ def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> s
         return _SYSTEM_JOBS_QUERY
     if "cric_query" in tool_names:
         return _SYSTEM_CRIC_QUERY
+    if "cgsim.sim_query" in tool_names:
+        return _SYSTEM_CGSIM_SIM_QUERY
     if any(t in tool_names for t in doc_tools):
         return rag_sys
     return generic_sys
@@ -1087,6 +1110,20 @@ async def execute_plan(
                             tools=called_tool_names, route=plan.route.value):
                 pass  # emit span for tracing consistency
             return text_content(sentinel)
+
+    # Summary bypass: cgsim.sim_query already ran an LLM summarisation call
+    # internally.  When a non-empty summary is present, return it directly
+    # rather than paying for another LLM synthesis call.
+    if called_tool_names == ["cgsim.sim_query"]:
+        _cgsim_stored = _last_evidence_store.get("cgsim.sim_query", {})
+        _cgsim_evidence = _cgsim_stored.get("evidence", _cgsim_stored)
+        _cgsim_summary = _cgsim_evidence.get("summary") if isinstance(_cgsim_evidence, dict) else None
+        if _cgsim_summary:
+            async with span(EVENT_SYNTHESIS, tool="bamboo_executor",
+                            tools=called_tool_names, route=plan.route.value,
+                            bypass="cgsim_summary"):
+                pass  # emit span for tracing consistency
+            return text_content(_cgsim_summary)
 
     system, user = _build_synthesis_prompt(
         called_tool_names, evidence_parts, question, errors,

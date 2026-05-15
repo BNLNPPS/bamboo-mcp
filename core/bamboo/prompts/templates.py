@@ -33,7 +33,7 @@ _PLUGIN_IDENTITY: dict[str, str] = {
         "If data is missing, ask for identifiers (task id, job id, site) and propose next steps."
     ),
     "cgsim": (
-        "You are Bamboo, an assistant for CGSim and SimGrid distributed computing "
+        "You are Bamboo, an assistant for AskCGSim and SimGrid distributed computing "
         "simulation, with specific knowledge of the CGSim/PanDA integration. "
         "CGSim is a SimGrid-based framework for simulating large-scale computing "
         "grids such as the WLCG. It ingests historical PanDA job records for "

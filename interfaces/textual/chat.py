@@ -74,11 +74,11 @@ _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
 _BARE_URL_RE = re.compile(r"(?<!\()(https?://[^\s\)\]\>\"']+)")
 
 FALLBACK_BANNER = r"""
-    _        _     ____            ____     _
-   / \   ___| | __|  _ \ ___ _ __ |  _ \   / \
-  / _ \ / __| |/ /  |_) /_` | '_ \| | | | / _ \
- / ___ \\__ \   <|  __/ (_| | | | | |_| |/ ___ \
-/_/   \_\___/_|\_\_|   \__,_|_| |_|____//_/   \_\
+ ____                  _                    __  __  ____ ____
+| __ )  __ _ _ __ ___ | |__   ___   ___    |  \/  |/ ___|  _ \
+|  _ \ / _` | '_ ` _ \| '_ \ / _ \ / _ \   | |\/| | |   | |_) |
+| |_) | (_| | | | | | | |_) | (_) | (_) |  | |  | | |___|  __/
+|____/ \__,_|_| |_| |_|_.__/ \___/ \___/   |_|  |_|\____|_|
 """.strip("\n").splitlines()
 
 
@@ -508,7 +508,7 @@ class BambooTui(App):
         self.answer_tool: Optional[str] = None
 
         self.banner_lines: List[str] = FALLBACK_BANNER[:]
-        self.display_name: str = f"AskPanDA – {plugin_id.upper()}"
+        self.display_name: str = f"Bamboo MCP – {plugin_id.upper()}"
         self.help_text: str = "Enter to send • /help"
 
         self.debug_mode: bool = False
@@ -570,7 +570,7 @@ class BambooTui(App):
             with Container(id="input_row"):
                 self.input_widget = Input(
                     id="input",
-                    placeholder="AskPanDA > (Enter to send)",
+                    placeholder="Bamboo MCP > (Enter to send)",
                 )
                 yield self.input_widget
 
@@ -866,7 +866,7 @@ class BambooTui(App):
         tool = f"{self.plugin_id}.ui_manifest"
         if tool not in self.tool_names:
             self.banner_lines = FALLBACK_BANNER[:]
-            self.display_name = f"AskPanDA – {self.plugin_id.upper()}"
+            self.display_name = f"Bamboo MCP – {self.plugin_id.upper()}"
             self.help_text = "Enter to send • /help"
             return
 
@@ -893,7 +893,7 @@ class BambooTui(App):
             import sys as _sys
             print(f"[bamboo] _load_banner failed for tool '{tool}': {exc}", file=_sys.stderr)
             self.banner_lines = FALLBACK_BANNER[:]
-            self.display_name = f"AskPanDA – {self.plugin_id.upper()}"
+            self.display_name = f"Bamboo MCP – {self.plugin_id.upper()}"
             self.help_text = "Enter to send • /help"
 
     def _render_banner(self) -> None:
@@ -1804,7 +1804,7 @@ class BambooTui(App):
         self._last_response_links = self._extract_links(msg)
         display_msg = self._expand_links_for_display(msg)
         renderable = Text(display_msg) if self._is_preformatted(display_msg) else Markdown(display_msg)
-        self._write_panel(renderable, title=f"{_now()}  AskPanDA", border_style="dim")
+        self._write_panel(renderable, title=f"{_now()}  Bamboo MCP", border_style="dim")
         if self._last_response_links:
             n = len(self._last_response_links)
             word = "link" if n == 1 else "links"

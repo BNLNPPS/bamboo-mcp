@@ -1,7 +1,7 @@
-"""CGSim vector-similarity documentation search tool.
+"""AskCGSim vector-similarity documentation search tool.
 
 Thin subclass of :class:`bamboo.tools.doc_rag.PandaDocSearchTool` that
-overrides the tool description (so the Bamboo planner routes CGSim
+overrides the tool description (so the Bamboo planner routes AskCGSim
 documentation questions correctly) and the ChromaDB collection name default.
 
 All query logic, result formatting, and caching behaviour are inherited
@@ -33,7 +33,7 @@ _CGSIM_DEFAULT_COLLECTION = "cgsim_docs"
 
 
 class CgsimDocSearchTool(PandaDocSearchTool):
-    """ChromaDB vector-search tool scoped to the CGSim documentation corpus.
+    """ChromaDB vector-search tool scoped to the AskCGSim documentation corpus.
 
     Inherits all query, caching, and formatting logic from
     :class:`~bamboo.tools.doc_rag.PandaDocSearchTool`.  Only the MCP tool
@@ -42,7 +42,7 @@ class CgsimDocSearchTool(PandaDocSearchTool):
 
     @staticmethod
     def get_definition() -> dict[str, Any]:
-        """Return the MCP tool definition for the CGSim documentation search.
+        """Return the MCP tool definition for the AskCGSim documentation search.
 
         Returns:
             Tool definition dict compatible with MCP discovery.
@@ -78,7 +78,7 @@ class CgsimDocSearchTool(PandaDocSearchTool):
         }
 
     def _ensure_collection(self) -> str | None:
-        """Initialise the ChromaDB client against the CGSim collection.
+        """Initialise the ChromaDB client against the AskCGSim collection.
 
         Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` from the
         environment, defaulting the collection name to ``cgsim_docs`` rather

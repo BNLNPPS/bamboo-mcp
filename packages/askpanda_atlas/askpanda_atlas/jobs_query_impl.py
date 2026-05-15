@@ -589,7 +589,7 @@ class PandaJobsQueryTool:
 
         queue: str | None = arguments.get("queue")
         if queue:
-            question = f"{question} (focus on queue: {queue})"
+            question = f"{question} (filter _queue ILIKE '{queue}%')"
 
         duckdb_path: str = os.environ.get("PANDA_DUCKDB_PATH", "jobs.duckdb")
 

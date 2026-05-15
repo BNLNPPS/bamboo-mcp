@@ -26,7 +26,7 @@ pip install -e ./core
 pip install -e ./packages/askpanda_atlas
 
 # Additional plugins
-pip install -e ./packages/cgsim
+pip install -e ./packages/askcgsim
 pip install -e ./packages/askpanda_verarubin
 pip install -e ./packages/askpanda_epic
 ```

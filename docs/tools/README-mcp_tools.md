@@ -46,6 +46,16 @@ These tools search the PanDA/Bamboo documentation corpus for conceptual question
 
 ---
 
+## CGSim simulation data tools
+
+These tools query the SQLite database produced by a CGSim simulation run.
+
+| Tool | Document | Description |
+|---|---|---|
+| `cgsim.sim_query` | [cgsim_sim_query.md](cgsim_sim_query.md) | Natural-language to SQL against the CGSim EVENTS database. |
+
+---
+
 ## Infrastructure tools
 
 | Tool | Document | Description |
@@ -100,19 +110,19 @@ The log extraction, failure classification, stderr fetching, and evidence struct
 
 ### `cgsim` plugin tools
 
-The `cgsim` package provides documentation search tools for the CGSim /
-SimGrid distributed computing simulator.  It does not include any operational
-data tools (task status, log analysis, etc.) — those are planned for future
-releases once the CGSim SQLite simulation output schema is finalised.
+The `cgsim` package provides documentation search and simulation database query
+tools for the CGSim / SimGrid distributed computing simulator.
 
 | Entry point | Tool name | Description |
 |---|---|---|
 | `cgsim.doc_search` | `cgsim.doc_search` | Vector similarity search over CGSim / SimGrid documentation |
 | `cgsim.doc_bm25` | `cgsim.doc_bm25` | BM25 keyword search over the same corpus |
 | `cgsim.ui_manifest` | `cgsim.ui_manifest` | TUI branding (banner, accent `green`, display name) |
+| `cgsim.sim_query` | `cgsim.sim_query` | Natural-language to SQL against the CGSim simulation output SQLite database |
 
-Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs` and `ASKPANDA_PLUGIN=cgsim` when
-running a CGSim deployment.
+Set `ASKPANDA_PLUGIN=cgsim` and `CGSIM_DB_PATH=/path/to/cgsim.db` when
+running a CGSim deployment.  Set `BAMBOO_CHROMA_COLLECTION=cgsim_docs` if
+using the RAG documentation tools.
 
 ### Entry point naming
 

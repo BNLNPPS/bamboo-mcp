@@ -114,7 +114,7 @@ _DENY_PHRASES: list[re.Pattern[str]] = [
 # ---------------------------------------------------------------------------
 
 _REJECTION_MESSAGE = (
-    "I can only answer questions about PanDA, ATLAS, ePIC, CGSim, and related "
+    "I can only answer questions about PanDA, ATLAS, ePIC, AskCGSim, and related "
     "HEP workflow and distributed computing systems. Please ask me something "
     "about tasks, jobs, pilots, sites, grid computing, or simulation."
 )

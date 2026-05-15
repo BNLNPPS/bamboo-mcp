@@ -531,6 +531,14 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "starting at",
     "errors at",
     "top errors",
+    "failures at",
+    "top failures",
+    "job failure",
+    "job failures",
+    "job error",
+    "job errors",
+    "common failure",
+    "common error",
     "job status at",
     "which jobs",
     "jobs at",
@@ -589,6 +597,10 @@ _JOBS_DB_SPECIFIC_SIGNALS: frozenset[str] = frozenset({
     "each status",
     "by status",
     "status breakdown",
+    "failures at",
+    "top failures",
+    "common failure",
+    "common error",
 })
 
 
@@ -633,6 +645,14 @@ _CRIC_SIGNALS: frozenset[str] = frozenset({
     "corecount",
     "cpu slots",
     "brokeroff",
+    # Copytool names and object-store vocabulary — only appear in CRIC context
+    "objectstore",
+    "object store",
+    "gfalcopy",
+    "rucio copytool",
+    "using rucio",
+    "using objectstore",
+    "using gfal",
     # Unambiguous list-all-queues phrasing — no status/site filter,
     # clearly asking for the full queue inventory from CRIC.
     "all queues",
@@ -1154,14 +1174,35 @@ def _build_deterministic_plan(
             explain="Deterministic: CRIC signals, no task/job ID → CRIC query.",
         )
 
+    # CGSim fast-path: for the CGSim plugin, all non-conceptual questions
+    # route to cgsim.sim_query regardless of whether they also match jobs DB
+    # signal phrases.  This must come before the jobs DB check so that
+    # questions like "which site had the most jobs?" route to the simulation
+    # database rather than panda_jobs_query.
+    if plugin_id == "cgsim" and not _is_conceptual_question(question):
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=0.85,
+            tool_calls=[ToolCall(
+                tool="cgsim.sim_query",
+                arguments={"question": question},
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: CGSim plugin, no task/job ID, non-conceptual → sim_query.",
+        )
+
     # Jobs DB fast-path: no IDs but the question is about live job stats.
     if _is_jobs_db_question(question):
+        jobs_args: dict[str, str] = {"question": question}
+        site = _extract_site_from_question(question)
+        if site:
+            jobs_args["queue"] = site
         return Plan(
             route=PlanRoute.FAST_PATH,
             confidence=0.9,
             tool_calls=[ToolCall(
                 tool="panda_jobs_query",
-                arguments={"question": question},
+                arguments=jobs_args,
             )],
             reuse_policy=reuse,
             explain="Deterministic: jobs DB signals, no task/job ID → jobs query.",
@@ -1545,6 +1586,7 @@ def _is_cric_followup(question: str) -> bool:
 async def _run_db_query_fast_path(
     question: str,
     history: list[Message],
+    plugin_id: str = "atlas",
 ) -> "list[MCPContent] | None":
     """Route jobs-DB or CRIC questions to the appropriate query tool.
 
@@ -1567,6 +1609,9 @@ async def _run_db_query_fast_path(
     Args:
         question: The current user question.
         history: Prior conversation turns.
+        plugin_id: Active plugin identifier; passed to
+            :func:`_build_deterministic_plan` so CGSim questions route to
+            ``cgsim.sim_query`` instead of ``panda_jobs_query``.
 
     Returns:
         A synthesised MCP content list, a clarification response, or ``None``
@@ -1630,19 +1675,19 @@ async def _run_db_query_fast_path(
             if target_db is None:
                 return text_content(_build_clarification_response(question))
             if target_db == "jobs":
-                fast_plan = _build_deterministic_plan(question, None, None)
+                fast_plan = _build_deterministic_plan(question, None, None, plugin_id=plugin_id)
                 if fast_plan is not None:
                     return await execute_plan(fast_plan, question, history)
                 return None
             # target_db is some other DB (e.g. "cric") — fall through below.
         else:
-            fast_plan = _build_deterministic_plan(question, None, None)
+            fast_plan = _build_deterministic_plan(question, None, None, plugin_id=plugin_id)
             if fast_plan is not None:
                 return await execute_plan(fast_plan, question, history)
             return None
 
     if is_cric:
-        fast_plan = _build_deterministic_plan(question, None, None)
+        fast_plan = _build_deterministic_plan(question, None, None, plugin_id=plugin_id)
         if fast_plan is not None:
             return await execute_plan(fast_plan, question, history)
 
@@ -1652,6 +1697,7 @@ async def _run_db_query_fast_path(
 async def _run_fast_path_intercepts(
     question: str,
     history: list[Message],
+    plugin_id: str = "atlas",
 ) -> "list[MCPContent] | None":
     """Run fast-path intercepts that bypass the topic guard.
 
@@ -1674,6 +1720,10 @@ async def _run_fast_path_intercepts(
     Args:
         question: The current user question.
         history: Prior conversation turns.
+        plugin_id: Active plugin identifier; passed to
+            :func:`_build_deterministic_plan` and
+            :func:`_run_db_query_fast_path` so the correct plugin tools
+            are selected (e.g. ``cgsim.sim_query`` for CGSim questions).
 
     Returns:
         ``list[MCPContent]`` if a fast-path was taken, else ``None``.
@@ -1740,13 +1790,13 @@ async def _run_fast_path_intercepts(
 
         # Pilot-only fast-path.
         if _is_pilot_question(question):
-            fast_plan = _build_deterministic_plan(question, None, None)
+            fast_plan = _build_deterministic_plan(question, None, None, plugin_id=plugin_id)
             if fast_plan is not None:
                 return await execute_plan(fast_plan, question, history)
 
         # Jobs DB fast-path and CRIC fast-path — handled by shared helper
         # that also performs multi-DB disambiguation.
-        db_result = await _run_db_query_fast_path(question, history)
+        db_result = await _run_db_query_fast_path(question, history, plugin_id=plugin_id)
         if db_result is not None:
             return db_result
 
@@ -1922,7 +1972,7 @@ class BambooAnswerTool:
         # for clearly on-topic questions.  Skipped when bypass_fast_path is
         # set so the question falls through to the topic guard and LLM planner.
         if not bypass_fast_path:
-            intercept = await _run_fast_path_intercepts(question, history)
+            intercept = await _run_fast_path_intercepts(question, history, plugin_id=plugin_id)
             if intercept is not None:
                 return intercept
 
@@ -1964,6 +2014,7 @@ class BambooAnswerTool:
             "question": question,
             "execute": True,
             "messages": [*history, {"role": "user", "content": question}],
+            "plugin_id": plugin_id,
         }
         if hints:
             plan_args["hints"] = hints

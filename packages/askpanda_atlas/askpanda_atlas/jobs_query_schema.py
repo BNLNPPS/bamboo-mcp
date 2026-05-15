@@ -405,7 +405,7 @@ def _build_context_uncached(tables: list[str]) -> str:
             ("durationsec", "DOUBLE", "Wall-clock run time in seconds."),
             ("statechangetime", "TIMESTAMP", "UTC timestamp of the last job status transition."),
             ("creationtime", "TIMESTAMP", "UTC timestamp when the job was created."),
-            ("_queue", "VARCHAR", "Ingestion bookkeeping: which queue was polled."),
+            ("_queue", "VARCHAR", "Ingestion bookkeeping: full queue name polled (e.g. 'BNL_ATLAS_TIER1'). Use ILIKE 'SITE%' for site-level filtering."),
             ("_fetched_utc", "TIMESTAMP", "UTC timestamp when the ingestion agent last fetched this row."),
         ],
         "selectionsummary": [
@@ -413,7 +413,7 @@ def _build_context_uncached(tables: list[str]) -> str:
             ("field", "VARCHAR", "Facet name (e.g. jobstatus, cloud, gshare)."),
             ("list_json", "JSON", "JSON array of {kname, kvalue} — value and count pairs."),
             ("stats_json", "JSON", "JSON aggregate stats, e.g. {\"sum\": 9928}."),
-            ("_queue", "VARCHAR", "Source queue."),
+            ("_queue", "VARCHAR", "Source queue (full queue name, e.g. 'BNL_ATLAS_TIER1'). Use ILIKE 'SITE%' for site-level filtering."),
             ("_fetched_utc", "TIMESTAMP", "When this snapshot was fetched."),
         ],
         "errors_by_count": [
@@ -422,9 +422,9 @@ def _build_context_uncached(tables: list[str]) -> str:
             ("codename", "VARCHAR", "Symbolic error name."),
             ("codeval", "INTEGER", "Numeric error code."),
             ("diag", "VARCHAR", "Diagnostic string."),
-            ("count", "INTEGER", "Number of jobs currently affected."),
+            ("count", "INTEGER", "Jobs affected IN THIS QUEUE from a separate BigPanDA summary endpoint. Do NOT use for site-scoped frequency questions — use COUNT(*) on the jobs table instead."),
             ("example_pandaid", "BIGINT", "A representative job with this error."),
-            ("_queue", "VARCHAR", "Source queue."),
+            ("_queue", "VARCHAR", "Source queue (full queue name, e.g. 'BNL_ATLAS_TIER1'). Use ILIKE 'SITE%' for site-level filtering."),
             ("_fetched_utc", "TIMESTAMP", "When this snapshot was fetched."),
         ],
     }
@@ -466,6 +466,20 @@ Rules:
 - Do not reference information_schema or any system tables.
 - Do not use semicolons.
 - Always filter by _queue to scope queries to a specific computing site.
+- IMPORTANT: _queue values are full queue names like 'BNL_ATLAS_TIER1' or
+  'BNL_ATLAS_TIER1-condor', not bare site abbreviations like 'BNL'.
+  When the question says "(filter _queue ILIKE 'SITE%')", use that pattern exactly.
+  Otherwise use ILIKE with a '%' wildcard suffix: _queue ILIKE 'BNL%'.
+  Never use exact equality (= 'BNL') for site-level filtering.
+- IMPORTANT: for "most common failures / top errors" questions scoped to a
+  site, ALWAYS query the jobs table directly using COUNT(*) GROUP BY on the
+  error code columns (piloterrorcode, exeerrorcode, transexitcode). Never use
+  errors_by_count for site-scoped frequency questions — its counts come from a
+  different data source and will not match the jobs table. Only use
+  errors_by_count for global (no site filter) cross-queue rankings.
+- IMPORTANT: errors_by_count.count is a per-queue value from a separate
+  BigPanDA summary endpoint, not derived from the jobs rows. It may differ
+  from COUNT(*) on the jobs table.
 - The database contains jobs from approximately the last hour per queue.
 - Use _fetched_utc for freshness checks; use statechangetime for job state history.
 - jobstatus values: defined, waiting, sent, starting, running, holding, merging,
@@ -477,15 +491,27 @@ Example queries:
 - "When was the database last updated?" →
   SELECT _queue, MAX(_fetched_utc) AS last_fetched, COUNT(*) AS job_count FROM jobs GROUP BY _queue ORDER BY last_fetched DESC LIMIT 500
 - "How many jobs failed at BNL?" →
-  SELECT COUNT(*) AS n FROM jobs WHERE _queue = 'BNL' AND jobstatus = 'failed' LIMIT 500
+  SELECT COUNT(*) AS n FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed' LIMIT 500
 - "How many jobs are in each status at BNL?" →
-  SELECT jobstatus, COUNT(*) AS n FROM jobs WHERE _queue = 'BNL' GROUP BY jobstatus ORDER BY n DESC LIMIT 500
+  SELECT jobstatus, COUNT(*) AS n FROM jobs WHERE _queue ILIKE 'BNL%' GROUP BY jobstatus ORDER BY n DESC LIMIT 500
+- "How many jobs failed at BNL? (filter _queue ILIKE 'BNL%')" →
+  SELECT COUNT(*) AS n FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed' LIMIT 500
+- "What are the most common job failures at BNL?" →
+  SELECT piloterrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+  FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'failed'
+  AND piloterrorcode != 0
+  GROUP BY piloterrorcode ORDER BY n DESC LIMIT 10
 - "What are the top errors at SWT2_CPB?" →
-  SELECT error, codename, codeval, count, diag FROM errors_by_count WHERE _queue = 'SWT2_CPB' ORDER BY count DESC LIMIT 10
+  SELECT piloterrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+  FROM jobs WHERE _queue ILIKE 'SWT2_CPB%' AND jobstatus = 'failed'
+  AND piloterrorcode != 0
+  GROUP BY piloterrorcode ORDER BY n DESC LIMIT 10
+- "Which error codes affect the most jobs across all sites?" →
+  SELECT error, codename, codeval, SUM(count) AS total_count, MIN(diag) AS diag FROM errors_by_count GROUP BY error, codename, codeval ORDER BY total_count DESC LIMIT 10
 - "Which queues have the most failed jobs?" →
   SELECT _queue, COUNT(*) AS failed_jobs FROM jobs WHERE jobstatus = 'failed' GROUP BY _queue ORDER BY failed_jobs DESC LIMIT 500
 - "Which jobs are running at BNL?" →
-  SELECT pandaid, produserid, durationsec, cpuefficiency FROM jobs WHERE _queue = 'BNL' AND jobstatus = 'running' ORDER BY durationsec DESC LIMIT 500
+  SELECT pandaid, produserid, durationsec, cpuefficiency FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'running' ORDER BY durationsec DESC LIMIT 500
 """
 
 

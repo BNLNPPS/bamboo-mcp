@@ -144,12 +144,19 @@ LIMIT 500
 **What are the top errors at SWT2_CPB?**
 
 ```sql
-SELECT error, codename, codeval, count, diag
-FROM errors_by_count
-WHERE _queue = 'SWT2_CPB'
-ORDER BY count DESC
+SELECT piloterrorcode, exeerrorcode, MIN(piloterrordiag) AS diag, COUNT(*) AS n
+FROM jobs
+WHERE _queue ILIKE 'SWT2_CPB%' AND jobstatus = 'failed'
+  AND (piloterrorcode != 0 OR exeerrorcode != 0)
+GROUP BY piloterrorcode, exeerrorcode
+ORDER BY n DESC
 LIMIT 10
 ```
+
+> **Note:** For site-scoped failure frequency questions always aggregate the
+> `jobs` table directly. `errors_by_count.count` comes from a separate
+> BigPanDA summary endpoint and will not match `COUNT(*)` on the `jobs` rows.
+> Use `errors_by_count` only for global (no site filter) cross-queue rankings.
 
 **Which queues have the most failed jobs?**
 

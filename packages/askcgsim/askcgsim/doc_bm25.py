@@ -1,7 +1,7 @@
-"""CGSim BM25 keyword documentation search tool.
+"""AskCGSim BM25 keyword documentation search tool.
 
 Thin subclass of :class:`bamboo.tools.doc_bm25.PandaDocBM25Tool` that
-overrides the tool description (so the Bamboo planner routes CGSim
+overrides the tool description (so the Bamboo planner routes AskCGSim
 documentation questions correctly) and the ChromaDB collection name default.
 
 All BM25 index building, caching, and result formatting logic is inherited
@@ -15,7 +15,7 @@ Configuration
 ``BAMBOO_CHROMA_COLLECTION``
     ChromaDB collection name to query.  Default: ``cgsim_docs``
 
-    Must match the value used by :mod:`cgsim.doc_rag` so both tools search
+    Must match the value used by :mod:`askcgsim.doc_rag` so both tools search
     the same corpus.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ _CGSIM_DEFAULT_COLLECTION = "cgsim_docs"
 
 
 class CgsimDocBM25Tool(PandaDocBM25Tool):
-    """BM25 keyword search tool scoped to the CGSim documentation corpus.
+    """BM25 keyword search tool scoped to the AskCGSim documentation corpus.
 
     Inherits all index-building, caching, and formatting logic from
     :class:`~bamboo.tools.doc_bm25.PandaDocBM25Tool`.  Only the MCP tool
@@ -40,7 +40,7 @@ class CgsimDocBM25Tool(PandaDocBM25Tool):
 
     @staticmethod
     def get_definition() -> dict[str, Any]:
-        """Return the MCP tool definition for the CGSim BM25 documentation search.
+        """Return the MCP tool definition for the AskCGSim BM25 documentation search.
 
         Returns:
             Tool definition dict compatible with MCP discovery.
@@ -75,7 +75,7 @@ class CgsimDocBM25Tool(PandaDocBM25Tool):
         }
 
     def _ensure_index(self) -> str | None:
-        """Load the CGSim corpus from ChromaDB and build (or refresh) the BM25 index.
+        """Load the AskCGSim corpus from ChromaDB and build (or refresh) the BM25 index.
 
         Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` at call
         time, defaulting the collection name to ``cgsim_docs`` rather than the

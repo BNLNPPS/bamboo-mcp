@@ -1,4 +1,4 @@
-"""CGSim UI manifest tool.
+"""AskCGSim UI manifest tool.
 
 Returns UI branding metadata used by Bamboo clients (Textual / Streamlit).
 
@@ -44,18 +44,18 @@ def _load_banner_lines() -> Sequence[str]:
         return [ln for ln in lines if ln.strip() != ""]
     except Exception:  # pylint: disable=broad-exception-caught
         return (
-            " ██████╗ ██████╗ ███████╗██╗███╗   ███╗\n"
-            "██╔════╝██╔════╝ ██╔════╝██║████╗ ████║\n"
-            "██║     ██║  ███╗███████╗██║██╔████╔██║\n"
-            "██║     ██║   ██║╚════██║██║██║╚██╔╝██║\n"
-            "╚██████╗╚██████╔╝███████║██║██║ ╚═╝ ██║\n"
-            " ╚═════╝ ╚═════╝ ╚══════╝╚═╝╚═╝     ╚═╝"
+            " █████╗ ███████╗██╗  ██╗ ██████╗ ██████╗ ███████╗██╗███╗   ███╗\n"
+            "██╔══██╗██╔════╝██║ ██╔╝██╔════╝██╔════╝ ██╔════╝██║████╗ ████║\n"
+            "███████║███████╗█████╔╝ ██║     ██║  ███╗███████╗██║██╔████╔██║\n"
+            "██╔══██║╚════██║██╔═██╗ ██║     ██║   ██║╚════██║██║██║╚██╔╝██║\n"
+            "██║  ██║███████║██║  ██╗╚██████╗╚██████╔╝███████║██║██║ ╚═╝ ██║\n"
+            "╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝╚═╝     ╚═╝"
         ).splitlines()
 
 
 @dataclass(frozen=True)
 class CgsimUiManifestTool:
-    """Tool that returns UI metadata for CGSim / Bamboo MCP."""
+    """Tool that returns UI metadata for AskCGSim / Bamboo MCP."""
 
     @staticmethod
     def get_definition() -> dict[str, Any]:
@@ -89,7 +89,7 @@ class CgsimUiManifestTool:
 
         payload = {
             "plugin_id": "cgsim",
-            "display_name": "Bamboo – CGSim",
+            "display_name": "Bamboo – AskCGSim",
             "help": (
                 "Enter to send \u2022 /help \u2022 /plugin <id> "
                 "\u2022 /tools \u2022 /debug on|off"
