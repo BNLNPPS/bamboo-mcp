@@ -1,6 +1,6 @@
-# Bamboo
+# Bamboo MCP
 
-**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for
+**Bamboo MCP** is a lightweight MCP-based runtime with a plugin architecture for
 AI-assisted scientific tools, targeting PanDA/ATLAS workflows, ePIC/EIC
 experiment operations, and CGSim distributed computing simulation.
 
