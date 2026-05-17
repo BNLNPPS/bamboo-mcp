@@ -296,7 +296,7 @@ def _wrap_mermaid_labels(diagram: str, max_chars: int = 20) -> str:
 
 
 def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
-    """Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
+    r"""Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
 
     Uses :func:`st.components.v1.html` with the Mermaid CDN rather than the
     ``streamlit-mermaid`` component.  This gives full control over the Mermaid
