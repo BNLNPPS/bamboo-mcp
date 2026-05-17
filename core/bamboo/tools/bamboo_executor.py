@@ -98,8 +98,31 @@ _MERMAID_GUIDANCE: str = (
     "protocols, and 'stateDiagram-v2' for state machines.\n"
     "- Only include a diagram when it genuinely adds clarity; omit it for "
     "simple status answers or factual lookups.\n"
-    "- The diagram must be valid Mermaid syntax — no HTML inside nodes, "
-    "use quotes around labels containing spaces or special characters.\n"
+    "- IMPORTANT: When a diagram is warranted, you MUST use a ```mermaid fenced "
+    "block. Do NOT substitute an ASCII art box diagram, a plain text "
+    "representation, or an indented text tree — these are not diagrams and "
+    "will not render. If you cannot produce valid Mermaid syntax, omit the "
+    "diagram entirely rather than falling back to text art.\n"
+    "- Node label rules (strictly enforced — long labels are cut off in the renderer):\n"
+    "  * Keep every node label to 20 characters or fewer.\n"
+    "  * If a label needs more than 20 characters, split it across two lines "
+    "using a Mermaid line break: A[\"First line<br/>second line\"].\n"
+    "  * Do NOT use 'Component: Long Action Description' style labels — "
+    "split them: A[\"Job Control<br/>Fetch Job\"].\n"
+    "  * For stateDiagram-v2, keep state names short; add a note or description "
+    "in the prose rather than cramming it into the node.\n"
+    "- Mermaid syntax rules (these are strictly enforced by the renderer):\n"
+    "  * stateDiagram-v2: transitions use '-->' not '->'. "
+    "State labels with spaces must be quoted: state \"My State\" as s1. "
+    "Do not use colons inside state names. "
+    "Transition labels use colon syntax: s1 --> s2 : label.\n"
+    "  * flowchart TD: node IDs must not contain spaces — use underscores or camelCase. "
+    "Labels go in brackets: A[\"My Label\"] --> B[\"Other Label\"].\n"
+    "  * All diagrams: no HTML tags other than <br/> inside node labels. "
+    "No bare parentheses in node IDs. "
+    "Test your syntax mentally — if unsure, use a simpler diagram type.\n"
+    "  * If you include a %%{init}%% directive, use double-quoted JSON — "
+    "single quotes are silently ignored by the Mermaid parser.\n"
 )
 
 _SYSTEM_CODE_QUERY: str = (
@@ -135,7 +158,6 @@ _SYSTEM_CODE_QUERY: str = (
     "- Do not invent bugs or issues not demonstrable from the source. Hedged \n"
     "  observations (\"may\", \"consider\", \"worth verifying\") are acceptable; \n"
     "  false definitive claims (\"is unused\", \"is missing\", \"is broken\") are not.\n"
-    + _MERMAID_GUIDANCE
 )
 
 _SYSTEM_JOB: str = (
@@ -206,6 +228,11 @@ _SYSTEM_RAG: str = (
     "- Be concise and precise. Prefer bullet points for multi-part answers.\n"
     "- Do not fabricate PanDA-specific details (task IDs, queue names, error "
     "codes) that are not in the excerpts.\n"
+    "- When the user explicitly asks for a diagram and you have enough knowledge "
+    "to draw one (states, transitions, components, flow), produce the Mermaid "
+    "diagram even if the excerpts do not contain one. Label it as based on "
+    "general knowledge when the excerpts are incomplete.\n"
+    + _MERMAID_GUIDANCE
 )
 
 _SYSTEM_RAG_NO_CONTEXT: str = (
@@ -234,6 +261,7 @@ _SYSTEM_GENERIC: str = (
     "- If the evidence shows errors or empty results, explain that clearly.\n"
     "- Include relevant monitor URLs when available.\n"
     "- Be concise and prefer bullet points for multi-part answers.\n"
+    + _MERMAID_GUIDANCE
 )
 
 # ---------------------------------------------------------------------------
@@ -297,6 +325,7 @@ _SYSTEM_GENERIC_CGSIM: str = (
     "- Do not infer or fabricate values not present in the evidence.\n"
     "- If the evidence shows errors or empty results, explain that clearly.\n"
     "- Be concise and prefer bullet points for multi-part answers.\n"
+    + _MERMAID_GUIDANCE
 )
 
 _PLUGIN_RAG_PROMPTS: dict[str, tuple[str, str, str]] = {

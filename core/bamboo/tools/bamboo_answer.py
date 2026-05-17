@@ -1055,9 +1055,14 @@ def _is_code_query_question(question: str) -> bool:
         bool: ``True`` when the question matches a code-query routing signal.
     """
     q = question.lower()
-    # Signal 1: any *.py token (bare filename or slash-path)
+    # Signal 1: any *.py token (bare filename or slash-path) — always code_query
     if re.search(r"\b[\w][\w/]*\.py\b", q):
         return True
+    # Exclusion: diagram/visualisation requests without a file path route to
+    # RAG instead, where _MERMAID_GUIDANCE handles diagram generation directly.
+    _diagram_kws = {"diagram", "state machine", "flowchart", "mermaid", "chart", "visuali"}
+    if any(d in q for d in _diagram_kws):
+        return False
     # Signal 2: inspection verb + repository/code keyword
     _verbs = {
         "look at", "read", "explain", "review", "analyse", "analyze",

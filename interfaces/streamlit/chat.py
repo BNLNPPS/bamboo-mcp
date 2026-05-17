@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import hmac
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -65,9 +66,10 @@ _DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 # ---------------------------------------------------------------------------
 
 #: Set to False at startup if streamlit-mermaid cannot be imported.
+#: When False we fall back to st.components.v1.html with the Mermaid CDN.
 _MERMAID_AVAILABLE: bool = True
 try:
-    import streamlit_mermaid as stmermaid  # type: ignore[import]
+    import streamlit_mermaid as stmermaid  # type: ignore[import]  # noqa: F401
 except ImportError:
     _MERMAID_AVAILABLE = False
 
@@ -210,22 +212,172 @@ def _extract_mermaid_blocks(text: str) -> tuple[str, list[str]]:
     return clean, diagrams
 
 
-def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
-    """Render Mermaid diagram definitions inline using streamlit-mermaid.
+def _wrap_mermaid_labels(diagram: str, max_chars: int = 20) -> str:
+    r"""Wrap long node labels in a Mermaid diagram using native ``\n`` breaks.
 
-    Silently does nothing when ``streamlit-mermaid`` is not installed or
-    when ``diagram_defs`` is empty.
+    Mermaid flowchart supports ``\n`` inside double-quoted node labels as a
+    native line break without requiring ``htmlLabels: true``.  ``<br/>`` only
+    works with ``htmlLabels`` enabled; since that config may not take effect
+    in the embedded component, ``\n`` is more reliable.
+
+    Labels exceeding ``max_chars`` are split at word boundaries.  Labels that
+    already contain ``\n`` or ``<br`` are left unchanged.
+    ``stateDiagram-v2`` diagrams are returned unmodified.
 
     Args:
-        diagram_defs: List of raw Mermaid definition strings (without the
-            fenced block markers).
+        diagram: Raw Mermaid diagram definition string.
+        max_chars: Maximum characters per line inside a node label.
+
+    Returns:
+        Diagram string with long labels wrapped using ``\n``.
     """
-    if not _MERMAID_AVAILABLE or not diagram_defs:
+    if "stateDiagram" in diagram:
+        return diagram
+
+    def _wrap_text(text: str) -> str:
+        r"""Wrap text at word boundaries using Mermaid native \n breaks.
+
+        Splits on spaces and underscores.  Single tokens longer than
+        ``max_chars`` are hard-cut at the limit so they never overflow
+        the node box.
+        """
+        if len(text) <= max_chars or "\n" in text or "<br" in text:
+            return text
+        # Tokenise on spaces and underscores; preserve underscores as breaks
+        raw_words = re.split(r"([ _]+)", text)
+        words = [w for w in raw_words if w.strip("_ ")]
+        # Hard-cut any single token that exceeds max_chars
+        split_words: list[str] = []
+        for word in words:
+            while len(word) > max_chars:
+                split_words.append(word[:max_chars])
+                word = word[max_chars:]
+            if word:
+                split_words.append(word)
+        lines: list[str] = []
+        current = ""
+        for word in split_words:
+            candidate = (current + " " + word).strip() if current else word
+            if current and len(candidate) > max_chars:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return "\n".join(lines)
+
+    pattern = re.compile(
+        r'(\b\w+\b)'
+        r'(\[+|\{+)'
+        r'("?)'
+        r'([^"\]\}\n]+?)'
+        r'("?)'
+        r'(\]+|\}+)',
+        re.MULTILINE,
+    )
+
+    def _replace(m: re.Match[str]) -> str:
+        node_id, open_b, q_open, label, q_close, close_b = m.groups()
+        wrapped = _wrap_text(label.strip())
+        if wrapped == label.strip():
+            return m.group(0)
+        if "\n" in wrapped and not q_open:
+            q_open = q_close = '"'
+        return f'{node_id}{open_b}{q_open}{wrapped}{q_close}{close_b}'
+
+    result_lines = []
+    for line in diagram.splitlines():
+        if line.lstrip().startswith("%%"):
+            result_lines.append(line)
+        else:
+            result_lines.append(pattern.sub(_replace, line))
+    return "\n".join(result_lines)
+
+
+def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
+    """Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
+
+    Uses :func:`st.components.v1.html` with the Mermaid CDN rather than the
+    ``streamlit-mermaid`` component.  This gives full control over the Mermaid
+    ``initialize()`` config, in particular ``useMaxWidth: false``, which
+    prevents svgPanZoom from scaling the diagram down to fit a narrow iframe
+    (the root cause of text clipping in ``streamlit-mermaid``).
+
+    The container div has ``overflow-x: auto`` so wide diagrams scroll
+    horizontally rather than being compressed.  ``htmlLabels: true`` is set
+    so ``<br/>`` and ``\\n`` in node labels render as real line breaks.
+
+    Falls back silently when ``diagram_defs`` is empty.
+
+    Args:
+        diagram_defs: List of raw Mermaid definition strings (without fenced
+            block markers).
+    """
+    import streamlit.components.v1 as components  # deferred import
+
+    if not diagram_defs:
         return
+
     for i, defn in enumerate(diagram_defs):
         if len(diagram_defs) > 1:
             st.caption(f"Diagram {i + 1}")
-        stmermaid.st_mermaid(code=defn)
+
+        # Estimate height: ~60px per node/edge + 150px padding, min 300px
+        node_count = defn.count("-->") + defn.count("---") + defn.count("->") + 2
+        height_px = max(300, node_count * 60 + 150)
+
+        # Only escape & in the diagram text — < and > are valid Mermaid syntax
+        # (e.g. --> arrows) and must not be escaped. Mermaid reads innerHTML so
+        # <br/> labels are preserved correctly with htmlLabels: true.
+        safe_defn = defn.replace("&", "&amp;")
+
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  body {{ margin: 0; padding: 0; background: transparent; }}
+  #container {{
+    width: 100%;
+    overflow-x: auto;
+    background: white;
+    padding: 8px;
+    box-sizing: border-box;
+  }}
+  .mermaid {{ min-width: 500px; }}
+  .mermaid svg {{
+    max-width: none !important;
+    height: auto;
+  }}
+</style>
+</head>
+<body>
+<div id="container">
+  <div class="mermaid">{safe_defn}</div>
+</div>
+<script>
+  mermaid.initialize({{
+    startOnLoad: true,
+    theme: 'default',
+    securityLevel: 'loose',
+    flowchart: {{
+      useMaxWidth: false,
+      htmlLabels: true,
+      nodeSpacing: 60,
+      rankSpacing: 70
+    }},
+    stateDiagram: {{
+      useMaxWidth: false,
+      htmlLabels: false
+    }}
+  }});
+</script>
+</body>
+</html>
+"""
+        components.html(html, height=height_px, scrolling=True)
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +624,7 @@ def _init_session() -> None:
         "last_tool": None,
         "last_plugin_id": None,
         "superuser": False,
+        "superuser_warning": None,
         "last_diagrams": [],
         "trace_file": os.path.join(
             tempfile.gettempdir(), f"bamboo_streamlit_{os.getpid()}.jsonl"
@@ -646,6 +799,7 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
             if st.sidebar.button("Unlock", use_container_width=True):
                 if _check_superuser_password(pw):
                     st.session_state["superuser"] = True
+                    st.session_state["superuser_warning"] = None
                     st.rerun()
                 else:
                     st.sidebar.error("Incorrect password.")
@@ -1091,10 +1245,11 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
             # history without a corresponding answer.
             if messages and messages[-1]["role"] == "user":
                 st.session_state["messages"] = messages[:-1]
-            st.warning(
+            # Store the warning in session state so it survives st.rerun().
+            # A plain st.warning() here is wiped by the rerun before it renders.
+            st.session_state["superuser_warning"] = (
                 "🔒 This question requires **superuser mode**. "
-                "Enter your password in the **Developer access** section of the sidebar.",
-                icon="🔒",
+                "Enter your password in the **Developer access** section of the sidebar."
             )
             st.rerun()
             return
@@ -1138,6 +1293,12 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         messages.append({"role": "assistant", "content": clean_answer})
         st.session_state["messages"] = _cap_messages(messages)
         st.rerun()
+
+    # Render persisted superuser guard warning (set on the previous rerun).
+    # Must be shown here — after st.rerun() any ephemeral st.warning() is lost.
+    if st.session_state.get("superuser_warning"):
+        st.warning(st.session_state["superuser_warning"], icon="🔒")
+        st.session_state["superuser_warning"] = None
 
     # Render chat history
     for msg in st.session_state["messages"]:

@@ -247,6 +247,12 @@ def is_superuser_question(question: str, tool_names: List[str]) -> bool:
 
     q = question.lower()
 
+    # Diagram/visualisation requests without a .py file path are routed to
+    # RAG (which carries _MERMAID_GUIDANCE), never to code_query.
+    _diagram_kws = {"diagram", "state machine", "flowchart", "mermaid", "chart", "visuali"}
+    if any(d in q for d in _diagram_kws) and not _has_py_filename(q):
+        return False
+
     # Signal 1: any *.py filename or path present.
     if _has_py_filename(q):
         return True

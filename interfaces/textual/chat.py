@@ -247,6 +247,31 @@ def _pretty(obj: Any) -> str:
         return str(obj)
 
 
+def _strip_mermaid_blocks(text: str) -> tuple[str, int]:
+    r"""Remove fenced Mermaid code blocks from an LLM response.
+
+    The TUI cannot render Mermaid diagrams.  Storing raw Mermaid syntax in
+    conversation history pollutes the LLM context window on follow-up
+    questions.  This helper strips the blocks before display and storage,
+    returning the clean text and the count of diagrams removed so the caller
+    can append a short note directing the user to Streamlit.
+
+    Args:
+        text (str): Raw assistant response text, potentially containing one
+            or more ` ```mermaid ``` ` fenced blocks.
+
+    Returns:
+        tuple[str, int]: ``(clean_text, diagram_count)`` where ``clean_text``
+        has all Mermaid fenced blocks removed and double blank lines
+        collapsed, and ``diagram_count`` is the number of blocks stripped.
+    """
+    pattern = re.compile(r"```mermaid\s*\n.*?```", re.DOTALL)
+    count = len(pattern.findall(text))
+    clean = pattern.sub("", text)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    return clean, count
+
+
 def _extract_text(result: Any) -> str:
     """Extract displayable text from an MCP tool result.
 
@@ -1104,10 +1129,20 @@ class BambooTui(App):
             if out.startswith("__CRIC_TABLE_READY__:"):
                 out = await self._fetch_cric_table(out)
 
-            self._replace_thinking(thinking, out)
+            # Strip Mermaid diagram blocks before display and history storage.
+            # The TUI cannot render Mermaid; raw syntax in history pollutes the
+            # LLM context window on follow-up questions.
+            clean_out, diagram_count = _strip_mermaid_blocks(out)
+            if diagram_count:
+                clean_out += (
+                    f"\n\n_[{diagram_count} Mermaid diagram{'s' if diagram_count > 1 else ''} "
+                    f"omitted — open in Streamlit to view.]_"
+                )
 
-            # Record the assistant reply and enforce the history cap.
-            self._history.append({"role": "assistant", "content": out})
+            self._replace_thinking(thinking, clean_out)
+
+            # Record the assistant reply (clean, no Mermaid syntax) and enforce the history cap.
+            self._history.append({"role": "assistant", "content": clean_out})
             self._cap_history()
 
             # Auto-chart: silently append a pilot chart when the response
