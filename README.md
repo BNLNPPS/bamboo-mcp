@@ -11,11 +11,13 @@ Structured evidence is always returned alongside natural-language answers.
 > includes `cric_query` for natural-language queries against the CRIC Computing
 > Resource Information Catalogue. The AskCGSim plugin provides documentation
 > search (RAG + BM25) and `cgsim.sim_query` for natural-language queries
-> against the CGSim simulation output SQLite database. New features: Mermaid
-> diagram rendering in Streamlit (LLM-generated inline diagrams for algorithmic
-> questions), superuser / developer mode (`BAMBOO_SUPERUSER_PASSWORD`), and
-> the `pilot_code_query` developer tool for on-demand pilot source fetch and
-> analysis with diagram support.
+> against the CGSim simulation output SQLite database. Recent additions:
+> Mermaid diagram rendering in Streamlit, superuser / developer mode
+> (`BAMBOO_SUPERUSER_PASSWORD`), and the `code_query` developer tool for
+> on-demand source code fetch, review, and algorithm explanation with
+> optional Mermaid diagram output. `code_query` targets any GitHub
+> repository (configured via `BAMBOO_CODE_QUERY_REPO`); PanDA Pilot 3
+> is the default.
 
 ---
 
@@ -212,6 +214,7 @@ See [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) for ready-to-pa
 - **Narrow waist** — every tool returns `list[MCPContent]`; the MCP wire format is JSON-RPC 2.0
 - **Context memory** — multi-turn chat history is maintained in the client and threaded into every LLM call
 - **Configurable routing** — `bamboo_answer` uses deterministic fast-path routing by default; set `BAMBOO_FAST_PATH=0` to route all questions through the LLM planner (recommended for CGSim)
+- **Superuser / developer mode** — set `BAMBOO_SUPERUSER_PASSWORD` to enable a password-protected developer tier in both UIs; unlocks `code_query` and future developer tools
 
 ---
 
@@ -256,8 +259,9 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — harvester timeseries, prompt logging, GDPR pseudonymisation |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
-| [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions for every tool and routing path |
+| [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions, including code review question patterns and `code_query` examples |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
+| [`docs/tools/code_query.md`](docs/tools/code_query.md) | `code_query` tool reference — evidence pipeline, routing, LLM quality guidance, example sessions |
 
 ---
 
@@ -292,7 +296,7 @@ point the doc tools at the ATLAS vector store.
 
 | Tool name | Description |
 |---|---|
-| `pilot_code_query` | **Superuser.** Fetches any pilot source file from GitHub for code review, algorithm explanation, and Mermaid diagram generation. Configured via `BAMBOO_PILOT_REPO` and `BAMBOO_PILOT_BRANCH`. |
+| `code_query` | **Superuser.** Fetches any source file from a configurable GitHub repository for code review, algorithm explanation, and Mermaid diagram generation. Default repo: `PanDAWMS/pilot3`. Configured via `BAMBOO_CODE_QUERY_REPO` and `BAMBOO_CODE_QUERY_BRANCH`. |
 
 ### ePIC plugin tools
 
