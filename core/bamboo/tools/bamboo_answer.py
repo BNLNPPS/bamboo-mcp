@@ -1033,6 +1033,82 @@ def _extract_time_window_from_question(
     return None
 
 
+def _is_code_query_question(question: str) -> bool:
+    """Return True when the question is asking to inspect a source code file.
+
+    Matches the same signals as the superuser pre-dispatch guard in the UI
+    (``interfaces.shared.superuser_guard``) so that routing is consistent:
+    questions blocked by the guard are also what the planner would route to
+    ``code_query``.
+
+    Signals:
+    - Any ``*.py`` filename or path reference (e.g. ``pilot.py``,
+      ``pilot/util/processes.py``, ``core/bamboo/tools/foo.py``).
+    - An inspection verb (``look at``, ``explain``, ``review``, …) combined
+      with a repository keyword (``pilot``, ``bamboo``, ``source``, ``code``,
+      …) — covers phrasing like *"explain how the pilot works"*.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        bool: ``True`` when the question matches a code-query routing signal.
+    """
+    q = question.lower()
+    # Signal 1: any *.py token (bare filename or slash-path)
+    if re.search(r"\b[\w][\w/]*\.py\b", q):
+        return True
+    # Signal 2: inspection verb + repository/code keyword
+    _verbs = {
+        "look at", "read", "explain", "review", "analyse", "analyze",
+        "show me", "check", "debug", "inspect", "examine",
+        "walk me through", "walk through", "describe",
+        "understand", "how does", "how do", "what does", "what do",
+        "download", "fetch", "get", "get me", "grab", "pull",
+        "open", "load", "display", "print", "list",
+    }
+    _repo_kws = {
+        "pilot", "bamboo", "panda", "plugin", "module",
+        "function", "class", "source", "code", "script", "file",
+    }
+    has_verb = any(v in q for v in _verbs)
+    has_kw = any(k in q for k in _repo_kws)
+    return has_verb and has_kw
+
+
+def _build_code_query_plan(question: str, reuse: ReusePolicy) -> Plan:
+    """Build a fast-path Plan routing to ``code_query``.
+
+    Extracts the first ``*.py`` file path from the question (if present) and
+    constructs the tool arguments.  When no path is found the question itself
+    is passed as context so the tool can return a clear error.
+
+    Args:
+        question: User question text.
+        reuse: Reuse policy forwarded from the calling plan builder.
+
+    Returns:
+        A :class:`Plan` routing to ``code_query``.
+    """
+    path_match = re.search(r"\b([\w][\w/]*\.py)\b", question, re.IGNORECASE)
+    file_path = path_match.group(1) if path_match else None
+    cq_args: dict[str, str] = {"question": question}
+    if file_path:
+        cq_args["file_path"] = file_path
+    explain = (
+        f"Deterministic: source code file signal "
+        f"({'file_path=' + file_path if file_path else 'no path extracted'}) "
+        f"\u2192 code_query."
+    )
+    return Plan(
+        route=PlanRoute.FAST_PATH,
+        confidence=0.88,
+        tool_calls=[ToolCall(tool="code_query", arguments=cq_args)],
+        reuse_policy=reuse,
+        explain=explain,
+    )
+
+
 def _build_deterministic_plan(
     question: str,
     task_id: int | None,
@@ -1051,7 +1127,8 @@ def _build_deterministic_plan(
     3. Task ID                      → ``panda_task_status``        FAST_PATH
     4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
     5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
-    6. No IDs                       → doc_search + doc_bm25        RETRIEVE
+    6. Source code signals          → ``code_query``               FAST_PATH
+    7. No IDs                       → doc_search + doc_bm25        RETRIEVE
 
     Args:
         question: User question text.
@@ -1220,6 +1297,13 @@ def _build_deterministic_plan(
             explain="Deterministic: jobs DB signals, no task/job ID → jobs query.",
         )
 
+    # Code query fast-path: source code file inspection question.
+    # Must come after all ID-driven and domain-specific rules so a question
+    # like "why did job 123 fail?" that also mentions "pilot.py" in the log
+    # still routes to panda_log_analysis, not code_query.
+    if _is_code_query_question(question):
+        return _build_code_query_plan(question, reuse)
+
     # No IDs: general knowledge / documentation question → always retrieve.
     # top_k=5 for both to keep synthesis prompt within ~2500 input tokens,
     # well clear of the 30s TUI timeout even on follow-up turns with history.
@@ -1251,7 +1335,9 @@ def _build_deterministic_plan(
 _FOLLOWUP_PATTERN = re.compile(
     r"^(please\s+)?(tell me more|explain more|more details?|elaborate|"
     r"go on|continue|explain further|can you expand|"
-    r"more information|more info|say more|more)"
+    r"more information|more info|say more|more|"
+    r"yes\s+please|yes|yeah|yep|ok|okay|sure|go ahead|"
+    r"do it|do that|fetch it|get it|fetch the file|get the file)"
     r"(\s+please)?\s*[.!?]*$",
     re.IGNORECASE,
 )
@@ -1547,6 +1633,108 @@ _CRIC_HISTORY_SIGNALS: frozenset[str] = frozenset({
 })
 
 
+# Signals in the last assistant message that indicate a code_query response.
+# All are specific enough that they only appear in code analysis answers.
+_CODE_QUERY_HISTORY_SIGNALS: tuple[str, ...] = (
+    "github.com/",
+    "raw.githubusercontent.com",
+    "source code",
+    "function body",
+    "def ",       # Python function definition quoted verbatim
+    "import ",    # Python import quoted verbatim
+    "truncated: showing",  # our truncation note
+    "pilot.py",   # common enough to be specific in this context
+    "pilot3",
+)
+
+# Continuation words that, combined with a repo keyword, indicate the user
+# wants to continue or extend a code review already in progress.
+_CODE_REVIEW_CONTINUATION_RE: re.Pattern[str] = re.compile(
+    r"\b("
+    r"verify|verif(?:y|ied|ication)|"
+    r"full(?:\s+file|\s+source|\s+code)?|"
+    r"complet(?:e|ed?|ion)|"
+    r"rest(?:\s+of)?|remaining|"
+    r"continu(?:e|ing|ation)|"
+    r"whole(?:\s+file|\s+source|\s+code)?|"
+    r"all(?:\s+of\s+it)?|"
+    r"more(?:\s+of\s+it)?|"
+    r"the\s+(?:rest|remaining|full|complete|whole|entire)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_CODE_REVIEW_REPO_KW_RE: re.Pattern[str] = re.compile(
+    r"\b(pilot|bamboo|panda|file|source|code|module|script|function)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_code_review_continuation(question: str) -> bool:
+    """Return True when the question is continuing an in-progress code review.
+
+    Matches phrases like *"Please verify the full file"*, *"Show the remaining
+    code"*, or *"Can I see the complete source?"* — questions that reference
+    an ongoing code review but are not content-free affirmatives.  Always
+    requires both a continuation word **and** a repository keyword so common
+    non-code phrases like *"Full queue list please"* are not matched.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        ``True`` when the question matches the code-review continuation pattern.
+    """
+    return (
+        bool(_CODE_REVIEW_CONTINUATION_RE.search(question))
+        and bool(_CODE_REVIEW_REPO_KW_RE.search(question))
+    )
+
+
+def _last_tool_was_code_query(history: Sequence[Any]) -> bool:
+    """Return True when the most recent assistant turn was a code_query response.
+
+    Scans the last assistant message for vocabulary that is specific to
+    ``code_query`` responses — GitHub URLs, Python source fragments, or the
+    truncation note — to determine whether a content-free affirmative like
+    *"yes please"* should re-route to ``code_query``.
+
+    Args:
+        history: Prior conversation turns in chronological order.
+
+    Returns:
+        ``True`` if the most recent assistant message looks like a code_query
+        response.
+    """
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = str(msg.get("content", "")).lower()
+            return any(sig.lower() in content for sig in _CODE_QUERY_HISTORY_SIGNALS)
+    return False
+
+
+def _extract_file_path_from_history(history: Sequence[Any]) -> str | None:
+    """Extract the most recently mentioned ``*.py`` file path from history.
+
+    Scans both user and assistant messages in reverse order and returns the
+    first ``*.py`` token found.  Used to re-supply the ``file_path`` argument
+    when routing a content-free affirmative follow-up back to ``code_query``.
+
+    Args:
+        history: Prior conversation turns in chronological order.
+
+    Returns:
+        The file path string (e.g. ``"pilot.py"`` or
+        ``"pilot/util/processes.py"``), or ``None`` when none is found.
+    """
+    for msg in reversed(history):
+        content = str(msg.get("content", ""))
+        m = re.search(r"\b([\w][\w/]*\.py)\b", content, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _last_tool_was_cric(history: Sequence[Any]) -> bool:
     """Return True when the most recent assistant turn contains CRIC evidence.
 
@@ -1812,6 +2000,31 @@ async def _run_fast_path_intercepts(
         if db_result is not None:
             return db_result
 
+        # Code query follow-up: a content-free affirmative OR a code-review
+        # continuation phrase after a code_query response re-routes to
+        # code_query with the same file path from history.
+        # Bypasses the topic guard because these carry no PanDA domain words.
+        if history and _last_tool_was_code_query(history) and (
+            _is_content_free_followup(question)
+            or _is_code_review_continuation(question)
+        ):
+            file_path = _extract_file_path_from_history(history)
+            cq_args: dict[str, str] = {"question": question}
+            if file_path:
+                cq_args["file_path"] = file_path
+            plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.90,
+                tool_calls=[ToolCall(tool="code_query", arguments=cq_args)],
+                reuse_policy=ReusePolicy(),
+                explain=(
+                    f"Deterministic: content-free affirmative after code_query "
+                    f"→ re-fetch code_query "
+                    f"({'file_path=' + file_path if file_path else 'no path'})."
+                ),
+            )
+            return await execute_plan(plan, question, history)
+
     return None
 
 
@@ -2063,6 +2276,11 @@ __all__ = [
     "_extract_time_window_from_question",
     "_run_db_query_fast_path",
     "_last_tool_was_cric",
+    "_last_tool_was_code_query",
+    "_extract_file_path_from_history",
+    "_is_code_query_question",
+    "_is_code_review_continuation",
+    "_build_code_query_plan",
     "_is_cric_followup",
     "_PILOT_SIGNALS",
     "_PILOT_DOC_PREFIXES",

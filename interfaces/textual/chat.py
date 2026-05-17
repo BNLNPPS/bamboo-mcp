@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import re
 import os
@@ -48,6 +49,9 @@ from textual.widgets import Footer, Header, Input, RichLog, Static
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
 
 DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
+
+#: Plain-text superuser password from env var.  Empty string = feature disabled.
+_SUPERUSER_PASSWORD: str = os.getenv("BAMBOO_SUPERUSER_PASSWORD", "")
 
 # Maximum number of user+assistant turn *pairs* to keep in context.
 # Each pair = 2 messages (1 user + 1 assistant), so 10 pairs = 20 messages.
@@ -284,6 +288,10 @@ def _extract_text(result: Any) -> str:
         return "\n".join([p for p in parts2 if p]).strip()
 
     return _pretty(result)
+
+
+#: Imported from the shared guard module; extended by BAMBOO_SUPERUSER_TOOLS.
+from interfaces.shared.superuser_guard import is_superuser_question as _is_superuser_question  # noqa: E402
 
 
 def _tool_names_from_list_tools(list_tools_result: Any) -> List[str]:
@@ -529,6 +537,7 @@ class BambooTui(App):
         # Session-level cost accumulators — updated after every completed request.
         self._session_input_tokens: int = 0
         self._session_output_tokens: int = 0
+        self._superuser: bool = False  # Unlocked by /superuser <password>
         self._session_cost_usd: float = 0.0
         self._session_request_count: int = 0
         self._trace_file: str = os.path.join(
@@ -1033,6 +1042,19 @@ class BambooTui(App):
             self._write_error("No answer tool found. Try /tools to inspect server tools.")
             return
 
+        # Pre-dispatch superuser guard: block questions routing to superuser
+        # tools when the session is not authenticated.
+        if (
+            _SUPERUSER_PASSWORD
+            and not self._superuser
+            and _is_superuser_question(question, self.tool_names)
+        ):
+            self._write_system(
+                "🔒 This question requires superuser mode. "
+                "Run /superuser <password> to unlock developer tools."
+            )
+            return
+
         # Append the current user turn to history before sending.
         self._history.append({"role": "user", "content": question})
 
@@ -1191,6 +1213,9 @@ class BambooTui(App):
         if cmd == "/links":
             self._cmd_links(args)
             return
+        if cmd == "/superuser":
+            self._cmd_superuser(args)
+            return
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
     def _cmd_help(self) -> None:
@@ -1212,6 +1237,7 @@ class BambooTui(App):
             "  /costs                Show estimated LLM token cost for the last request + session total\n"
             "  /clear                Clear transcript, context memory, and HTTP cache\n"
             "  /links [N]            List links from last response; /links N opens link N in browser\n"
+            "  /superuser <pw>       Unlock developer mode (requires BAMBOO_SUPERUSER_PASSWORD)\n"
             "  /exit, /quit          Exit the app\n"
             "\n"
             "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
@@ -1369,6 +1395,39 @@ class BambooTui(App):
         self._write_panel(table, title=f"{_now()}  costs (estimated)", border_style="green")
         if note:
             self._write_system(note)
+
+    def _cmd_superuser(self, args: List[str]) -> None:
+        """Attempt to unlock superuser / developer mode with a password.
+
+        Checks the supplied password against :data:`_SUPERUSER_PASSWORD`
+        using a constant-time compare.  On success, sets
+        :attr:`_superuser` to ``True`` for the lifetime of the session.
+        On failure, prints a generic rejection message that does not
+        reveal whether a password is configured.
+
+        Usage: ``/superuser <password>``
+
+        Args:
+            args (List[str]): Remaining command tokens; first element is
+                the password attempt.
+        """
+        if not _SUPERUSER_PASSWORD:
+            self._write_system(
+                "Superuser mode is not configured "
+                "(set BAMBOO_SUPERUSER_PASSWORD to enable)."
+            )
+            return
+        if not args:
+            self._write_system("Usage: /superuser <password>")
+            return
+        attempt = args[0]
+        if hmac.compare_digest(attempt.encode(), _SUPERUSER_PASSWORD.encode()):
+            self._superuser = True
+            self._write_system(
+                "🔓 Superuser mode unlocked. Developer tools are now active."
+            )
+        else:
+            self._write_system("Incorrect password.")
 
     def _cmd_links(self, args: List[str]) -> None:
         """List links from the last assistant response, or open one by number.

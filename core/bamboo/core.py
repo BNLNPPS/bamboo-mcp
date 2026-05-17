@@ -81,6 +81,7 @@ from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
 from bamboo.tools.bamboo_executor import bamboo_last_evidence_tool
+from bamboo.tools.code_query import code_query_tool
 from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
 from bamboo.tracing import EVENT_TOOL_CALL, span
 from bamboo.prompts.templates import (
@@ -100,6 +101,7 @@ TOOLS = {
     "panda_task_status": panda_task_status_tool,
     "panda_job_status": panda_job_status_tool,
     "panda_log_analysis": panda_log_analysis_tool,
+    "code_query": code_query_tool,
 }
 if _JOBS_QUERY_AVAILABLE:
     TOOLS["panda_jobs_query"] = panda_jobs_query_tool

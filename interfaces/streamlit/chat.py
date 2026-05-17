@@ -24,6 +24,7 @@ Key design decisions
 from __future__ import annotations
 
 import json
+import hmac
 import os
 import sys
 import tempfile
@@ -58,6 +59,31 @@ except ValueError:
 
 _ANSWER_TOOL = "bamboo_answer"
 _DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
+
+# ---------------------------------------------------------------------------
+# Mermaid diagram support
+# ---------------------------------------------------------------------------
+
+#: Set to False at startup if streamlit-mermaid cannot be imported.
+_MERMAID_AVAILABLE: bool = True
+try:
+    import streamlit_mermaid as stmermaid  # type: ignore[import]
+except ImportError:
+    _MERMAID_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Superuser mode
+# ---------------------------------------------------------------------------
+
+#: Plain-text password from env var.  When absent, superuser mode is hidden.
+_SUPERUSER_PASSWORD: str = os.getenv("BAMBOO_SUPERUSER_PASSWORD", "")
+
+#: Tool names that are only shown/accessible in superuser mode.
+#: Imported from the shared guard module; extended by BAMBOO_SUPERUSER_TOOLS.
+from interfaces.shared.superuser_guard import (  # noqa: E402
+    SUPERUSER_TOOL_NAMES as _SUPERUSER_TOOL_NAMES,
+    is_superuser_question as _is_superuser_question,
+)
 
 # Prices in USD per 1 million tokens: (input_rate, output_rate).
 # Verify against current provider docs; unknown models fall back to _DEFAULT_COST.
@@ -98,6 +124,7 @@ _PLOT_UNSUPPORTED_TOOLS: frozenset[str] = frozenset({
     "panda_job_status",
     "panda_log_analysis",
     "pilot_source_analysis",
+    "code_query",
     "panda_server_health",
     "bamboo_health",
 })
@@ -125,6 +152,81 @@ _COLUMN_UNIT_MAP: dict[str, str] = {
     "queue_time_s": "s",
     "io_time_s": "s",
 }
+
+# ---------------------------------------------------------------------------
+# Superuser helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_superuser_password(attempt: str) -> bool:
+    """Compare a password attempt against the configured superuser password.
+
+    Uses :func:`hmac.compare_digest` to resist timing attacks.  Returns
+    ``False`` immediately when no superuser password is configured.
+
+    Args:
+        attempt: The password string entered by the user.
+
+    Returns:
+        ``True`` when the attempt matches and a password is configured.
+    """
+    if not _SUPERUSER_PASSWORD:
+        return False
+    return hmac.compare_digest(attempt.encode(), _SUPERUSER_PASSWORD.encode())
+
+
+# ---------------------------------------------------------------------------
+# Mermaid helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_mermaid_blocks(text: str) -> tuple[str, list[str]]:
+    r"""Extract fenced Mermaid code blocks from an LLM response.
+
+    Scans ``text`` for fenced blocks that begin with ``\`\`\`mermaid``.
+    Each matching block is removed from the text and collected separately
+    so the caller can render it with the Mermaid component.
+
+    Args:
+        text: Raw assistant response text, potentially containing one or
+            more ``\`\`\`mermaid`` ... ``\`\`\``` blocks.
+
+    Returns:
+        Tuple of ``(clean_text, diagram_defs)`` where ``clean_text`` is
+        the response with Mermaid blocks stripped and ``diagram_defs`` is
+        a list of raw Mermaid definition strings (one per block found).
+    """
+    import re
+    pattern = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
+    diagrams: list[str] = []
+
+    def _capture(m: re.Match[str]) -> str:
+        diagrams.append(m.group(1).strip())
+        return ""
+
+    clean = pattern.sub(_capture, text)
+    # Tidy up any double-blank lines left by removal.
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    return clean, diagrams
+
+
+def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
+    """Render Mermaid diagram definitions inline using streamlit-mermaid.
+
+    Silently does nothing when ``streamlit-mermaid`` is not installed or
+    when ``diagram_defs`` is empty.
+
+    Args:
+        diagram_defs: List of raw Mermaid definition strings (without the
+            fenced block markers).
+    """
+    if not _MERMAID_AVAILABLE or not diagram_defs:
+        return
+    for i, defn in enumerate(diagram_defs):
+        if len(diagram_defs) > 1:
+            st.caption(f"Diagram {i + 1}")
+        stmermaid.st_mermaid(code=defn)
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -369,6 +471,8 @@ def _init_session() -> None:
         "last_raw": None,
         "last_tool": None,
         "last_plugin_id": None,
+        "superuser": False,
+        "last_diagrams": [],
         "trace_file": os.path.join(
             tempfile.gettempdir(), f"bamboo_streamlit_{os.getpid()}.jsonl"
         ),
@@ -514,6 +618,7 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
         st.session_state["last_evidence"] = None
         st.session_state["last_raw"] = None
         st.session_state["last_tool"] = None
+        st.session_state["last_diagrams"] = []
         st.rerun()
 
     with st.sidebar.expander("Tools registered on server"):
@@ -522,6 +627,28 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
             st.write("\n".join(f"- `{t}`" for t in tools))
         else:
             st.caption("Not connected yet.")
+
+    # --- Developer / superuser access ---
+    if _SUPERUSER_PASSWORD:
+        st.sidebar.header("Developer access")
+        if st.session_state.get("superuser"):
+            st.sidebar.success("🔓 Superuser mode active")
+            if st.sidebar.button("🔒  Lock", use_container_width=True):
+                st.session_state["superuser"] = False
+                st.rerun()
+        else:
+            pw = st.sidebar.text_input(
+                "Password",
+                type="password",
+                key="_su_pw_input",
+                help="Enter the superuser password to unlock developer tools.",
+            )
+            if st.sidebar.button("Unlock", use_container_width=True):
+                if _check_superuser_password(pw):
+                    st.session_state["superuser"] = True
+                    st.rerun()
+                else:
+                    st.sidebar.error("Incorrect password.")
 
     return transport, http_url, bearer_token, str(plugin_id), stdio_command
 
@@ -953,6 +1080,25 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         question: str = st.session_state["pending_question"]
         st.session_state["pending_question"] = None
 
+        # Pre-dispatch superuser guard: block questions that would route to
+        # superuser-only tools when the session is not authenticated.
+        if (
+            _SUPERUSER_PASSWORD
+            and not st.session_state.get("superuser", False)
+            and _is_superuser_question(question, st.session_state.get("tool_names", []))
+        ):
+            # Remove the user message we just appended — it should not sit in
+            # history without a corresponding answer.
+            if messages and messages[-1]["role"] == "user":
+                st.session_state["messages"] = messages[:-1]
+            st.warning(
+                "🔒 This question requires **superuser mode**. "
+                "Enter your password in the **Developer access** section of the sidebar.",
+                icon="🔒",
+            )
+            st.rerun()
+            return
+
         trace_file: str = st.session_state["trace_file"]
         pre_pos = _trace_file_size(trace_file) if transport == "stdio" else 0
 
@@ -970,6 +1116,12 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 answer = f"⚠️ Error: {exc}"
 
+        # Extract any Mermaid diagram blocks from the answer before storing.
+        # The clean text (without fenced blocks) is stored in message history
+        # so follow-up context is not polluted with raw Mermaid syntax.
+        clean_answer, diagram_defs = _extract_mermaid_blocks(answer)
+        st.session_state["last_diagrams"] = diagram_defs
+
         # Collect spans (stdio only)
         spans: list[dict[str, Any]] = []
         if transport == "stdio":
@@ -982,8 +1134,8 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         st.session_state["last_raw"] = raw
         st.session_state["last_tool"] = last_tool
 
-        # Append assistant reply and cap history
-        messages.append({"role": "assistant", "content": answer})
+        # Append assistant reply (clean, no Mermaid blocks) and cap history.
+        messages.append({"role": "assistant", "content": clean_answer})
         st.session_state["messages"] = _cap_messages(messages)
         st.rerun()
 
@@ -992,21 +1144,34 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # After the last assistant reply: inline plot then detail expanders.
+    # After the last assistant reply: render diagrams, plot, detail expanders.
     if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
+        # Mermaid diagrams inline (Phase 1)
+        _render_mermaid_blocks(st.session_state.get("last_diagrams") or [])
+
         _render_plot_expander(
             st.session_state["last_evidence"],
             st.session_state.get("last_tool"),
         )
+        # Superuser tools expose full source evidence; hide raw/evidence
+        # expanders from non-superuser sessions for those tools to avoid
+        # leaking potentially large source blobs to casual users.
+        last_tool = st.session_state.get("last_tool")
+        is_superuser_tool = last_tool in _SUPERUSER_TOOL_NAMES
+        is_superuser = st.session_state.get("superuser", False)
+        show_evidence_detail = (not is_superuser_tool) or is_superuser
+
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             _render_tracing_expander(st.session_state["last_spans"], transport)
         with col2:
             _render_costs_expander(st.session_state["last_spans"])
         with col3:
-            _render_evidence_expander(st.session_state["last_evidence"])
+            if show_evidence_detail:
+                _render_evidence_expander(st.session_state["last_evidence"])
         with col4:
-            _render_raw_expander(st.session_state["last_raw"])
+            if show_evidence_detail:
+                _render_raw_expander(st.session_state["last_raw"])
 
     # Chat input — must be the last widget
     question = st.chat_input(st.session_state.get("display_name", "Ask PanDA"))
@@ -1063,8 +1228,10 @@ def main() -> None:
 
     # If the user switches plugin in the sidebar while connected, the cached
     # display_name belongs to the old plugin.  Clear it so the pre-connection
-    # label updates immediately to the new plugin_id.
-    if st.session_state.get("last_plugin_id") != plugin_id:
+    # label updates immediately to the new plugin_id, then re-fetch the
+    # new plugin's ui_manifest so the display_name is correct.
+    _plugin_changed = st.session_state.get("last_plugin_id") != plugin_id
+    if _plugin_changed:
         st.session_state["display_name"] = plugin_id.upper()
         st.session_state["last_plugin_id"] = plugin_id
 
@@ -1081,6 +1248,14 @@ def main() -> None:
         st.error(f"Failed to create MCP client: {exc}")
         st.code(traceback.format_exc())
         st.stop()
+
+    # Re-fetch branding when the plugin changes while already connected,
+    # now that mcp is in scope.
+    if _plugin_changed and st.session_state.get("server_ok"):
+        try:
+            _connect(mcp, plugin_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
     # Connect / refresh server metadata if not yet done
     if not st.session_state.get("server_ok"):

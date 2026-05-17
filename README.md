@@ -11,9 +11,11 @@ Structured evidence is always returned alongside natural-language answers.
 > includes `cric_query` for natural-language queries against the CRIC Computing
 > Resource Information Catalogue. The AskCGSim plugin provides documentation
 > search (RAG + BM25) and `cgsim.sim_query` for natural-language queries
-> against the CGSim simulation output SQLite database. The current focus is
-> multi-experiment support and orchestration using tool families and planning
-> for complex multi-step prompts.
+> against the CGSim simulation output SQLite database. New features: Mermaid
+> diagram rendering in Streamlit (LLM-generated inline diagrams for algorithmic
+> questions), superuser / developer mode (`BAMBOO_SUPERUSER_PASSWORD`), and
+> the `pilot_code_query` developer tool for on-demand pilot source fetch and
+> analysis with diagram support.
 
 ---
 
@@ -192,6 +194,7 @@ Type any question and press Enter.
 | `/debug on\|off` | Toggle verbose tool call output |
 | `/tools` | List tools registered on the server |
 | `/links [N]` | List links from the last response; `/links N` opens link N in browser |
+| `/superuser <pw>` | Unlock developer mode (requires `BAMBOO_SUPERUSER_PASSWORD`) |
 | `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit` | Quit |
 
@@ -284,6 +287,12 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 
 Set `BAMBOO_CHROMA_COLLECTION=atlas_docs` when running the ATLAS deployment to
 point the doc tools at the ATLAS vector store.
+
+### Built-in developer tools (all experiments)
+
+| Tool name | Description |
+|---|---|
+| `pilot_code_query` | **Superuser.** Fetches any pilot source file from GitHub for code review, algorithm explanation, and Mermaid diagram generation. Configured via `BAMBOO_PILOT_REPO` and `BAMBOO_PILOT_BRANCH`. |
 
 ### ePIC plugin tools
 

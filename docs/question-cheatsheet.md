@@ -504,3 +504,223 @@ What is the status of panda task 29871234?
 
 > **Verify false-negative:** `/fastpath off` then ask "Is PanDA alive?" — the planner should still select `panda_server_health`.
 > **Verify false-positive guard:** "How many panda jobs failed at BNL?" must route to `panda_jobs_query`, not `panda_server_health`.
+
+---
+
+## Pilot source code query (`code_query`) — superuser only
+
+These questions fetch and analyse pilot source files directly from GitHub.
+Requires superuser mode to be active in the UI (`/superuser <pw>` in the TUI,
+or the Unlock button in the Streamlit sidebar).
+
+### Full module questions
+
+```
+Look at pilot/util/processes.py and tell me if it handles missing UIDs safely.
+Can a problem in pilot/util/filehandling.py cause this failure?
+What does pilot/common/exception.py contain?
+Review pilot/util/timing.py for potential threading issues.
+```
+
+> **Expected routing:** `tool = code_query`, full module source returned.
+> The LLM will scan the full file (up to 12 000 characters) and answer directly.
+
+### Function-targeted questions
+
+```
+Explain how the is_looping function in pilot/control/job.py works.
+Show me the get_job function in pilot/control/job.py.
+What does list_processes_and_threads do in pilot/util/psutils.py?
+```
+
+> **Tip:** mentioning a specific function name in the question allows the planner
+> to pass `function_name` to the tool and retrieve only that function, avoiding
+> the 12 000-character truncation limit for large modules.
+
+### Diagram-generating questions
+
+These questions describe algorithms or flows, which prompts the LLM to include
+a Mermaid diagram. In Streamlit, the diagram renders inline after the text answer.
+
+```
+Explain how the looping job detection algorithm works in pilot/control/job.py
+Show me a diagram of how the pilot handles job state transitions.
+Walk me through the flow of the get_pilot_job function in pilot/control/pilot.py
+Explain the retry logic in pilot/util/https.py as a flowchart.
+```
+
+> **Expected output (Streamlit):** prose explanation followed by a rendered
+> Mermaid diagram (flowchart TD or stateDiagram-v2).
+> **Expected output (TUI):** prose only — Mermaid blocks are stripped.
+
+### Combined bug investigation (with prior log analysis)
+
+```
+# Step 1: run log analysis on a failed pilot_monitoring_error job
+Why did job 7099503721 fail?
+/tracing   ← verify tool = panda_log_analysis
+
+# Step 2: ask about the specific file involved
+Can this failure be due to a bug in pilot/util/psutils.py?
+
+# Step 3: drill into a specific function
+Show me the list_processes_and_threads function in pilot/util/psutils.py
+and explain why it raises a KeyError for missing UIDs.
+```
+
+> **Note:** for step 2 and 3, superuser mode must be active. The planner
+> routes to `code_query` (direct file query). `pilot_source_analysis`
+> handles traceback extraction automatically — use it for step 1.
+
+---
+
+## Mermaid diagram verification
+
+Use these questions to confirm that Mermaid diagram generation and rendering
+are working correctly in the Streamlit UI.
+
+```
+Explain how the looping job detection works in pilot/control/job.py
+Show me a diagram of PanDA job states (use your general knowledge).
+Explain the Harvester brokerage flow as a sequence diagram.
+```
+
+> **What to look for (Streamlit):** a rendered diagram appears below the text
+> answer. The raw ` ```mermaid ``` ` block should NOT appear as text.
+> **What to look for (TUI):** the answer is text-only; no raw Mermaid syntax
+> in the output.
+> **Check history integrity:** ask a follow-up question; the conversation
+> history should not contain raw Mermaid blocks.
+
+---
+
+## Superuser mode verification
+
+### Streamlit
+
+1. Start the Streamlit UI without `BAMBOO_SUPERUSER_PASSWORD` set → verify
+   that "Developer access" is absent from the sidebar.
+2. Restart with `BAMBOO_SUPERUSER_PASSWORD=test123` set → verify the section
+   appears.
+3. Enter the wrong password → verify "Incorrect password." appears.
+4. Enter the correct password → verify 🔓 **Superuser mode active** and the
+   Lock button.
+5. Lock the session → verify the section returns to the password input.
+6. Unlock again → ask a `code_query` question (e.g. `"Look at pilot.py"`) → verify the Evidence and
+   Raw JSON expanders are visible.
+7. Lock → ask the same question again → verify the expanders are hidden.
+
+### TUI
+
+```
+/superuser wrongpassword     ← should print "Incorrect password."
+/superuser yourpassword      ← should print "🔓 Superuser mode unlocked..."
+/help                        ← verify /superuser appears in the command list
+```
+
+---
+
+## Asking code review questions effectively
+
+The `code_query` tool fetches real source code and passes it to the LLM, but
+LLMs have inherent limitations as static analysis engines.  The question you
+ask determines whether you get a reliable, useful answer.
+
+### Core principle: targeted questions beat open-ended ones
+
+The LLM reasons well about specific, bounded questions.  It reasons poorly
+about exhaustive searches across a whole file — and when asked to "find all X",
+it may invent findings to appear thorough.
+
+| Question type | Reliability | Example |
+|---|---|---|
+| "Is X used in this file?" | ✓ High | "Is `Any` used anywhere in pilot.py?" |
+| "Can function F raise exception E?" | ✓ High | "Can `set_environment_variables` raise a `KeyError`?" |
+| "Explain algorithm A in function F" | ✓ High | "Explain the retry logic in `pilot/util/https.py`" |
+| "Does F handle case C?" | ✓ High | "Does `get_job` handle `None` job_id?" |
+| "Find all unused imports" | ✗ Low | (will hallucinate) |
+| "Find all bugs" | ✗ Low | (will invent findings) |
+| "Is this code correct?" | ✗ Low | (too broad) |
+
+### Verifying a specific claim
+
+If the LLM returns a finding you want to verify — e.g. *"X is unused"* —
+ask directly:
+
+```
+Is 'Any' actually used anywhere in pilot.py?
+Show me every line in pilot.py that uses 'Any'.
+```
+
+The LLM will trace the usages and give you a reliable answer to that
+specific question.
+
+### Open-ended reviews as a starting point
+
+Open-ended reviews (*"look at pilot.py and find problems"*) are useful as a
+**starting point** for investigation, not as a final verdict.  The LLM may
+produce a mix of genuine observations and hallucinated findings.
+
+Workflow:
+```
+# Step 1: open-ended review to get a list of candidate areas
+Look at pilot.py and give me a high-level review
+
+# Step 2: follow up on specific findings to verify them
+Is the OIDC token renewal failure actually swallowed?
+Show me the relevant code around that exception handler.
+
+# Step 3: drill into the most interesting ones
+Can the OIDC failure cause the job to fail silently?
+```
+
+### Function-targeted review
+
+For large files, always specify `function_name` to focus the analysis:
+
+```
+# Open-ended on a large file — may be truncated or unfocused
+Look at pilot/control/job.py and find any problems
+
+# Targeted — reliable and focused
+Does the get_job function in pilot/control/job.py handle missing fields safely?
+Show me the is_looping function and explain what it does.
+Can the wrap_up function in pilot.py raise an unhandled exception?
+```
+
+### Choosing a model for code analysis
+
+Some models are more prone to hallucinated static analysis findings than others.
+If you see repeated false findings (unused imports that are used, missing
+functions that exist, etc.), try a different model:
+
+```bash
+# More conservative about definitive claims:
+export LLM_DEFAULT_PROVIDER="anthropic"
+export LLM_DEFAULT_MODEL="claude-sonnet-4-5"
+
+# Or:
+export LLM_DEFAULT_PROVIDER="openai"
+export LLM_DEFAULT_MODEL="gpt-4o"
+```
+
+### Following up after a code review
+
+After any `code_query` response, these follow-ups are automatically re-routed
+to the same tool without needing to repeat the file path:
+
+```
+Yes please            # affirmative
+Continue              # request more
+Verify the full function
+Show me the complete source
+Get the rest of the file
+Can you check the set_environment_variables function specifically?
+```
+
+If the follow-up doesn't route correctly (ends up in RAG or topic guard),
+repeat the file path explicitly:
+
+```
+Look at pilot.py again — is 'Any' actually used?
+```

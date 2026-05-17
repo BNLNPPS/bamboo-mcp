@@ -131,7 +131,9 @@ export OPENAI_COMPAT_API_KEY=""
 # Active experiment plugin for the TUI and Streamlit interfaces.
 # Controls which ui_manifest tool is loaded and which banner/accent is shown.
 # Options: atlas | epic | cgsim   (default: atlas)
-# export ASKPANDA_PLUGIN="atlas"
+# Must be explicitly exported (not commented out) so that sourcing this file
+# clears any stale value left in the shell from a previous cgsim/epic session.
+export ASKPANDA_PLUGIN="atlas"
 
 ########################################
 # RAG / CHROMADB (doc_search / doc_bm25 tools)
@@ -162,6 +164,42 @@ export BAMBOO_FAST_PATH="0"
 
 # Uncomment for verbose debug logs if needed
 # export ASKPANDA_DEBUG="1"
+
+########################################
+# SUPERUSER / DEVELOPER MODE
+########################################
+
+# Plain-text password to unlock superuser mode in the Streamlit and TUI
+# interfaces.  When set, a "Developer access" section appears in the
+# Streamlit sidebar and the /superuser <password> command is active in
+# the TUI.  Superuser mode exposes developer tools such as pilot_code_query.
+# Leave unset (or empty) to disable superuser mode entirely.
+# export BAMBOO_SUPERUSER_PASSWORD="changeme"
+
+# Additional tool names to treat as superuser-gated (comma-separated).
+# The defaults (code_query, atlas.code_query) are always included.
+# Example: bamboo_code_query,atlas.bamboo_code_query
+# export BAMBOO_SUPERUSER_TOOLS=""
+
+# Additional routing-signal regex patterns for the pre-dispatch superuser
+# guard (comma-separated, Python re syntax, case-insensitive).
+# Any question matching one of these patterns is blocked until the user
+# authenticates as a superuser.  The defaults cover *.py filenames and
+# code-inspection verb + keyword combinations.
+# Example: bamboo/.*\.py,core/bamboo/.*
+# export BAMBOO_SUPERUSER_PATTERNS=""
+
+########################################
+# CODE QUERY (superuser tool)
+########################################
+
+# GitHub repository to fetch source files from.
+# Format: owner/repo  (default: PanDAWMS/pilot3 — override for any other codebase)
+# export BAMBOO_CODE_QUERY_REPO="PanDAWMS/pilot3"
+
+# Branch or tag to fetch from (default: master).
+# Example: export BAMBOO_CODE_QUERY_REPO="my-org/my-repo"
+# export BAMBOO_CODE_QUERY_BRANCH="master"
 
 ########################################
 # TRACING

@@ -56,6 +56,17 @@ These tools query the SQLite database produced by a CGSim simulation run.
 
 ---
 
+## Source code analysis tools
+
+These tools fetch and analyse PanDA Pilot source code from GitHub.
+
+| Tool | Document | Description |
+|---|---|---|
+| `pilot_source_analysis` | [pilot_source_analysis.md](pilot_source_analysis.md) | Traceback-driven analysis — fetches pilot3 functions named in a job failure exception. |
+| `code_query` | [code_query.md](code_query.md) | **Superuser.** On-demand fetch of any source file or function from a configurable repository; targeted Q&A, algorithm explanation, Mermaid diagrams. |
+
+---
+
 ## Infrastructure tools
 
 | Tool | Document | Description |
@@ -89,6 +100,8 @@ The following tools have no ePIC equivalent and are absent from the `askpanda_ep
 | `panda_jobs_query` | ATLAS-specific ingestion database |
 | `cric_query` | CRIC is an ATLAS computing resource catalogue |
 | `panda_server_health` | ATLAS PanDA MCP session wiring |
+
+`code_query` and `pilot_source_analysis` are built-in core tools (not plugin-specific) and are available to all experiments.
 
 ### `panda_task_status` implementation differences
 
@@ -127,3 +140,15 @@ using the RAG documentation tools.
 ### Entry point naming
 
 All plugin tools are loaded via Python entry points. The MCP server overwrites `get_definition()["name"]` with the entry point key at load time — for example, `panda_harvester_timeseries` is registered as `atlas.harvester_timeseries` and must be called by that name.
+
+---
+
+## Superuser tools
+
+Tools tagged `superuser` in their definition are always registered on the MCP server and callable by any MCP client. The Streamlit and TUI interfaces use the `BAMBOO_SUPERUSER_PASSWORD` env var to gate their evidence panels in non-authenticated sessions — this is a UI convenience, not a security boundary.
+
+| Tool | Tag | UI behaviour |
+|---|---|---|
+| `code_query` | `superuser`, `developer` | Evidence and Raw JSON panels hidden until superuser unlock |
+
+See [`docs/interfaces.md`](../interfaces.md#superuser-mode) for the full superuser setup guide.

@@ -84,6 +84,60 @@ _SYSTEM_PILOT_SOURCE: str = (
     "- Keep it focused — this is a developer-level diagnosis, not a user-facing summary.\n"
 )
 
+# ---------------------------------------------------------------------------
+# Mermaid diagram guidance — appended to synthesis prompts that benefit from
+# diagrams (algorithms, flow descriptions, architecture explanations).
+# ---------------------------------------------------------------------------
+
+_MERMAID_GUIDANCE: str = (
+    "\nDiagram rule:\n"
+    "- If the answer describes a process, algorithm, state machine, or data flow "
+    "that would be significantly clearer as a diagram, include exactly ONE Mermaid "
+    "diagram in a fenced ```mermaid block immediately after your prose explanation.\n"
+    "- Prefer 'flowchart TD' for algorithms and flows, 'sequenceDiagram' for "
+    "protocols, and 'stateDiagram-v2' for state machines.\n"
+    "- Only include a diagram when it genuinely adds clarity; omit it for "
+    "simple status answers or factual lookups.\n"
+    "- The diagram must be valid Mermaid syntax — no HTML inside nodes, "
+    "use quotes around labels containing spaces or special characters.\n"
+)
+
+_SYSTEM_CODE_QUERY: str = (
+    "You are AskPanDA operating in superuser / developer mode.\n"
+    "You have been given source code fetched from a GitHub repository.\n"
+    "The evidence contains:\n"
+    "- file_path: the file path within the repository (e.g. pilot/util/processes.py).\n"
+    "- github_url: URL to browse the file on GitHub.\n"
+    "- source: the module source text (may be the complete file, a function snippet, "
+    "or a truncated file — see the 'truncated' flag).\n"
+    "- truncated: true when the source was cut short because the file exceeds the "
+    "context limit.  A '# --- TRUNCATED ---' comment at the end of the source marks "
+    "the cut point and shows how many lines were omitted.\n"
+    "- fetch_error: non-empty string when the file could not be retrieved.\n"
+    "Rules:\n"
+    "- Answer the user's specific question about the code directly and precisely.\n"
+    "- Quote relevant source lines verbatim to support your answer.\n"
+    "- If diagnosing a potential bug, identify the exact function and line number.\n"
+    "- If explaining an algorithm, walk through it step by step.\n"
+    "- Include the GitHub URL so the developer can navigate directly.\n"
+    "- If fetch_error is non-empty, explain that the file could not be fetched "
+    "and suggest checking the path or network access.\n"
+    "- If truncated is false, the source is the COMPLETE file as fetched. "
+    "You MUST NOT mention truncation, suggest the file is incomplete, or recommend "
+    "fetching the full file. The file has been fully retrieved.\n"
+    "- If truncated is true, note once at the end that the analysis covers only "
+    "the retrieved portion and direct the user to the GitHub URL for the full file. "
+    "Do NOT list this as a numbered finding or a code quality issue.\n"
+    "- Do not fabricate source lines that are not in the evidence.\n"
+    "- Do not claim an identifier, import, function, or variable is unused, missing, \n"
+    "  or undeclared unless you have traced every occurrence of that name in the \n"
+    "  source. If unsure, say so rather than asserting a false finding.\n"
+    "- Do not invent bugs or issues not demonstrable from the source. Hedged \n"
+    "  observations (\"may\", \"consider\", \"worth verifying\") are acceptable; \n"
+    "  false definitive claims (\"is unused\", \"is missing\", \"is broken\") are not.\n"
+    + _MERMAID_GUIDANCE
+)
+
 _SYSTEM_JOB: str = (
     "You are AskPanDA for the ATLAS experiment.\n"
     "Given a user's question and a JSON evidence object from BigPanDA, "
@@ -670,6 +724,8 @@ def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> s
         return _SYSTEM_LOG_ANALYSIS
     if "pilot_source_analysis" in tool_names:
         return _SYSTEM_PILOT_SOURCE
+    if "pilot_code_query" in tool_names:
+        return _SYSTEM_CODE_QUERY
     if "panda_job_status" in tool_names:
         return _SYSTEM_JOB
     if "panda_task_status" in tool_names:
@@ -1015,7 +1071,23 @@ async def _execute_one_tool(
         _last_evidence_store["last_tool"] = tool_name
         _LLM_STRIP = {"raw_payload", "pandaid_list"}
         llm_evidence = {k: v for k, v in unpacked.items() if k not in _LLM_STRIP}
-        evidence_parts.append(f"[{tool_name}]\n{_compact_json(llm_evidence)}")
+
+        if tool_name == "code_query":
+            # code_query source can be up to 150K chars — _compact_json would
+            # truncate the JSON blob before the 'truncated' flag is reached.
+            # Extract source separately and append as a fenced block so the
+            # metadata (including the truncated flag) always passes intact.
+            _inner = llm_evidence.get("evidence") or llm_evidence
+            _source = ""
+            if isinstance(_inner, dict) and "source" in _inner:
+                _source = _inner.pop("source", "") or ""
+            _meta = _compact_json(llm_evidence)
+            evidence_parts.append(
+                f"[{tool_name}]\n{_meta}\n\n"
+                f"Source file contents:\n```python\n{_source}\n```"
+            )
+        else:
+            evidence_parts.append(f"[{tool_name}]\n{_compact_json(llm_evidence)}")
     else:
         raw_text = raw_result[0].get("text", "") if raw_result else ""
         if raw_text:
@@ -1284,6 +1356,8 @@ __all__ = [
     "get_last_pilot_monitoring_evidence",
     "_SYSTEM_LOG_ANALYSIS",
     "_SYSTEM_PILOT_SOURCE",
+    "_SYSTEM_CODE_QUERY",
+    "_MERMAID_GUIDANCE",
     "_SYSTEM_JOB",
     "_SYSTEM_TASK",
     "_SYSTEM_RAG",
