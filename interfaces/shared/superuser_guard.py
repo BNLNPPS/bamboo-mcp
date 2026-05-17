@@ -1,4 +1,4 @@
-"""Superuser question detection for Bamboo MCP user interfaces.
+r"""Superuser question detection for Bamboo MCP user interfaces.
 
 Both the Streamlit and Textual interfaces import from this module so that
 the guard logic is defined exactly once.
