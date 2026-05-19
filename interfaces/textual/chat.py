@@ -1736,27 +1736,42 @@ class BambooTui(App):
         accumulated since the previous call.  Each event is rendered as a system
         or error panel in the transcript.
 
+        ``log_prompt`` fires as a background ``asyncio.create_task`` inside
+        ``call_llm`` and performs a synchronous OpenSearch network call via
+        ``asyncio.to_thread``.  This method therefore retries up to
+        ``_PROMPTLOG_POLL_ATTEMPTS`` times with ``_PROMPTLOG_POLL_INTERVAL_S``
+        seconds between attempts so the background task has time to complete
+        before we give up.
+
         The call is silently skipped when the tool is not registered on the
         server (i.e. prompt logging is disabled or the server is an older
         version without the tool).
         """
+        _PROMPTLOG_POLL_ATTEMPTS = 6
+        _PROMPTLOG_POLL_INTERVAL_S = 0.5
+
         if "bamboo_promptlog_status" not in self.tool_names:
             return
         try:
-            res = await self._to_thread(
-                self.mcp.call_tool, "bamboo_promptlog_status", {}
-            )
-            text = _extract_text(res) or "{}"
-            parsed = json.loads(text)
-            for event in parsed.get("events") or []:
-                severity = str(event.get("severity", "info"))
-                message = str(event.get("message", ""))
-                if not message:
-                    continue
-                if severity == "error":
-                    self._write_error(message)
-                else:
-                    self._write_system(message)
+            for _ in range(_PROMPTLOG_POLL_ATTEMPTS):
+                await asyncio.sleep(_PROMPTLOG_POLL_INTERVAL_S)
+                res = await self._to_thread(
+                    self.mcp.call_tool, "bamboo_promptlog_status", {}
+                )
+                text = _extract_text(res) or "{}"
+                parsed = json.loads(text)
+                events = parsed.get("events") or []
+                if events:
+                    for event in events:
+                        severity = str(event.get("severity", "info"))
+                        message = str(event.get("message", ""))
+                        if not message:
+                            continue
+                        if severity == "error":
+                            self._write_error(message)
+                        else:
+                            self._write_system(message)
+                    return  # events received — done
         except Exception:  # pylint: disable=broad-exception-caught
             pass  # Never let observability polling affect the main response path.
 

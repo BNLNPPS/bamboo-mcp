@@ -631,6 +631,7 @@ def _init_session() -> None:
         ),
         "pending_question": None,
         "promptlog_notices": [],
+        "poll_promptlog": False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -1347,9 +1348,12 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         st.session_state["last_raw"] = raw
         st.session_state["last_tool"] = last_tool
 
-        # Poll server for any buffered OpenSearch prompt-log events and push
-        # them to the notice queue so they render on the next cycle.
-        _poll_promptlog_events(mcp)
+        # Signal that the next render cycle should poll for prompt-log events.
+        # We cannot poll now because log_prompt() fires as a background task
+        # inside call_llm and may not have completed before we get here.
+        # The st.rerun() below triggers another render pass where the poll
+        # will run, by which time the OpenSearch write should be finished.
+        st.session_state["poll_promptlog"] = True
 
         # Append assistant reply (clean, no Mermaid blocks) and cap history.
         messages.append({"role": "assistant", "content": clean_answer})
@@ -1363,6 +1367,13 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         st.session_state["superuser_warning"] = None
 
     _render_promptlog_notices()
+
+    # Deferred prompt-log poll: log_prompt() fires as a background task inside
+    # call_llm and may not finish before the response rerun.  The flag set
+    # during the response pass signals that we should poll on this render cycle,
+    # by which time the OpenSearch write should have completed.
+    if st.session_state.pop("poll_promptlog", False):
+        _poll_promptlog_events(mcp)
 
     # Render chat history
     for msg in st.session_state["messages"]:
