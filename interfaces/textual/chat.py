@@ -47,7 +47,10 @@ from textual.events import Key
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
-from bamboo.llm import prompt_log as _prompt_log
+from bamboo.llm.prompt_log import (  # direct import avoids triggering bamboo.llm.__init__
+    register_notify_callback as _register_promptlog_notify,
+    clear_notify_callback as _clear_promptlog_notify,
+)
 
 DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
@@ -642,7 +645,7 @@ class BambooTui(App):
             # cluttering the transcript with per-turn send confirmations; those
             # are still emitted to the Python logger at DEBUG level.
 
-        _prompt_log.register_notify_callback(_promptlog_notify)
+        _register_promptlog_notify(_promptlog_notify)
 
         # Disable mouse capture so the terminal can handle text selection normally.
         # Trackpad scrolling is handled via PageUp/PageDown bindings instead.
@@ -661,7 +664,7 @@ class BambooTui(App):
     async def on_exit(self) -> None:
         """Request clean shutdown and wait for MCP task to finish."""
         self._shutdown_event.set()
-        _prompt_log.clear_notify_callback()
+        _clear_promptlog_notify()
 
         if self._mcp_task:
             try:

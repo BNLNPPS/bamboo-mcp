@@ -47,7 +47,9 @@ if _REPO_ROOT not in sys.path:
 import streamlit as st  # noqa: E402
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig  # noqa: E402
-from bamboo.llm import prompt_log as _prompt_log  # noqa: E402
+from bamboo.llm.prompt_log import (  # noqa: E402 — direct import avoids triggering bamboo.llm.__init__
+    register_notify_callback as _register_promptlog_notify,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -674,7 +676,7 @@ def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
         notices.append((severity, message))
         st.session_state["promptlog_notices"] = notices
 
-    _prompt_log.register_notify_callback(_promptlog_notify)
+    _register_promptlog_notify(_promptlog_notify)
 
     # LLM info via bamboo_health
     try:
