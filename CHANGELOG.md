@@ -97,7 +97,53 @@ All notable changes to Bamboo are documented here.
   in the main chat area.  Chart type is chosen automatically based on column
   types.  Requires `plotly>=5.0` (added to `requirements-ui.txt`).
 
+### Added
+
+- **OpenSearch prompt-log UI notifications.** When `BAMBOO_OPENSEARCH_PROMPTLOG`
+  is set, write confirmations and errors from the background OpenSearch indexing
+  thread are now surfaced directly inside the running interface rather than only
+  appearing in the server log file.
+
+  - `core/bamboo/llm/prompt_log.py`: added `NotifyFn` type alias,
+    `register_notify_callback()`, `clear_notify_callback()`, and `_notify()`
+    helper.  `_write_document` now captures the OpenSearch response (`_id`,
+    `result` fields) and calls `_notify("info", …)` on success,
+    `_notify("warning"/"error", …)` on failure, mirroring the existing
+    `logger.*` calls.  `"debug"` severity (per-turn send confirmation) is
+    emitted to the Python logger only and suppressed from both UIs to avoid
+    clutter.
+  - **TUI** (`interfaces/textual/chat.py`): imports
+    `register_notify_callback` / `clear_notify_callback` directly from
+    `bamboo.llm.prompt_log` (avoiding `bamboo.llm.__init__` which eagerly
+    imports all LLM provider clients).  Registers `_promptlog_notify` in
+    `on_mount` — dispatches `"error"` to `_write_error` and
+    `"warning"`/`"info"` to `_write_system` via `call_from_thread`.  Clears
+    the callback in `on_exit`.
+  - **Streamlit** (`interfaces/streamlit/chat.py`): registers a callback in
+    `_connect` that appends `(severity, message)` tuples to
+    `st.session_state["promptlog_notices"]`.  New `_render_promptlog_notices()`
+    helper drains the queue each render cycle and displays `st.error` /
+    `st.warning` / `st.toast` as appropriate.
+
 ### Fixed
+
+- **TUI — alternate-screen rendering on SSH (lxplus).** Textual's `--no-inline`
+  (alternate screen) renderer uses absolute cursor positioning without erasing
+  lines, relying on the terminal clearing the alternate screen buffer on entry.
+  SSH pseudo-TTYs (e.g. lxplus accessed via Claude Code) do not reliably do
+  this, causing every repaint to accumulate as ghost frames — visible as stacked
+  bordered panels during long requests or a screen full of blue lines at
+  startup.  Confirmed via debug instrumentation that `_write_panel` is called
+  the correct number of times; the ghosting was a pure terminal rendering
+  artifact.  This behaviour is consistent across all Textual versions tested
+  (0.86–8.2.5) and cannot be fixed in application code without patching Textual.
+
+  When an SSH session is detected (`SSH_CLIENT` / `SSH_TTY` /
+  `SSH_CONNECTION` env vars, set automatically by OpenSSH), `--no-inline` is
+  silently overridden and inline mode is used instead.  Inline mode uses delta
+  updates (relative cursor movement) and renders correctly on all terminals.
+  Set `BAMBOO_FORCE_NO_INLINE=1` to override the auto-switch for terminals
+  known to handle alternate screen correctly over SSH.
 
 - **`_compact_json` truncating `code_query` evidence.** `_compact_json` has a
   12 000-character limit applied to all evidence blobs.  A `code_query` result
