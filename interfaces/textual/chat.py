@@ -1777,11 +1777,6 @@ class BambooTui(App):
             import datetime as _dt
             now = _dt.datetime.now().strftime("%H:%M:%S")
             if self.thinking_widget:
-                # layout=False: the indicator is always one line tall so no
-                # layout recomputation is needed.  Without this, Textual
-                # triggers a full layout pass every second which causes the
-                # RichLog compositor to repaint on slow/SSH terminals (lxplus),
-                # making transcript panels appear to re-stack visually.
                 self.thinking_widget.update(
                     Text(f"{now}  {frames[counter[0] % len(frames)]}", style="dim italic"),
                     layout=False,
@@ -2343,7 +2338,37 @@ def main() -> None:
         )
 
     app = BambooTui(cfg=cfg, plugin_id=args.plugin)
-    inline = True if args.inline or not args.no_inline else False
+
+    # Textual's alternate-screen mode (--no-inline) uses absolute cursor
+    # positioning without erasing lines before writing.  On SSH pseudo-TTYs
+    # (e.g. lxplus) the terminal does not clear the alternate screen buffer on
+    # entry, so every repaint overlays on previous content producing ghost
+    # frames.  This is a fundamental limitation of Textual's non-inline
+    # renderer on SSH — not fixable in application code without patching
+    # Textual itself.
+    #
+    # When running over SSH we therefore force inline mode, which uses relative
+    # cursor movement (delta updates only) and renders correctly on all
+    # terminals.  Set BAMBOO_FORCE_NO_INLINE=1 to override this if your
+    # terminal is known to handle alternate screen correctly over SSH.
+    _ssh = bool(
+        os.environ.get("SSH_CLIENT")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("SSH_CONNECTION")
+    )
+    _force_no_inline = os.environ.get("BAMBOO_FORCE_NO_INLINE", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if _ssh and args.no_inline and not _force_no_inline:
+        import sys as _sys
+        print(
+            "[bamboo] SSH session detected — using inline mode "
+            "(set BAMBOO_FORCE_NO_INLINE=1 to use alternate screen).",
+            file=_sys.stderr,
+        )
+        inline = True
+    else:
+        inline = True if args.inline or not args.no_inline else False
     app.run(inline=inline, inline_no_clear=True, mouse=False)
 
 
