@@ -663,6 +663,7 @@ async def call_llm(
     user: str,
     history: list[Message] | None = None,
     max_tokens: int = 2048,
+    tools_used: list[str] | None = None,
 ) -> str:
     """Call the default LLM with a system + user prompt and return the text.
 
@@ -672,6 +673,10 @@ async def call_llm(
     :func:`_truncate_history` to prevent synthesis prompts from growing
     unbounded across multi-turn conversations.
 
+    After a successful response, the prompt and response are forwarded to
+    :func:`~bamboo.llm.prompt_log.log_prompt` for optional OpenSearch logging
+    (fire-and-forget; only active when ``BAMBOO_OPENSEARCH_PROMPTLOG`` is set).
+
     Args:
         system: System prompt string.
         user: Synthesised user prompt for the current turn.
@@ -679,6 +684,8 @@ async def call_llm(
             between the system prompt and the current user message.  Must
             contain only ``"user"`` and ``"assistant"`` roles.
         max_tokens: Maximum tokens for the LLM response (default 2048).
+        tools_used: Names of MCP tools called during this turn, forwarded to
+            the prompt log for observability.  Defaults to an empty list.
 
     Returns:
         LLM response text.
@@ -692,7 +699,38 @@ async def call_llm(
         "messages": messages,
         "max_tokens": max_tokens,
     })
-    return _extract_delegated_text(delegated)
+    response_text = _extract_delegated_text(delegated)
+
+    # Fire-and-forget prompt logging — only active when
+    # BAMBOO_OPENSEARCH_PROMPTLOG is set.  Deferred import keeps this module
+    # free of heavy optional dependencies at import time.
+    try:
+        from bamboo.llm.prompt_log import log_prompt  # noqa: PLC0415
+        from bamboo.tools.llm_passthrough import get_llm_info as _get_llm_info
+        _llm_info = _get_llm_info()
+        _provider, _model = "", ""
+        for _part in _llm_info.split():
+            if _part.startswith("provider="):
+                _provider = _part[len("provider="):]
+            elif _part.startswith("model="):
+                _model = _part[len("model="):]
+        asyncio.ensure_future(
+            log_prompt(
+                system_prompt=system,
+                user_prompt=user,
+                response=response_text,
+                tools_used=list(tools_used or []),
+                provider=_provider,
+                model=_model,
+                max_tokens=max_tokens,
+                input_tokens=None,
+                output_tokens=None,
+            )
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # Never let logging errors affect the main response path.
+
+    return response_text
 
 
 def unpack_tool_result(result: list[MCPContent]) -> dict[str, Any]:
@@ -1279,7 +1317,11 @@ async def execute_plan(
             synthesis_max_tokens = 8192
         else:
             synthesis_max_tokens = 2048
-        body = await call_llm(system, user, history, max_tokens=synthesis_max_tokens)
+        body = await call_llm(
+            system, user, history,
+            max_tokens=synthesis_max_tokens,
+            tools_used=called_tool_names,
+        )
 
     # For log analysis: strip any LLM-invented Links section and append the
     # canonical one built from programmatic URLs in log_analysis_impl.
