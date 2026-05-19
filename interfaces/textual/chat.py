@@ -1777,8 +1777,14 @@ class BambooTui(App):
             import datetime as _dt
             now = _dt.datetime.now().strftime("%H:%M:%S")
             if self.thinking_widget:
+                # layout=False: the indicator is always one line tall so no
+                # layout recomputation is needed.  Without this, Textual
+                # triggers a full layout pass every second which causes the
+                # RichLog compositor to repaint on slow/SSH terminals (lxplus),
+                # making transcript panels appear to re-stack visually.
                 self.thinking_widget.update(
-                    Text(f"{now}  {frames[counter[0] % len(frames)]}", style="dim italic")
+                    Text(f"{now}  {frames[counter[0] % len(frames)]}", style="dim italic"),
+                    layout=False,
                 )
             counter[0] += 1
 
@@ -1800,7 +1806,7 @@ class BambooTui(App):
             self._thinking_task = None
         if self.thinking_widget:
             self.thinking_widget.remove_class("active")
-            self.thinking_widget.update("")
+            self.thinking_widget.update("", layout=False)
         if answer is not None:
             self._write_assistant(answer)
 
