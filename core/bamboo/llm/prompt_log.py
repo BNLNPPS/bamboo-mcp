@@ -494,7 +494,13 @@ def _write_document(doc: dict[str, Any]) -> None:
         # Success — reset failure counter.
         _consecutive_failures = 0
     except ImportError:
-        logger.debug("prompt_log: opensearch-py not installed — skipping log write")
+        imp_msg = (
+            f"prompt_log: turn {turn} — opensearch-py not installed; "
+            f"install with: pip install opensearch-py"
+        )
+        logger.debug(imp_msg)
+        _notify("warning", imp_msg)
+        _event_log.append({"turn": turn, "severity": "warning", "message": imp_msg})
     except Exception as exc:  # pylint: disable=broad-exception-caught
         _consecutive_failures += 1
         if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
