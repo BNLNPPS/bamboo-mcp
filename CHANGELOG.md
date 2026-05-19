@@ -99,31 +99,46 @@ All notable changes to Bamboo are documented here.
 
 ### Added
 
-- **OpenSearch prompt-log UI notifications.** When `BAMBOO_OPENSEARCH_PROMPTLOG`
-  is set, write confirmations and errors from the background OpenSearch indexing
-  thread are now surfaced directly inside the running interface rather than only
-  appearing in the server log file.
+- **OpenSearch prompt-log UI notifications.** When ``BAMBOO_OPENSEARCH_PROMPTLOG``
+  is set, write confirmations and errors from the OpenSearch indexing background
+  task are now surfaced directly inside the running interface.
 
-  - `core/bamboo/llm/prompt_log.py`: added `NotifyFn` type alias,
-    `register_notify_callback()`, `clear_notify_callback()`, and `_notify()`
-    helper.  `_write_document` now captures the OpenSearch response (`_id`,
-    `result` fields) and calls `_notify("info", …)` on success,
-    `_notify("warning"/"error", …)` on failure, mirroring the existing
-    `logger.*` calls.  `"debug"` severity (per-turn send confirmation) is
-    emitted to the Python logger only and suppressed from both UIs to avoid
-    clutter.
-  - **TUI** (`interfaces/textual/chat.py`): imports
-    `register_notify_callback` / `clear_notify_callback` directly from
-    `bamboo.llm.prompt_log` (avoiding `bamboo.llm.__init__` which eagerly
-    imports all LLM provider clients).  Registers `_promptlog_notify` in
-    `on_mount` — dispatches `"error"` to `_write_error` and
-    `"warning"`/`"info"` to `_write_system` via `call_from_thread`.  Clears
-    the callback in `on_exit`.
-  - **Streamlit** (`interfaces/streamlit/chat.py`): registers a callback in
-    `_connect` that appends `(severity, message)` tuples to
-    `st.session_state["promptlog_notices"]`.  New `_render_promptlog_notices()`
-    helper drains the queue each render cycle and displays `st.error` /
-    `st.warning` / `st.toast` as appropriate.
+  Architecture: ``log_prompt()`` is called from ``call_llm()`` in
+  ``bamboo_executor.py`` as ``asyncio.create_task`` (fire-and-forget).
+  ``_write_document`` appends each outcome to a process-local ring buffer
+  (``deque(maxlen=20)``) in ``prompt_log.py``.  A new built-in MCP tool
+  ``bamboo_promptlog_status`` exposes the buffer via a destructive drain
+  (events delivered exactly once per poll).  Both interfaces poll the tool
+  after each response and display results in the UI.
+
+  - ``core/bamboo/llm/prompt_log.py``: added ``_event_log`` ring buffer,
+    ``drain_events()``, ``NotifyFn``, ``register_notify_callback()``,
+    ``clear_notify_callback()``, and ``_notify()``.  ``_write_document``
+    appends ``{"turn", "severity", "message"}`` events on success, warning,
+    error, and ``ImportError`` (opensearch-py not installed).  The
+    ``ImportError`` case now produces a visible ``"warning"`` event with an
+    install instruction rather than silently logging at DEBUG.
+  - ``core/bamboo/tools/bamboo_executor.py``: ``call_llm()`` gains a
+    ``tools_used`` parameter and fires ``log_prompt`` via
+    ``asyncio.create_task`` after each LLM response.  New
+    ``BambooPromptLogStatusTool`` / ``bamboo_promptlog_status_tool`` calls
+    ``drain_events()`` and returns events as JSON.
+  - ``core/bamboo/core.py``: ``bamboo_promptlog_status`` registered in
+    ``TOOLS``.
+  - **TUI** (``interfaces/textual/chat.py``): ``_fetch_promptlog_events()``
+    polls ``bamboo_promptlog_status`` after every response with a retry loop
+    (6 × 0.5 s) to allow the background OpenSearch write to complete.
+    ``"error"`` events render as error panels; ``"info"``/``"warning"`` as
+    system panels.
+  - **Streamlit** (``interfaces/streamlit/chat.py``):
+    ``_poll_promptlog_events()`` polls on the render cycle *after* the
+    response rerun (deferred via ``poll_promptlog`` session-state flag) so
+    the background write has time to complete.  Events are pushed to
+    ``promptlog_notices`` and rendered by ``_render_promptlog_notices()`` as
+    ``st.error`` / ``st.warning`` / ``st.toast``.
+
+  Requires ``pip install opensearch-py`` and write permission for the
+  configured user on ``bamboomcp-promptlog-*`` in OpenSearch.
 
 ### Fixed
 
