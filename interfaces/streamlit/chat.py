@@ -47,6 +47,7 @@ if _REPO_ROOT not in sys.path:
 import streamlit as st  # noqa: E402
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig  # noqa: E402
+from bamboo.llm import prompt_log as _prompt_log  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -630,6 +631,7 @@ def _init_session() -> None:
             tempfile.gettempdir(), f"bamboo_streamlit_{os.getpid()}.jsonl"
         ),
         "pending_question": None,
+        "promptlog_notices": [],
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -651,6 +653,28 @@ def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
         st.session_state["server_ok"] = False
         st.session_state["tool_names"] = []
         raise exc
+
+    # Register a prompt-log notification callback so OpenSearch write
+    # confirmations and errors are captured in session state and shown on the
+    # next render cycle.  The callback appends (severity, message) tuples to
+    # ``promptlog_notices``; they are drained and displayed by _render_chat.
+    # Streamlit's session_state is a plain dict — appending from a background
+    # thread is safe because CPython's GIL serialises list.append.
+    def _promptlog_notify(severity: str, message: str) -> None:
+        """Append a prompt-log event to the Streamlit session notice queue.
+
+        Args:
+            severity: One of ``"debug"``, ``"info"``, ``"warning"``,
+                ``"error"``.
+            message: Human-readable status message from prompt_log.
+        """
+        if severity == "debug":
+            return  # suppress per-turn send confirmations from the visible UI
+        notices: list = st.session_state.get("promptlog_notices", [])
+        notices.append((severity, message))
+        st.session_state["promptlog_notices"] = notices
+
+    _prompt_log.register_notify_callback(_promptlog_notify)
 
     # LLM info via bamboo_health
     try:
@@ -1216,6 +1240,33 @@ def _render_plot_expander(evidence: Any, tool_name: str | None) -> None:
 # Main chat panel
 # ---------------------------------------------------------------------------
 
+def _render_promptlog_notices() -> None:
+    """Drain and display any prompt-log notifications accumulated in session state.
+
+    Notifications are written by a background thread (the OpenSearch write
+    worker) and stored in ``st.session_state["promptlog_notices"]`` as
+    ``(severity, message)`` tuples.  Calling this function renders them and
+    clears the queue so they are shown exactly once.
+
+    Severity mapping:
+
+    * ``"error"``   → :func:`st.error` with a red circle icon.
+    * ``"warning"`` → :func:`st.warning` with a warning icon.
+    * ``"info"``    → :func:`st.toast` with a green check icon (non-blocking).
+    """
+    notices: list = st.session_state.get("promptlog_notices", [])
+    if not notices:
+        return
+    st.session_state["promptlog_notices"] = []
+    for severity, message in notices:
+        if severity == "error":
+            st.error(message, icon="🔴")
+        elif severity == "warning":
+            st.warning(message, icon="⚠️")
+        else:
+            st.toast(message, icon="✅")
+
+
 def _render_chat(mcp: MCPClientSync, transport: str) -> None:
     """Render the main chat panel.
 
@@ -1299,6 +1350,8 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
     if st.session_state.get("superuser_warning"):
         st.warning(st.session_state["superuser_warning"], icon="🔒")
         st.session_state["superuser_warning"] = None
+
+    _render_promptlog_notices()
 
     # Render chat history
     for msg in st.session_state["messages"]:

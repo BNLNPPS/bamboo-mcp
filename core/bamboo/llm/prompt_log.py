@@ -82,10 +82,69 @@ import logging
 import os
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# UI notification callback — optional bridge to TUI / Streamlit.
+# ---------------------------------------------------------------------------
+
+#: Signature: ``fn(severity: str, message: str) -> None``.
+#: *severity* is one of ``"debug"``, ``"info"``, ``"warning"``, ``"error"``.
+NotifyFn = Callable[[str, str], None]
+
+#: Registered UI notification callback, or ``None`` when no UI is attached.
+_notify_callback: NotifyFn | None = None
+
+
+def register_notify_callback(fn: NotifyFn) -> None:
+    """Register a callback that receives prompt-log status notifications.
+
+    The callback is invoked synchronously inside the background thread that
+    writes to OpenSearch, so it **must** be thread-safe.  For Textual UIs use
+    ``app.call_from_thread``; for Streamlit append to ``st.session_state``.
+
+    Only one callback is active at a time.  Calling this function a second
+    time replaces the previous registration.
+
+    Args:
+        fn: Callable with signature ``(severity: str, message: str) -> None``
+            where *severity* is ``"debug"``, ``"info"``, ``"warning"``, or
+            ``"error"``.
+    """
+    global _notify_callback  # pylint: disable=global-statement
+    _notify_callback = fn
+
+
+def clear_notify_callback() -> None:
+    """Remove the currently registered UI notification callback.
+
+    Safe to call even when no callback is registered.
+    """
+    global _notify_callback  # pylint: disable=global-statement
+    _notify_callback = None
+
+
+def _notify(severity: str, message: str) -> None:
+    """Invoke the registered UI notification callback if one is set.
+
+    Exceptions raised by the callback are swallowed and logged at DEBUG level
+    so a broken callback can never kill the prompt-logging background thread.
+
+    Args:
+        severity: One of ``"debug"``, ``"info"``, ``"warning"``, ``"error"``.
+        message: Human-readable status message.
+    """
+    if _notify_callback is None:
+        return
+    try:
+        _notify_callback(severity, message)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.debug("prompt_log: notify callback raised %s: %s", type(exc).__name__, exc)
+
 
 # ---------------------------------------------------------------------------
 # Process-wide session ID — set once at import time.
@@ -386,10 +445,22 @@ def _write_document(doc: dict[str, Any]) -> None:
     if _circuit_open:
         return
 
+    index = _build_index_name()
+    turn = doc.get("turn_number", "?")
+    _notify("debug", f"prompt_log: sending turn {turn} to index '{index}'…")
+    logger.debug("prompt_log: sending turn %s to index '%s'", turn, index)
+
     try:
         client = _create_os_client()
-        index = _build_index_name()
-        client.index(index=index, body=doc)
+        resp = client.index(index=index, body=doc)
+        doc_id = resp.get("_id", "?") if isinstance(resp, dict) else "?"
+        result = resp.get("result", "?") if isinstance(resp, dict) else "?"
+        msg = (
+            f"prompt_log: turn {turn} indexed — "
+            f"index={index!r} id={doc_id!r} result={result!r}"
+        )
+        logger.debug(msg)
+        _notify("info", msg)
         # Success — reset failure counter.
         _consecutive_failures = 0
     except ImportError:
@@ -398,22 +469,21 @@ def _write_document(doc: dict[str, Any]) -> None:
         _consecutive_failures += 1
         if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
             _circuit_open = True
-            logger.error(
-                "prompt_log: circuit breaker tripped after %d consecutive "
-                "write failures — prompt logging disabled for this session. "
-                "Check BAMBOO_OPENSEARCH_PROMPTLOG credentials and write "
-                "access to index '%s'. Last error: %s",
-                _consecutive_failures,
-                _build_index_name(),
-                exc,
+            err_msg = (
+                f"prompt_log: circuit breaker tripped after {_consecutive_failures} "
+                f"consecutive write failures — prompt logging disabled for this session. "
+                f"Check BAMBOO_OPENSEARCH_PROMPTLOG credentials and write "
+                f"access to index '{index}'. Last error: {exc}"
             )
+            logger.error(err_msg)
+            _notify("error", err_msg)
         else:
-            logger.warning(
-                "prompt_log: write failure %d/%d — %s",
-                _consecutive_failures,
-                _CIRCUIT_BREAKER_THRESHOLD,
-                exc,
+            warn_msg = (
+                f"prompt_log: write failure {_consecutive_failures}/"
+                f"{_CIRCUIT_BREAKER_THRESHOLD} — {exc}"
             )
+            logger.warning(warn_msg)
+            _notify("warning", warn_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +564,9 @@ async def log_prompt(
 __all__ = [
     "log_prompt",
     "redact_names",
+    "register_notify_callback",
+    "clear_notify_callback",
+    "NotifyFn",
     "_SESSION_ID",
     "_DEFAULT_INDEX_BASE",
     "_CIRCUIT_BREAKER_THRESHOLD",

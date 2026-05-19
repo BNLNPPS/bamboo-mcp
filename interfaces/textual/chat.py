@@ -47,6 +47,7 @@ from textual.events import Key
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
+from bamboo.llm import prompt_log as _prompt_log
 
 DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
@@ -620,6 +621,29 @@ class BambooTui(App):
         self._render_banner_placeholder()
         self._write_system("Starting… initializing MCP…")
 
+        # Register a prompt-log notification callback so OpenSearch write
+        # confirmations and errors surface inside the TUI rather than only
+        # appearing in the server log file.  The callback is invoked from a
+        # background thread (asyncio.to_thread), so we use call_from_thread to
+        # safely dispatch back onto the Textual main loop.
+        def _promptlog_notify(severity: str, message: str) -> None:
+            """Forward a prompt-log event to the TUI transcript.
+
+            Args:
+                severity: One of ``"debug"``, ``"info"``, ``"warning"``,
+                    ``"error"``.
+                message: Human-readable status message from prompt_log.
+            """
+            if severity == "error":
+                self.call_from_thread(self._write_error, message)
+            elif severity in ("warning", "info"):
+                self.call_from_thread(self._write_system, message)
+            # "debug" severity is intentionally suppressed in the UI to avoid
+            # cluttering the transcript with per-turn send confirmations; those
+            # are still emitted to the Python logger at DEBUG level.
+
+        _prompt_log.register_notify_callback(_promptlog_notify)
+
         # Disable mouse capture so the terminal can handle text selection normally.
         # Trackpad scrolling is handled via PageUp/PageDown bindings instead.
         try:
@@ -637,6 +661,7 @@ class BambooTui(App):
     async def on_exit(self) -> None:
         """Request clean shutdown and wait for MCP task to finish."""
         self._shutdown_event.set()
+        _prompt_log.clear_notify_callback()
 
         if self._mcp_task:
             try:
