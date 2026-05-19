@@ -82,6 +82,7 @@ import logging
 import os
 import re
 import uuid
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -169,6 +170,34 @@ _consecutive_failures: int = 0
 
 #: Set to True once the threshold is reached; cleared only on process restart.
 _circuit_open: bool = False
+
+# ---------------------------------------------------------------------------
+# Per-turn event log — polled by the bamboo_promptlog_status MCP tool.
+# ---------------------------------------------------------------------------
+
+#: Ring buffer of the most recent prompt-log events.  Each entry is a dict
+#: with keys ``"turn"``, ``"severity"``, and ``"message"``.  The buffer holds
+#: at most 20 entries; oldest are discarded automatically.
+_event_log: deque[dict[str, Any]] = deque(maxlen=20)
+
+
+def drain_events() -> list[dict[str, Any]]:
+    """Return all buffered prompt-log events and clear the buffer.
+
+    Called by ``BambooPromptLogStatusTool`` after each LLM response so the
+    TUI and Streamlit interfaces can surface write confirmations and errors
+    without requiring in-process callbacks (which do not work across the
+    stdio subprocess boundary).
+
+    Returns:
+        List of event dicts, each with ``"turn"`` (int), ``"severity"``
+        (``"info"`` / ``"warning"`` / ``"error"``), and ``"message"`` (str)
+        keys.  Empty list when nothing has been logged since the last drain.
+    """
+    events = list(_event_log)
+    _event_log.clear()
+    return events
+
 
 # ---------------------------------------------------------------------------
 # OpenSearch connection constants (shared with harvester_timeseries_impl.py).
@@ -461,6 +490,7 @@ def _write_document(doc: dict[str, Any]) -> None:
         )
         logger.debug(msg)
         _notify("info", msg)
+        _event_log.append({"turn": turn, "severity": "info", "message": msg})
         # Success — reset failure counter.
         _consecutive_failures = 0
     except ImportError:
@@ -477,6 +507,7 @@ def _write_document(doc: dict[str, Any]) -> None:
             )
             logger.error(err_msg)
             _notify("error", err_msg)
+            _event_log.append({"turn": turn, "severity": "error", "message": err_msg})
         else:
             warn_msg = (
                 f"prompt_log: write failure {_consecutive_failures}/"
@@ -484,6 +515,7 @@ def _write_document(doc: dict[str, Any]) -> None:
             )
             logger.warning(warn_msg)
             _notify("warning", warn_msg)
+            _event_log.append({"turn": turn, "severity": "warning", "message": warn_msg})
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +596,7 @@ async def log_prompt(
 __all__ = [
     "log_prompt",
     "redact_names",
+    "drain_events",
     "register_notify_callback",
     "clear_notify_callback",
     "NotifyFn",

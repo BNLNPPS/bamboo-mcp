@@ -714,7 +714,7 @@ async def call_llm(
                 _provider = _part[len("provider="):]
             elif _part.startswith("model="):
                 _model = _part[len("model="):]
-        asyncio.ensure_future(
+        asyncio.create_task(
             log_prompt(
                 system_prompt=system,
                 user_prompt=user,
@@ -725,10 +725,11 @@ async def call_llm(
                 max_tokens=max_tokens,
                 input_tokens=None,
                 output_tokens=None,
-            )
+            ),
+            name="bamboo.prompt_log",
         )
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass  # Never let logging errors affect the main response path.
+    except Exception as _exc:  # pylint: disable=broad-exception-caught
+        logger.debug("prompt_log scheduling failed: %s", _exc)
 
     return response_text
 
@@ -1442,6 +1443,7 @@ __all__ = [
     "_SYSTEM_SITE_HEALTH",
     "_SYSTEM_PANDA_HEALTH",
     "bamboo_last_evidence_tool",
+    "bamboo_promptlog_status_tool",
 ]
 
 
@@ -1559,3 +1561,61 @@ class BambooLastEvidenceTool:
 
 
 bamboo_last_evidence_tool = BambooLastEvidenceTool()
+
+
+class BambooPromptLogStatusTool:
+    """MCP tool that drains and returns buffered OpenSearch prompt-log events.
+
+    ``_write_document`` in :mod:`bamboo.llm.prompt_log` appends an event to a
+    process-local ring buffer on every successful write and on every failure.
+    This tool exposes that buffer so the TUI and Streamlit interfaces can poll
+    for write confirmations and errors after each response — without requiring
+    in-process callbacks, which do not work across the stdio subprocess
+    boundary.
+
+    Calling this tool is destructive: the buffer is cleared on each call so
+    events are delivered exactly once.  Returns an empty list when
+    ``BAMBOO_OPENSEARCH_PROMPTLOG`` is not set or no events have accumulated
+    since the last poll.
+    """
+
+    @staticmethod
+    def get_definition() -> dict[str, Any]:
+        """Return the MCP tool definition for ``bamboo_promptlog_status``.
+
+        Returns:
+            Tool definition dict compatible with MCP discovery.
+        """
+        return {
+            "name": "bamboo_promptlog_status",
+            "description": (
+                "Return and clear buffered OpenSearch prompt-log write events "
+                "(confirmations and errors) accumulated since the last call.  "
+                "Returns an empty list when prompt logging is disabled or no "
+                "events have been buffered."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        }
+
+    async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:  # noqa: ARG002
+        """Drain and return buffered prompt-log events.
+
+        Args:
+            arguments: Unused; accepted for MCP tool interface compatibility.
+
+        Returns:
+            One-element MCP content list with JSON-serialised event list.
+            Each event has ``"turn"`` (int), ``"severity"``
+            (``"info"`` / ``"warning"`` / ``"error"``), and ``"message"``
+            (str) keys.
+        """
+        from bamboo.llm.prompt_log import drain_events  # noqa: PLC0415
+        events = drain_events()
+        return text_content(json.dumps({"events": events}))
+
+
+bamboo_promptlog_status_tool = BambooPromptLogStatusTool()

@@ -47,9 +47,6 @@ if _REPO_ROOT not in sys.path:
 import streamlit as st  # noqa: E402
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig  # noqa: E402
-from bamboo.llm.prompt_log import (  # noqa: E402 — direct import avoids triggering bamboo.llm.__init__
-    register_notify_callback as _register_promptlog_notify,
-)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -656,28 +653,6 @@ def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
         st.session_state["tool_names"] = []
         raise exc
 
-    # Register a prompt-log notification callback so OpenSearch write
-    # confirmations and errors are captured in session state and shown on the
-    # next render cycle.  The callback appends (severity, message) tuples to
-    # ``promptlog_notices``; they are drained and displayed by _render_chat.
-    # Streamlit's session_state is a plain dict — appending from a background
-    # thread is safe because CPython's GIL serialises list.append.
-    def _promptlog_notify(severity: str, message: str) -> None:
-        """Append a prompt-log event to the Streamlit session notice queue.
-
-        Args:
-            severity: One of ``"debug"``, ``"info"``, ``"warning"``,
-                ``"error"``.
-            message: Human-readable status message from prompt_log.
-        """
-        if severity == "debug":
-            return  # suppress per-turn send confirmations from the visible UI
-        notices: list = st.session_state.get("promptlog_notices", [])
-        notices.append((severity, message))
-        st.session_state["promptlog_notices"] = notices
-
-    _register_promptlog_notify(_promptlog_notify)
-
     # LLM info via bamboo_health
     try:
         health_raw = mcp.call_tool("bamboo_health", {})
@@ -1242,6 +1217,36 @@ def _render_plot_expander(evidence: Any, tool_name: str | None) -> None:
 # Main chat panel
 # ---------------------------------------------------------------------------
 
+def _poll_promptlog_events(mcp: MCPClientSync) -> None:
+    """Call ``bamboo_promptlog_status`` and push any events to the notice queue.
+
+    Drains the server-side prompt-log ring buffer and appends each event to
+    ``st.session_state["promptlog_notices"]`` so that
+    :func:`_render_promptlog_notices` can display them on the next render cycle.
+
+    Silently skipped when the tool is not registered on the server (prompt
+    logging disabled or older server version).
+
+    Args:
+        mcp: Connected MCP client.
+    """
+    if "bamboo_promptlog_status" not in st.session_state.get("tool_names", []):
+        return
+    try:
+        raw = mcp.call_tool("bamboo_promptlog_status", {})
+        text = _extract_text(raw) or "{}"
+        parsed = json.loads(text)
+        notices: list = st.session_state.get("promptlog_notices", [])
+        for event in parsed.get("events") or []:
+            severity = str(event.get("severity", "info"))
+            message = str(event.get("message", ""))
+            if message:
+                notices.append((severity, message))
+        st.session_state["promptlog_notices"] = notices
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # Never let observability polling affect the main response path.
+
+
 def _render_promptlog_notices() -> None:
     """Drain and display any prompt-log notifications accumulated in session state.
 
@@ -1341,6 +1346,10 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
         st.session_state["last_evidence"] = evidence
         st.session_state["last_raw"] = raw
         st.session_state["last_tool"] = last_tool
+
+        # Poll server for any buffered OpenSearch prompt-log events and push
+        # them to the notice queue so they render on the next cycle.
+        _poll_promptlog_events(mcp)
 
         # Append assistant reply (clean, no Mermaid blocks) and cap history.
         messages.append({"role": "assistant", "content": clean_answer})

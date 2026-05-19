@@ -47,10 +47,6 @@ from textual.events import Key
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
-from bamboo.llm.prompt_log import (  # direct import avoids triggering bamboo.llm.__init__
-    register_notify_callback as _register_promptlog_notify,
-    clear_notify_callback as _clear_promptlog_notify,
-)
 
 DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
@@ -624,29 +620,6 @@ class BambooTui(App):
         self._render_banner_placeholder()
         self._write_system("Starting… initializing MCP…")
 
-        # Register a prompt-log notification callback so OpenSearch write
-        # confirmations and errors surface inside the TUI rather than only
-        # appearing in the server log file.  The callback is invoked from a
-        # background thread (asyncio.to_thread), so we use call_from_thread to
-        # safely dispatch back onto the Textual main loop.
-        def _promptlog_notify(severity: str, message: str) -> None:
-            """Forward a prompt-log event to the TUI transcript.
-
-            Args:
-                severity: One of ``"debug"``, ``"info"``, ``"warning"``,
-                    ``"error"``.
-                message: Human-readable status message from prompt_log.
-            """
-            if severity == "error":
-                self.call_from_thread(self._write_error, message)
-            elif severity in ("warning", "info"):
-                self.call_from_thread(self._write_system, message)
-            # "debug" severity is intentionally suppressed in the UI to avoid
-            # cluttering the transcript with per-turn send confirmations; those
-            # are still emitted to the Python logger at DEBUG level.
-
-        _register_promptlog_notify(_promptlog_notify)
-
         # Disable mouse capture so the terminal can handle text selection normally.
         # Trackpad scrolling is handled via PageUp/PageDown bindings instead.
         try:
@@ -664,7 +637,6 @@ class BambooTui(App):
     async def on_exit(self) -> None:
         """Request clean shutdown and wait for MCP task to finish."""
         self._shutdown_event.set()
-        _clear_promptlog_notify()
 
         if self._mcp_task:
             try:
@@ -1176,6 +1148,10 @@ class BambooTui(App):
             # Auto-chart: silently append a pilot chart when the response
             # came from panda_harvester_workers and has multiple statuses.
             await self._try_auto_chart()
+
+            # Poll the server for any buffered OpenSearch prompt-log events
+            # (write confirmations or errors) and surface them in the transcript.
+            await self._fetch_promptlog_events()
 
         except Exception as exc:
             self._replace_thinking(thinking, None)
@@ -1751,6 +1727,38 @@ class BambooTui(App):
             self.input_widget.focus()
 
         self.action_focus_input()
+
+    async def _fetch_promptlog_events(self) -> None:
+        """Poll the server for buffered OpenSearch prompt-log events and display them.
+
+        Calls ``bamboo_promptlog_status`` on the MCP server, which drains the
+        server-side event ring buffer and returns write confirmations and errors
+        accumulated since the previous call.  Each event is rendered as a system
+        or error panel in the transcript.
+
+        The call is silently skipped when the tool is not registered on the
+        server (i.e. prompt logging is disabled or the server is an older
+        version without the tool).
+        """
+        if "bamboo_promptlog_status" not in self.tool_names:
+            return
+        try:
+            res = await self._to_thread(
+                self.mcp.call_tool, "bamboo_promptlog_status", {}
+            )
+            text = _extract_text(res) or "{}"
+            parsed = json.loads(text)
+            for event in parsed.get("events") or []:
+                severity = str(event.get("severity", "info"))
+                message = str(event.get("message", ""))
+                if not message:
+                    continue
+                if severity == "error":
+                    self._write_error(message)
+                else:
+                    self._write_system(message)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # Never let observability polling affect the main response path.
 
     def _write_thinking(self) -> bool:
         """Start the animated thinking indicator below the transcript.
