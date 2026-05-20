@@ -150,7 +150,7 @@ Is PanDA down?
 **Minimum config (known working endpoint):**
 
 ```bash
-export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp/"
+export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp"
 # PANDA_MCP_USE_SSE should NOT be set — this server uses streamable-HTTP
 ```
 
@@ -162,7 +162,18 @@ uvx --from panda-mcp-client get-panda-token
 
 Follow the browser prompt. The token is saved to `~/.panda_id_token`. Bamboo reads the `id_token` field from this file automatically at startup — no further configuration needed. Token renewal will be handled by a Bamboo MCP agent service; for now, re-run `get-panda-token` roughly once a month when the token expires.
 
-**At CERN / lxplus:** The CERN Grid CA is in the system store. No TLS configuration needed — just set `PANDA_MCP_BASE_URL`, run `get-panda-token` once, and start Bamboo.
+**At CERN / lxplus:** The CERN Grid CA is in the system store but **not** in the virtualenv's certifi bundle. You must append it once after creating the venv (repeat if the venv is recreated):
+
+```bash
+# Extract CERN Grid CA and Root CA 2 from the system store
+awk '/CERN Grid Certification Authority/{found=1} found && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0; found=0}' \
+  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
+  >> $(python -c "import certifi; print(certifi.where())")
+
+awk '/CERN Root Certification Authority 2/{found=1} found && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0; found=0}' \
+  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
+  >> $(python -c "import certifi; print(certifi.where())")
+```
 
 **Outside CERN (e.g. Mac laptop):** Python's `httpx` uses the `certifi` bundle which does not include the CERN Grid CA. Append it once (repeat after `pip upgrade certifi`):
 

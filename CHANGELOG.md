@@ -18,6 +18,23 @@ All notable changes to Bamboo are documented here.
   WARNING-level log messages rather than crashes.  Token renewal will be
   handled by a forthcoming Bamboo MCP agent service.
 
+### Fixed
+
+- **`panda_server_health`: correct upstream tool name.** The tool name used
+  to call the PanDA MCP server was `is_alive`; the actual tool name exposed
+  by the server is `system_is_alive`.  Updated `_TOOL` constant and all
+  docstring references accordingly.
+- **`panda_mcp_session`: surface inner exception from `ExceptionGroup`.**
+  The session failure handler previously logged only the top-level
+  `ExceptionGroup` message, hiding the root cause.  It now iterates
+  `exc.exceptions` and logs each inner exception with a full traceback via
+  `exc_info=`.
+- **PanDA MCP TLS on lxplus**: The certifi bundle in the virtualenv does not
+  include the CERN Grid CA or CERN Root CA 2 even on lxplus, where the
+  system CA store does.  `PANDA_MCP_BASE_URL` must omit the trailing slash
+  (use `…/mcp` not `…/mcp/`) to avoid a 307 redirect that the MCP client
+  does not follow.  Updated `bamboo_env_example.sh` and docs accordingly.
+
 - **Mermaid diagram rendering in Streamlit.** The LLM can now return a
   ` ```mermaid ``` ` block alongside prose when a question calls for a diagram
   (algorithms, state machines, protocols, flows).  The Streamlit UI extracts

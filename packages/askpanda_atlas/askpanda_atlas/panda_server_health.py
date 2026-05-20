@@ -1,6 +1,6 @@
 """PanDA server health tool.
 
-Calls the ``is_alive`` tool on the external PanDA MCP server and returns
+Calls the ``system_is_alive`` tool on the external PanDA MCP server and returns
 structured evidence suitable for LLM summarisation.  This is the first
 Bamboo tool that delegates to the PanDA MCP server; it answers questions
 such as:
@@ -9,7 +9,7 @@ such as:
 - "Is PanDA OK?"
 - "Is the PanDA server running?"
 
-The upstream ``is_alive`` tool takes no arguments and returns a short
+The upstream ``system_is_alive`` tool takes no arguments and returns a short
 status string from the PanDA server.
 
 Session setup
@@ -29,7 +29,7 @@ from typing import Any
 _logger = logging.getLogger(__name__)
 
 _SERVER: str = "panda"
-_TOOL: str = "is_alive"
+_TOOL: str = "system_is_alive"
 
 
 def get_definition() -> dict[str, Any]:
@@ -63,14 +63,14 @@ def get_definition() -> dict[str, Any]:
 def _parse_alive(raw: str) -> bool:
     """Determine whether the server reports itself alive from raw response text.
 
-    The ``is_alive`` tool typically returns a short string such as
+    The ``system_is_alive`` tool typically returns a short string such as
     ``"True"`` or a JSON object ``{"alive": true}``.  This function
     handles both formats conservatively: only an explicit falsy value
     causes it to return ``False``; any non-empty response that cannot
     be parsed as JSON is treated as alive.
 
     Args:
-        raw: Raw text returned by the upstream MCP ``is_alive`` tool.
+        raw: Raw text returned by the upstream MCP ``system_is_alive`` tool.
 
     Returns:
         ``True`` if the server appears to be alive, ``False`` otherwise.
@@ -117,7 +117,7 @@ class PandaServerHealthTool:
     async def call(self, arguments: dict[str, Any]) -> list[Any]:
         """Check PanDA server liveness and return structured evidence.
 
-        Calls the ``is_alive`` tool on the ``"panda"`` MCP server registered
+        Calls the ``system_is_alive`` tool on the ``"panda"`` MCP server registered
         with the process-wide ``MCPCaller``.  The result is a one-element
         ``list[MCPContent]`` whose ``text`` field contains a JSON-serialised
         evidence dict conforming to the Bamboo narrow-waist contract.

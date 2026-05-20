@@ -34,7 +34,7 @@ export CRIC_DUCKDB_PATH="${HOME}/.askpanda/cric.duckdb"
 
 # Full URL of the PanDA MCP HTTP endpoint.
 # If unset, PanDA MCP tools return a graceful "server not connected" error.
-export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp/"
+export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp"
 
 # OIDC token cache file written by `get-panda-token` (panda-mcp-client).
 # Bamboo reads the `id_token` field from this file at session startup.
