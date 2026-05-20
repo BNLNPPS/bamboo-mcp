@@ -69,6 +69,11 @@ def _parse_alive(raw: str) -> bool:
     causes it to return ``False``; any non-empty response that cannot
     be parsed as JSON is treated as alive.
 
+    Strings that begin with ``"Error"`` or contain exception keywords
+    (e.g. ``SSLError``, ``ConnectionError``) are treated as not-alive,
+    since the PanDA server may return a plain-text error message when its
+    own internal calls fail.
+
     Args:
         raw: Raw text returned by the upstream MCP ``system_is_alive`` tool.
 
@@ -77,6 +82,13 @@ def _parse_alive(raw: str) -> bool:
     """
     stripped = raw.strip()
     if not stripped:
+        return False
+
+    # Error strings returned by the PanDA MCP server when its own internal
+    # calls fail (e.g. SSL issues reaching pandaserver.cern.ch).
+    _error_signals = ("Error ", "Error:", "SSLError", "ConnectionError",
+                      "Timeout", "Max retries exceeded", "Exception")
+    if any(stripped.startswith(sig) or sig in stripped for sig in _error_signals):
         return False
 
     # Try JSON first.
@@ -166,7 +178,18 @@ class PandaServerHealthTool:
         if is_alive:
             summary = "The PanDA server is alive and responding."
         else:
-            summary = f"The PanDA server does not appear to be alive. Response: {raw[:200]}"
+            # Distinguish between a clean "not alive" and an error response
+            # from the server's own internal calls (e.g. SSL to pandaserver).
+            if raw and len(raw) > 10:
+                summary = (
+                    f"The PanDA MCP server was reached but reported an error: "
+                    f"{raw[:200]}"
+                )
+            else:
+                summary = (
+                    f"The PanDA server does not appear to be alive. "
+                    f"Response: {raw[:200]}"
+                )
 
         return text_content(json.dumps({"evidence": evidence, "text": summary}))
 
