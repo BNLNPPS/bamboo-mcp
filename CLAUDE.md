@@ -454,7 +454,7 @@ The `/chart` slash command manually re-triggers the same rendering from the stor
 
 Bamboo connects to the external PanDA MCP server at startup and holds the session open for the process lifetime. The session is registered with the process-wide `MCPCaller` under the name `"panda"`.
 
-**Known working endpoint:** `https://aipanda120.cern.ch:8443/mcp/` (streamable-HTTP transport, no auth token required as of March 2026).
+**Known working endpoint:** `https://aipanda120.cern.ch:8443/mcp/` (streamable-HTTP transport).
 
 **Startup:**
 - `core/bamboo/server.py` (stdio): `asyncio.create_task(run_panda_mcp_session(shutdown_event))` before entering `stdio_server()`.
@@ -464,32 +464,47 @@ If `PANDA_MCP_BASE_URL` is not set, the session helper logs a warning and exits 
 
 **Transport:** The `aipanda120.cern.ch` server runs the MCP streamable-HTTP transport (despite returning a `406 Not Acceptable` to bare GET requests — that is the correct MCP protocol response). Do **not** set `PANDA_MCP_USE_SSE=1` for this endpoint.
 
+**Authentication:** Bamboo resolves the bearer token in this order:
+
+1. `PANDA_MCP_TOKEN` env var (explicit override).
+2. `id_token` field from the JSON file at `PANDA_MCP_TOKEN_FILE` (default: `~/.panda_id_token`), written by `get-panda-token` from the `panda-mcp-client` package.
+3. No token — the session connects unauthenticated (works for public endpoints).
+
+**One-time token setup** (run once; the token file then persists):
+```bash
+uvx --from panda-mcp-client get-panda-token
+```
+Follow the browser prompt. The token is saved to `~/.panda_id_token`. Token renewal will be handled by a Bamboo MCP agent service (not yet implemented — re-run the above command roughly monthly when the refresh token expires).
+
+**Token file format** — `~/.panda_id_token` is a JSON object:
+```json
+{
+  "access_token": "...",
+  "id_token": "...",
+  "refresh_token": "...",
+  "expires_in": 3599,
+  ...
+}
+```
+Bamboo reads the `id_token` field (not `access_token`).
+
 **TLS outside CERN:** The server uses a certificate signed by the CERN Grid CA. Python's `httpx` uses the `certifi` bundle by default, which does not include the CERN Grid CA. Two options:
 
-1. **Append the CERN CA to certifi** (permanent, recommended for shared installs):
+1. **Append the CERN CA to certifi** (permanent, recommended):
    ```bash
-   # Download and convert CERN Root CA 2
-   curl -o /tmp/cern-root-ca2.der \
+   curl -o /tmp/cern-root-ca.pem \
      "https://cafiles.cern.ch/cafiles/certificates/CERN%20Root%20Certification%20Authority%202.crt"
-   openssl x509 -inform DER -in /tmp/cern-root-ca2.der -out /tmp/cern-root-ca2.pem
-   # Download CERN Grid CA intermediate (note the (1) in the filename)
-   # Extract directly from the server since the CERN website redirects unreliably:
-   openssl s_client -connect aipanda120.cern.ch:8443 -showcerts 2>/dev/null </dev/null \
-     | openssl x509 -out /tmp/cern-server.pem
-   # Append root CA to certifi bundle
-   cat /tmp/cern-root-ca2.pem >> $(python3 -c "import certifi; print(certifi.where())")
+   cat /tmp/cern-root-ca.pem >> $(python3 -c "import certifi; print(certifi.where())")
    ```
-   Then set `PANDA_MCP_CA_BUNDLE` if the intermediate is also needed.
+   > **Note:** Re-run after `pip upgrade certifi` — upgrades overwrite the bundle.
 
 2. **Disable verification** (development/testing only):
    ```bash
    export PANDA_MCP_TLS_VERIFY=0
    ```
-   This prints a warning at startup and should never be used in production.
+   This prints a warning at startup and must never be used in production.
 
-On **lxplus** and other CERN machines, the CERN Grid CA is in the system store and `ssl.create_default_context()` finds it automatically — no extra configuration needed.
-
-Authentication is passed as HTTP headers (`Authorization: Bearer <token>` and `Origin: <vo>`), matching the PanDA Server authentication model described in the PandaMCP documentation. The `aipanda120.cern.ch` endpoint does not currently require a token.
+On **lxplus** and other CERN machines, the CERN Grid CA is in the system store and `ssl.create_default_context()` finds it automatically — no extra TLS configuration needed.
 
 #### PanDA Server Health (`panda_server_health.py`)
 
@@ -596,7 +611,8 @@ with patch("askpanda_atlas._cache.cached_fetch_jsonish",
 | `BAMBOO_CHROMA_COLLECTION` | ChromaDB collection name; each plugin defaults to its own (`atlas_docs` / `epic_docs` / `cgsim_docs`) |
 | `CGSIM_DB_PATH` | Path to the SQLite database produced by a CGSim run. Required by the planned `cgsim.sim_query` tool. Must be a local filesystem path accessible to the MCP server process. |
 | `PANDA_MCP_BASE_URL` | Full URL of the PanDA MCP HTTP endpoint, e.g. `https://aipanda120.cern.ch:8443/mcp/`. If unset, PanDA MCP tools return a graceful "server not connected" error. |
-| `PANDA_MCP_TOKEN` | Optional bearer token sent as `Authorization: Bearer <token>` to the PanDA MCP server |
+| `PANDA_MCP_TOKEN_FILE` | Path to the OIDC token cache file written by `get-panda-token` (default: `~/.panda_id_token`). Bamboo reads the `id_token` field from this JSON file at session startup. Run `uvx --from panda-mcp-client get-panda-token` once to populate it. |
+| `PANDA_MCP_TOKEN` | Explicit bearer token sent as `Authorization: Bearer <token>`. Takes priority over `PANDA_MCP_TOKEN_FILE`. Leave unset to use the token file. |
 | `PANDA_MCP_ORIGIN` | Optional VO name sent as `Origin: <vo>` (e.g. `atlas`) to the PanDA MCP server |
 | `PANDA_MCP_USE_SSE` | `1`/`true`/`yes` to use the SSE transport; default is streamable-HTTP (correct for `aipanda120.cern.ch`) |
 | `PANDA_MCP_TLS_VERIFY` | Set to `0` or `false` to disable TLS certificate verification. **Development/testing only** — use when the CERN Grid CA is not in the local Python CA bundle (common outside CERN). On lxplus and CERN machines leave this unset. |

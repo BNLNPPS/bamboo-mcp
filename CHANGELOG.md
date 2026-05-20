@@ -8,6 +8,16 @@ All notable changes to Bamboo are documented here.
 
 ### Added
 
+- **PanDA MCP OIDC token file support.** `panda_mcp_session.py` now reads
+  the `id_token` field from the OIDC token cache file written by
+  `get-panda-token` (from the `panda-mcp-client` package).  Token resolution
+  order: (1) `PANDA_MCP_TOKEN` env var, (2) `id_token` from the file at
+  `PANDA_MCP_TOKEN_FILE` (default `~/.panda_id_token`), (3) no token for
+  public endpoints.  A new `_read_token_file()` helper handles JSON parsing
+  and all failure modes (missing file, malformed JSON, missing field) with
+  WARNING-level log messages rather than crashes.  Token renewal will be
+  handled by a forthcoming Bamboo MCP agent service.
+
 - **Mermaid diagram rendering in Streamlit.** The LLM can now return a
   ` ```mermaid ``` ` block alongside prose when a question calls for a diagram
   (algorithms, state machines, protocols, flows).  The Streamlit UI extracts

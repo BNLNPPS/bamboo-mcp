@@ -29,6 +29,39 @@ export CRIC_DUCKDB_PATH="${HOME}/.askpanda/cric.duckdb"
 # export CRIC_QUERY_MAX_ROWS="200"
 
 ########################################
+# PANDA MCP (external PanDA MCP server)
+########################################
+
+# Full URL of the PanDA MCP HTTP endpoint.
+# If unset, PanDA MCP tools return a graceful "server not connected" error.
+export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp/"
+
+# OIDC token cache file written by `get-panda-token` (panda-mcp-client).
+# Bamboo reads the `id_token` field from this file at session startup.
+# Run `uvx --from panda-mcp-client get-panda-token` once to populate it.
+# Token renewal is handled separately (via a Bamboo MCP agent service).
+# Defaults to ~/.panda_id_token when unset.
+# export PANDA_MCP_TOKEN_FILE="${HOME}/.panda_id_token"
+
+# Explicit bearer token override (takes priority over PANDA_MCP_TOKEN_FILE).
+# Leave unset to use the token file instead.
+# export PANDA_MCP_TOKEN=""
+
+# Optional virtual-organisation name sent as Origin: <vo> header.
+# export PANDA_MCP_ORIGIN="atlas"
+
+# TLS certificate verification.
+# At CERN / lxplus the CERN Grid CA is in the system store — leave unset.
+# Outside CERN, append the CERN Root CA 2 to your certifi bundle:
+#   curl -o /tmp/cern-root-ca.pem \
+#     "https://cafiles.cern.ch/cafiles/certificates/CERN%20Root%20Certification%20Authority%202.crt"
+#   cat /tmp/cern-root-ca.pem >> $(python3 -c "import certifi; print(certifi.where())")
+# Or point PANDA_MCP_CA_BUNDLE at a combined PEM bundle:
+# export PANDA_MCP_CA_BUNDLE="/path/to/ca-bundle.pem"
+# Development/testing only — disables TLS verification entirely:
+# export PANDA_MCP_TLS_VERIFY=0
+
+########################################
 # LLM PROFILE SELECTION
 ########################################
 
