@@ -342,8 +342,37 @@ def _extract_history(messages: list[Message], current_question: str) -> list[Mes
     return prior
 
 
+def _friendly_llm_error_import(exc: ImportError) -> str:
+    """Return a user-readable message for a bare ``ImportError`` from a provider.
+
+    This is a safety-net handler for LLM provider clients that omit the
+    ``try/except ImportError`` guard around their lazy SDK import.  Well-behaved
+    providers convert ``ImportError`` to
+    :class:`~bamboo.llm.exceptions.LLMConfigError` themselves; this function
+    ensures the user still sees an actionable message rather than a raw
+    traceback if one slips through.
+
+    Args:
+        exc: The ``ImportError`` raised by a provider's lazy SDK import.
+
+    Returns:
+        A plain-text string suitable for display in the TUI or returned as
+        tool output.
+    """
+    return f"\u2699\ufe0f  A required LLM provider package is not installed: {exc}"
+
+
 def _friendly_llm_error(exc: LLMError) -> str:
     """Return a concise, user-readable explanation of an LLM provider error.
+
+    For :class:`~bamboo.llm.exceptions.LLMConfigError`, the message is
+    specialised based on its content:
+
+    * If the error mentions a missing package (``"not installed"`` /
+      ``"no module named"``), the original exception text is surfaced
+      verbatim so the user sees the ``pip install`` hint rather than a
+      misleading API-key message.
+    * Otherwise the generic API-key configuration hint is shown.
 
     Args:
         exc: An :class:`~bamboo.llm.exceptions.LLMError` subclass instance.
@@ -359,6 +388,12 @@ def _friendly_llm_error(exc: LLMError) -> str:
     raw = str(exc)
 
     if isinstance(exc, LLMConfigError):
+        raw_lower = raw.lower()
+        # Missing-package errors contain "not installed" — surface the exact
+        # message so the user sees the pip install command rather than a
+        # misleading hint about API keys.
+        if "not installed" in raw_lower or "no module named" in raw_lower:
+            return f"\u2699\ufe0f  {raw}"
         return (
             "\u2699\ufe0f  LLM not configured — check your API key environment variables "
             "(e.g. MISTRAL_API_KEY, OPENAI_API_KEY) and restart the server."
@@ -2158,6 +2193,8 @@ class BambooAnswerTool:
             )
         except LLMError as exc:
             return text_content(_friendly_llm_error(exc))
+        except ImportError as exc:
+            return text_content(_friendly_llm_error_import(exc))
 
     async def _route(
         self,

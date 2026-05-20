@@ -45,7 +45,8 @@ class MistralLLMClient(LLMClient):
             An instance of `mistralai.Mistral` (async context entered).
 
         Raises:
-            LLMConfigError: If the API key is missing.
+            LLMConfigError: If the API key is missing or the ``mistralai``
+                package is not installed.
         """
         if self._client is not None:
             return self._client
@@ -59,7 +60,13 @@ class MistralLLMClient(LLMClient):
             if self._client is None:
                 # Import lazily so installing mistralai is only required if this provider is used.
                 # pylint: disable=import-outside-toplevel, unnecessary-dunder-call
-                from mistralai import Mistral  # type: ignore
+                try:
+                    from mistralai import Mistral  # type: ignore
+                except ImportError as exc:
+                    raise LLMConfigError(
+                        "The 'mistralai' package is not installed.  "
+                        "Run: pip install -r requirements-mistral.txt"
+                    ) from exc
 
                 client = Mistral(api_key=api_key)
 
