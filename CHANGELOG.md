@@ -24,12 +24,13 @@ All notable changes to Bamboo are documented here.
   on port 25443, Bamboo-side CA bundle issues, connection refused/timeout,
   and auth/token errors.  No second LLM call required — diagnosis is
   deterministic.
-- **TLS docs**: document that `SSL_CERT_FILE` is honoured automatically by
-  `httpx`/`requests` as an alternative to modifying the certifi bundle.
-  Note that files from `cafiles.cern.ch` are DER-encoded and require
-  `openssl x509 -inform DER` conversion — the `awk` system-store extraction
-  is the recommended approach on lxplus.  Updated `CLAUDE.md`,
-  `bamboo_env_example.sh`, and `docs/question-cheatsheet.md`.
+- **TLS docs — use system CA bundle via `SSL_CERT_FILE`**: The correct
+  approach on lxplus is `export SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`.
+  Both `httpx` and `requests` honour this standard env var automatically.
+  Modifying the certifi bundle is fragile (DER files or HTML redirect pages
+  silently corrupt it; changes lost on `pip upgrade certifi`) and is no
+  longer recommended.  Updated `CLAUDE.md`, `bamboo_env_example.sh`, and
+  `docs/question-cheatsheet.md`.
 
 ### Fixed
 

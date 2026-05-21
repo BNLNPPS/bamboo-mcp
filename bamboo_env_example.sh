@@ -51,23 +51,22 @@ export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp"
 # export PANDA_MCP_ORIGIN="atlas"
 
 # TLS certificate verification.
-# On lxplus the CERN CAs are in the system store but NOT in the venv's certifi
-# bundle. Extract them once (repeat if venv is recreated):
-#   awk '/CERN Grid Certification Authority/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
-#     /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
-#     >> $(python -c "import certifi; print(certifi.where())")
-#   awk '/CERN Root Certification Authority 2/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
-#     /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
-#     >> $(python -c "import certifi; print(certifi.where())")
+# httpx and requests both honour the standard SSL_CERT_FILE env var.
 #
-# Alternatively, set SSL_CERT_FILE to a PEM bundle that includes the CERN CAs.
-# Both httpx and requests honour this standard env var automatically.
-# Note: the panda-mcp-client README suggests curl from cafiles.cern.ch —
-# those files are DER-encoded and need `openssl x509 -inform DER` conversion.
+# On lxplus (recommended): point at the system CA bundle — no certifi
+# modifications needed, survives venv recreations and certifi upgrades:
+export SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+#
+# Outside CERN: build a combined bundle (system CAs + CERN CAs) and point
+# SSL_CERT_FILE at it, or append the CERN CAs to your system bundle.
+# Note: files from cafiles.cern.ch are DER-encoded — they need
+# `openssl x509 -inform DER` conversion before use in a PEM bundle.
 # export SSL_CERT_FILE="/path/to/ca-bundle-with-cern-cas.pem"
 #
-# Or point PANDA_MCP_CA_BUNDLE at a combined PEM bundle:
+# Or point PANDA_MCP_CA_BUNDLE at a combined PEM bundle (Bamboo-specific,
+# used only for the PanDA MCP connection):
 # export PANDA_MCP_CA_BUNDLE="/path/to/ca-bundle.pem"
+#
 # Development/testing only — disables TLS verification entirely:
 # export PANDA_MCP_TLS_VERIFY=0
 

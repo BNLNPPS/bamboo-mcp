@@ -162,18 +162,17 @@ uvx --from panda-mcp-client get-panda-token
 
 Follow the browser prompt. The token is saved to `~/.panda_id_token`. Bamboo reads the `id_token` field from this file automatically at startup — no further configuration needed. Token renewal will be handled by a Bamboo MCP agent service; for now, re-run `get-panda-token` roughly once a month when the token expires.
 
-**At CERN / lxplus:** The CERN Grid CA is in the system store but **not** in the virtualenv's certifi bundle. You must append it once after creating the venv (repeat if the venv is recreated):
+**At CERN / lxplus:** Point `SSL_CERT_FILE` at the system CA bundle — no certifi modifications needed:
 
 ```bash
-# Extract CERN Grid CA and Root CA 2 from the system store
-awk '/CERN Grid Certification Authority/{found=1} found && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0; found=0}' \
-  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
-  >> $(python -c "import certifi; print(certifi.where())")
-
-awk '/CERN Root Certification Authority 2/{found=1} found && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0; found=0}' \
-  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
-  >> $(python -c "import certifi; print(certifi.where())")
+export SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 ```
+
+Add this to `~/.bashrc` so it persists across sessions.
+
+**Outside CERN:** Build a combined bundle (system CAs + CERN CAs) and point `SSL_CERT_FILE` at it. Note that files from `cafiles.cern.ch` are DER-encoded and require `openssl x509 -inform DER` conversion before use in a PEM bundle.
+
+**Do not modify the certifi bundle** — DER files or HTML redirect pages silently corrupt it, and changes are lost on `pip upgrade certifi`.
 
 **Outside CERN (e.g. Mac laptop):** Python's `httpx` uses the `certifi` bundle which does not include the CERN Grid CA. Append it once (repeat after `pip upgrade certifi`):
 

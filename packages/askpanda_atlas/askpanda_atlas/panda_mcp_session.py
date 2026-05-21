@@ -34,12 +34,15 @@ PANDA_MCP_TLS_VERIFY
     **Use only for development/testing** — never in production.  The default
     is to verify certificates using the system CA store.
 PANDA_MCP_CA_BUNDLE
-    Path to a CA certificate bundle (PEM) to use for TLS verification,
-    e.g. ``/etc/pki/tls/certs/ca-bundle.crt``.  When unset, the system
-    default CA store is used (via ``ssl.create_default_context()``), which
-    works on most Linux systems that have the CERN Grid CA installed as a
-    system package.  Set this explicitly if the CERN CA is only available
-    as a standalone PEM file.
+    Path to a PEM CA bundle to use for TLS verification.  Takes priority
+    over ``SSL_CERT_FILE`` if both are set.  Use when the CERN Grid CA is
+    available as a standalone PEM file.
+SSL_CERT_FILE
+    Standard env var honoured by ``curl``, ``requests``, and the
+    ``panda-mcp-client`` proxy.  When set, Bamboo uses this PEM bundle
+    for the PanDA MCP TLS connection.  On lxplus the recommended value is
+    ``/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`` — the system
+    CA bundle that already includes the CERN Grid CA.
 
 Typical usage (inside an asyncio task at server startup)::
 
@@ -167,9 +170,14 @@ def _build_config() -> dict[str, Any] | None:
         ssl_value = False
     else:
         ssl_value = ssl.create_default_context()
+        # Honour the standard SSL_CERT_FILE env var (used by curl, requests,
+        # and the panda-mcp-client proxy).  When set, load it as the CA bundle
+        # instead of (or in addition to) the system default.
+        ssl_cert_file = os.environ.get("SSL_CERT_FILE", "").strip()
         ca_bundle = os.environ.get("PANDA_MCP_CA_BUNDLE", "").strip()
-        if ca_bundle:
-            ssl_value.load_verify_locations(cafile=ca_bundle)
+        bundle = ca_bundle or ssl_cert_file
+        if bundle:
+            ssl_value = ssl.create_default_context(cafile=bundle)
 
     return {
         "url": base_url,
@@ -228,9 +236,20 @@ async def run_panda_mcp_session(shutdown_event: asyncio.Event) -> None:
         _logger.info("PanDA MCP session task cancelled — shutting down.")
         raise
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        _logger.error(
-            "PanDA MCP session failed — tools will be unavailable: %s", exc
-        )
+        # ExceptionGroup (raised by asyncio.TaskGroup) wraps the real cause —
+        # log each inner exception individually so the root cause is visible.
+        inner = getattr(exc, "exceptions", None)
+        if inner:
+            for sub in inner:
+                _logger.error(
+                    "PanDA MCP session failed — tools will be unavailable:",
+                    exc_info=sub,
+                )
+        else:
+            _logger.error(
+                "PanDA MCP session failed — tools will be unavailable:",
+                exc_info=exc,
+            )
 
 
 async def _run_http_session(

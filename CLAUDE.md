@@ -488,40 +488,20 @@ Follow the browser prompt. The token is saved to `~/.panda_id_token`. Token rene
 ```
 Bamboo reads the `id_token` field (not `access_token`).
 
-**TLS outside CERN:** The server uses a certificate signed by the CERN Grid CA. Python's `httpx` uses the `certifi` bundle by default, which does not include the CERN Grid CA. Two options:
-
-1. **Append the CERN CA to certifi** (permanent, recommended):
-   ```bash
-   curl -o /tmp/cern-root-ca.pem \
-     "https://cafiles.cern.ch/cafiles/certificates/CERN%20Root%20Certification%20Authority%202.crt"
-   cat /tmp/cern-root-ca.pem >> $(python3 -c "import certifi; print(certifi.where())")
-   ```
-   > **Note:** Re-run after `pip upgrade certifi` — upgrades overwrite the bundle.
-
-2. **Disable verification** (development/testing only):
-   ```bash
-   export PANDA_MCP_TLS_VERIFY=0
-   ```
-   This prints a warning at startup and must never be used in production.
-
-**TLS on lxplus:** Even on lxplus the virtualenv's certifi bundle does not include the CERN Grid CA (the system store has it, but certifi is isolated). Extract the two CERN CAs from the system store and append them to the venv bundle (repeat if the venv is recreated):
+**TLS — recommended approach:** Set `SSL_CERT_FILE` to the system CA bundle. Both `httpx` and `requests` honour this standard env var automatically — no certifi modifications needed, and it survives venv recreations and `pip upgrade certifi`:
 
 ```bash
-awk '/CERN Grid Certification Authority/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
-  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
-  >> $(python -c "import certifi; print(certifi.where())")
-
-awk '/CERN Root Certification Authority 2/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
-  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
-  >> $(python -c "import certifi; print(certifi.where())")
+# lxplus / CERN machines
+export SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 ```
 
-> **Note:** The `panda-mcp-client` README suggests downloading the CERN CAs via `curl` from `cafiles.cern.ch`. Those files are DER-encoded (not PEM) and require `openssl x509 -inform DER` conversion before concatenation. The `awk` extraction from the system store above is simpler and more reliable.
+**TLS outside CERN:** Build a combined bundle (your system CAs + CERN CAs) and point `SSL_CERT_FILE` at it. Note that files downloaded from `cafiles.cern.ch` are DER-encoded and require `openssl x509 -inform DER` conversion before use in a PEM bundle.
 
-**`SSL_CERT_FILE`:** Both `httpx` and `requests` honour the standard `SSL_CERT_FILE` environment variable. Setting it to a PEM bundle that includes the CERN CAs is an alternative to modifying the certifi bundle — useful for Docker deployments or shared environments where modifying the venv is undesirable:
+**Do not modify the certifi bundle** — it is fragile (DER files or HTML redirect pages appended silently corrupt it), and changes are lost on `pip upgrade certifi`.
 
+**Disable verification** (development/testing only):
 ```bash
-export SSL_CERT_FILE="/path/to/ca-bundle-with-cern-cas.pem"
+export PANDA_MCP_TLS_VERIFY=0
 ```
 
 #### PanDA Server Health (`panda_server_health.py`)
