@@ -504,7 +504,25 @@ Bamboo reads the `id_token` field (not `access_token`).
    ```
    This prints a warning at startup and must never be used in production.
 
-On **lxplus** and other CERN machines, the CERN Grid CA is in the system store and `ssl.create_default_context()` finds it automatically — no extra TLS configuration needed.
+**TLS on lxplus:** Even on lxplus the virtualenv's certifi bundle does not include the CERN Grid CA (the system store has it, but certifi is isolated). Extract the two CERN CAs from the system store and append them to the venv bundle (repeat if the venv is recreated):
+
+```bash
+awk '/CERN Grid Certification Authority/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
+  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
+  >> $(python -c "import certifi; print(certifi.where())")
+
+awk '/CERN Root Certification Authority 2/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
+  /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
+  >> $(python -c "import certifi; print(certifi.where())")
+```
+
+> **Note:** The `panda-mcp-client` README suggests downloading the CERN CAs via `curl` from `cafiles.cern.ch`. Those files are DER-encoded (not PEM) and require `openssl x509 -inform DER` conversion before concatenation. The `awk` extraction from the system store above is simpler and more reliable.
+
+**`SSL_CERT_FILE`:** Both `httpx` and `requests` honour the standard `SSL_CERT_FILE` environment variable. Setting it to a PEM bundle that includes the CERN CAs is an alternative to modifying the certifi bundle — useful for Docker deployments or shared environments where modifying the venv is undesirable:
+
+```bash
+export SSL_CERT_FILE="/path/to/ca-bundle-with-cern-cas.pem"
+```
 
 #### PanDA Server Health (`panda_server_health.py`)
 

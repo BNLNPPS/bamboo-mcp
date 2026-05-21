@@ -51,11 +51,21 @@ export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp"
 # export PANDA_MCP_ORIGIN="atlas"
 
 # TLS certificate verification.
-# At CERN / lxplus the CERN Grid CA is in the system store — leave unset.
-# Outside CERN, append the CERN Root CA 2 to your certifi bundle:
-#   curl -o /tmp/cern-root-ca.pem \
-#     "https://cafiles.cern.ch/cafiles/certificates/CERN%20Root%20Certification%20Authority%202.crt"
-#   cat /tmp/cern-root-ca.pem >> $(python3 -c "import certifi; print(certifi.where())")
+# On lxplus the CERN CAs are in the system store but NOT in the venv's certifi
+# bundle. Extract them once (repeat if venv is recreated):
+#   awk '/CERN Grid Certification Authority/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
+#     /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
+#     >> $(python -c "import certifi; print(certifi.where())")
+#   awk '/CERN Root Certification Authority 2/{f=1} f && /-----BEGIN CERTIFICATE-----/{p=1} p{print} p && /-----END CERTIFICATE-----/{p=0;f=0}' \
+#     /etc/pki/ca-trust/extracted/pem/directory-hash/ca-bundle.crt \
+#     >> $(python -c "import certifi; print(certifi.where())")
+#
+# Alternatively, set SSL_CERT_FILE to a PEM bundle that includes the CERN CAs.
+# Both httpx and requests honour this standard env var automatically.
+# Note: the panda-mcp-client README suggests curl from cafiles.cern.ch —
+# those files are DER-encoded and need `openssl x509 -inform DER` conversion.
+# export SSL_CERT_FILE="/path/to/ca-bundle-with-cern-cas.pem"
+#
 # Or point PANDA_MCP_CA_BUNDLE at a combined PEM bundle:
 # export PANDA_MCP_CA_BUNDLE="/path/to/ca-bundle.pem"
 # Development/testing only — disables TLS verification entirely:

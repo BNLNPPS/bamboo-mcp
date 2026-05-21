@@ -17,6 +17,19 @@ All notable changes to Bamboo are documented here.
   and all failure modes (missing file, malformed JSON, missing field) with
   WARNING-level log messages rather than crashes.  Token renewal will be
   handled by a forthcoming Bamboo MCP agent service.
+- **`panda_server_health`: error diagnosis.** When `system_is_alive` returns
+  an error string, a new `_diagnose_error()` helper maps known patterns to
+  human-readable explanations included in the evidence (`error_explanation`
+  field) and appended to the summary text.  Covers: server-side SSL failure
+  on port 25443, Bamboo-side CA bundle issues, connection refused/timeout,
+  and auth/token errors.  No second LLM call required — diagnosis is
+  deterministic.
+- **TLS docs**: document that `SSL_CERT_FILE` is honoured automatically by
+  `httpx`/`requests` as an alternative to modifying the certifi bundle.
+  Note that files from `cafiles.cern.ch` are DER-encoded and require
+  `openssl x509 -inform DER` conversion — the `awk` system-store extraction
+  is the recommended approach on lxplus.  Updated `CLAUDE.md`,
+  `bamboo_env_example.sh`, and `docs/question-cheatsheet.md`.
 
 ### Fixed
 
