@@ -106,6 +106,12 @@ class OpenSearchPromptlogQueryTool:
                 "  system_prompt (text)     redacted system prompt (large; omitted by default)\n"
                 "  user_prompt   (text)     redacted synthesis prompt (large; omitted by default)\n"
                 "  response      (text)     redacted LLM response (large; omitted by default)\n\n"
+                "source_fields guidance: the three large text fields are omitted by "
+                "default to save context window.  For queries that display what the "
+                "user asked ('show recent turns', 'replay session'), add "
+                "'user_prompt' to source_fields.  For aggregation-only queries "
+                "(counts, averages, groupings) pass source_fields=[] and size:0 in "
+                "the DSL to suppress _source entirely.\n\n"
                 "IMPORTANT RULES for building queries:\n"
                 "1. Date math: always use OpenSearch date math for temporal filters, "
                 "   e.g. 'today' = gte:now/d, 'this week' = gte:now-7d/d, "
@@ -161,6 +167,25 @@ class OpenSearchPromptlogQueryTool:
                 "\n"
                 r'    {"query":{"term":{"tools_used":"cric_query"}},'
                 r'"sort":[{"@timestamp":{"order":"desc"}}]}'
+                "\n"
+                r'  Count turns per session today:'
+                "\n"
+                r'    {"query":{"range":{"@timestamp":{"gte":"now/d"}}},'
+                r'"aggs":{"by_session":{"terms":{"field":"session_id","size":50},'
+                r'"aggs":{"turns":{"value_count":{"field":"turn_number"}}}}},"size":0}'
+                "\n"
+                r'  Count how many times a specific tool was called today:'
+                "\n"
+                r'    {"query":{"bool":{"must":['
+                r'      {"range":{"@timestamp":{"gte":"now/d"}}},'
+                r'      {"term":{"tools_used":"opensearch_promptlog_query"}}]}},'
+                r'"aggs":{"count":{"value_count":{"field":"turn_number"}}},"size":0}'
+                "\n"
+                r'  Show recent turns including what the user asked:'
+                "\n"
+                r'    {"query":{"match_all":{}},"sort":[{"@timestamp":{"order":"desc"}}],'
+                r'"size":5}  + source_fields=["@timestamp","turn_number",'
+                r'"tools_used","user_prompt"]'
                 "\n"
                 "Requires ASKPANDA_OPENSEARCH to be set (same credential as "
                 "harvester timeseries)."

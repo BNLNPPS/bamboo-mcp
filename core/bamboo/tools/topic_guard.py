@@ -65,7 +65,18 @@ _ALLOW_TERMS: list[str] = [
     # refused.  bamboo_answer intercepts these before the guard runs, but
     # listing them here ensures they pass keyword_allow even if that
     # intercept is somehow bypassed (defence in depth).
-    "hello", "hi", "hey", "thanks", "thank you", "cheers", "good morning", "good afternoon", "good evening",
+    "hello", "hi", "hey", "thanks", "thank you", "cheers",
+    "good morning", "good afternoon", "good evening",
+    # Bamboo self-observability — prompt-log and session queries.
+    # These questions are directed at Bamboo itself (e.g. "how many turns
+    # today?", "which model am I using?", "replay my last session") and
+    # must never be rejected as off-topic.
+    "bamboo", "opensearch", "prompt log", "prompt logging",
+    "session", "sessions", "turns", "turn number",
+    "which model", "which tools", "tools used", "tool usage",
+    "token count", "token counts", "input tokens", "output tokens",
+    "replay session", "last session", "most recent",
+    "how many turns", "how many sessions",
 ]
 
 # Questions containing any of these terms (and none of the allow terms) are
