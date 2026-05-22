@@ -149,6 +149,7 @@ def _build_config() -> dict[str, Any] | None:
 
     if token:
         headers["Authorization"] = f"Bearer {token}"
+        headers["X-Auth-Token"] = f"Bearer {token}"
 
     origin = os.environ.get("PANDA_MCP_ORIGIN", "").strip()
     if origin:
