@@ -203,14 +203,6 @@ def drain_events() -> list[dict[str, Any]]:
 # OpenSearch connection constants
 # ---------------------------------------------------------------------------
 
-# Re-export defaults from the shared client module so external code that
-# imports them from prompt_log continues to work without changes.
-from bamboo.llm.opensearch_client import (  # noqa: E402,F401
-    DEFAULT_HOST as _DEFAULT_HOST,  # noqa: F401
-    DEFAULT_USER as _DEFAULT_USER,  # noqa: F401
-    DEFAULT_CA as _DEFAULT_CA,      # noqa: F401
-)
-
 _DEFAULT_INDEX_BASE: str = "bamboomcp-promptlog"
 
 # ---------------------------------------------------------------------------

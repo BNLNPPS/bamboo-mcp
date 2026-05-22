@@ -106,23 +106,51 @@ class OpenSearchPromptlogQueryTool:
                 "  system_prompt (text)     redacted system prompt (large; omitted by default)\n"
                 "  user_prompt   (text)     redacted synthesis prompt (large; omitted by default)\n"
                 "  response      (text)     redacted LLM response (large; omitted by default)\n\n"
-                "By default the three large text fields are excluded; add them "
-                "to source_fields only when needed.\n\n"
+                "IMPORTANT RULES for building queries:\n"
+                "1. Date math: always use OpenSearch date math for temporal filters, "
+                "   e.g. 'today' = gte:now/d, 'this week' = gte:now-7d/d, "
+                "   'last hour' = gte:now-1h.  NEVER use hardcoded date strings.\n"
+                "2. Counting turns: to count how many turns a session has, use a "
+                "   value_count aggregation with size:0 — do NOT count the returned "
+                "   hits, because max_hits may be less than the total.  "
+                "   The 'total' field in the response is only reliable when size:0.\n"
+                "3. Finding the current session: the session_id is not known in "
+                "   advance.  To find 'my last session', first query "
+                "   sort:[{@timestamp:desc}],size:1 to get the most recent document, "
+                "   read its session_id, then issue a second query filtered on that "
+                "   session_id.\n"
+                "4. keyword fields (session_id, provider, model, tools_used) require "
+                "   exact 'term' queries, not 'match'.\n\n"
                 "Example queries (pass as JSON strings in the 'query' argument):\n"
-                r'  Most recent 5 turns:  {"query":{"match_all":{}},"sort":[{"@timestamp":"desc"}]}'
+                r'  5 most recent turns (any session):'
                 "\n"
-                r'  Replay a session: '
+                r'    {"query":{"match_all":{}},"sort":[{"@timestamp":"desc"}],"size":5}'
+                "\n"
+                r'  Turn count for a known session (use value_count agg):'
+                "\n"
                 r'    {"query":{"term":{"session_id":"<uuid>"}},'
-                r'"sort":[{"turn_number":"asc"}]}'
+                r'"aggs":{"turns":{"value_count":{"field":"turn_number"}}},"size":0}'
                 "\n"
-                r'  Tool usage counts: '
-                r'    {"query":{"match_all":{}},'
-                r'"aggs":{"tools":{"terms":{"field":"tools_used",'
-                r'"size":20}}},"size":0}'
+                r'  Replay a session in order:'
                 "\n"
-                r'  cric_query turns: '
+                r'    {"query":{"term":{"session_id":"<uuid>"}},'
+                r'"sort":[{"turn_number":{"order":"asc"}}]}'
+                "\n"
+                r'  Tool usage counts today (date math, agg only):'
+                "\n"
+                r'    {"query":{"range":{"@timestamp":{"gte":"now/d"}}},'
+                r'"aggs":{"tools":{"terms":{"field":"tools_used","size":20}}},"size":0}'
+                "\n"
+                r'  Average output tokens per model this week:'
+                "\n"
+                r'    {"query":{"range":{"@timestamp":{"gte":"now-7d/d"}}},'
+                r'"aggs":{"by_model":{"terms":{"field":"model"},'
+                r'"aggs":{"avg_out":{"avg":{"field":"output_tokens"}}}}},"size":0}'
+                "\n"
+                r'  Turns using cric_query:'
+                "\n"
                 r'    {"query":{"term":{"tools_used":"cric_query"}},'
-                r'"sort":[{"@timestamp":"desc"}]}'
+                r'"sort":[{"@timestamp":{"order":"desc"}}]}'
                 "\n"
                 "Requires ASKPANDA_OPENSEARCH to be set (same credential as "
                 "harvester timeseries)."
