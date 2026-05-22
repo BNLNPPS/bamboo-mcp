@@ -170,6 +170,8 @@ _consecutive_failures: int = 0
 
 #: Set to True once the threshold is reached; cleared only on process restart.
 _circuit_open: bool = False
+#: Set to True after the index template has been applied once per process.
+_template_applied: bool = False
 
 # ---------------------------------------------------------------------------
 # Per-turn event log — polled by the bamboo_promptlog_status MCP tool.
@@ -437,6 +439,63 @@ def _create_os_client() -> Any:
     return _shared_factory(password)
 
 
+_PROMPTLOG_TEMPLATE: dict = {
+    "index_patterns": ["bamboomcp-promptlog-*"],
+    "template": {
+        "mappings": {
+            "properties": {
+                "@timestamp": {
+                    "type": "date",
+                    "format": "strict_date_optional_time||epoch_millis",
+                },
+                "session_id": {"type": "keyword"},
+                "turn_number": {"type": "integer"},
+                "provider": {"type": "keyword"},
+                "model": {"type": "keyword"},
+                "max_tokens": {"type": "integer"},
+                "tools_used": {"type": "keyword"},
+                "input_tokens": {"type": "integer"},
+                "output_tokens": {"type": "integer"},
+                "system_prompt": {"type": "text"},
+                "user_prompt": {"type": "text"},
+                "response": {"type": "text"},
+            }
+        }
+    },
+}
+_PROMPTLOG_TEMPLATE_NAME: str = "bamboomcp-promptlog"
+
+
+def _ensure_index_template(client: Any) -> None:
+    """Apply the bamboomcp-promptlog index template if not yet applied.
+
+    Idempotent — skipped after the first successful call per process.
+    Failures are logged at WARNING level and do not abort the write.
+
+    Args:
+        client: An authenticated :class:`opensearchpy.OpenSearch` client.
+    """
+    global _template_applied  # pylint: disable=global-statement
+    if _template_applied:
+        return
+    try:
+        client.indices.put_index_template(
+            name=_PROMPTLOG_TEMPLATE_NAME,
+            body=_PROMPTLOG_TEMPLATE,
+        )
+        _template_applied = True
+        logger.debug(
+            "prompt_log: index template '%s' applied", _PROMPTLOG_TEMPLATE_NAME
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "prompt_log: failed to apply index template '%s': %s — "
+            "date range queries may not work if mapping was auto-detected as text",
+            _PROMPTLOG_TEMPLATE_NAME,
+            exc,
+        )
+
+
 def _write_document(doc: dict[str, Any]) -> None:
     """Write *doc* to OpenSearch synchronously.
 
@@ -463,12 +522,15 @@ def _write_document(doc: dict[str, Any]) -> None:
 
     try:
         client = _create_os_client()
+        _ensure_index_template(client)
         resp = client.index(index=index, body=doc)
         doc_id = resp.get("_id", "?") if isinstance(resp, dict) else "?"
         result = resp.get("result", "?") if isinstance(resp, dict) else "?"
+        session_id = doc.get("session_id", "?")
         msg = (
             f"prompt_log: turn {turn} indexed — "
-            f"index={index!r} id={doc_id!r} result={result!r}"
+            f"index={index!r} id={doc_id!r} result={result!r} "
+            f"session={session_id!r}"
         )
         logger.debug(msg)
         _notify("info", msg)
@@ -556,7 +618,7 @@ async def log_prompt(
     global _turn_counter  # pylint: disable=global-statement
     _turn_counter += 1
     turn_number = _turn_counter
-    timestamp = datetime.now(tz=timezone.utc).isoformat()
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
     doc: dict[str, Any] = {
         "@timestamp": timestamp,
