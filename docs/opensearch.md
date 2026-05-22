@@ -261,3 +261,104 @@ index.
 | `packages/askpanda_atlas/askpanda_atlas/harvester_timeseries_impl.py` | Read-only timeseries queries |
 | `scripts/opensearch_monitor.py` | CLI exploration script for the harvester index |
 | `tests/test_prompt_log.py` | Unit tests for redaction, circuit breaker, document shape |
+
+---
+
+## Read queries from Bamboo
+
+Bamboo exposes two MCP tools for querying OpenSearch data directly from the
+TUI, Streamlit, or any MCP client, without needing the OpenSearch Dashboards
+web UI.
+
+### `opensearch_query` — general-purpose read tool
+
+Executes any OpenSearch DSL query against an index pattern on the CERN cluster.
+The LLM constructs the query; this tool handles auth, allow-list validation,
+execution, and result formatting.
+
+**Credential:** `ASKPANDA_OPENSEARCH` (same read password as harvester timeseries).
+
+**Allow-list:** `BAMBOO_OPENSEARCH_ALLOWED_INDICES` (comma-separated glob patterns).
+Default: `atlas_harvesterworkers-*,bamboomcp-promptlog-*`.
+To add a new index: `export BAMBOO_OPENSEARCH_ALLOWED_INDICES="atlas_harvesterworkers-*,bamboomcp-promptlog-*,my-new-index-*"`
+
+**Arguments:**
+
+| Argument | Required | Description |
+|---|---|---|
+| `index_pattern` | yes | Index pattern to query, e.g. `bamboomcp-promptlog-*` |
+| `query` | yes | OpenSearch DSL query body as a JSON string |
+| `max_hits` | no | Maximum documents to return (1–100, default 10) |
+| `source_fields` | no | Field projection list; omit for all fields |
+
+**Returns:** `{"hits": [...], "total": N, "took_ms": N, "aggregations": {...}}`
+
+### `opensearch_promptlog_query` — prompt-log convenience wrapper
+
+Identical to `opensearch_query` but with `bamboomcp-promptlog-*` pre-filled
+and the three large text fields (`system_prompt`, `user_prompt`, `response`)
+excluded by default.
+
+**Arguments:** same as above except `index_pattern` is omitted (fixed).
+
+**Example questions you can ask Bamboo:**
+
+```
+How many turns did my last session have?
+Which tools were used most often today?
+Show the 5 most recent responses that used cric_query.
+What was the average output token count per model this week?
+Replay session <uuid> in chronological order.
+```
+
+**Example DSL queries (pass as the `query` argument):**
+
+Most recent 5 turns:
+```json
+{"query":{"match_all":{}},"sort":[{"@timestamp":"desc"}],"size":5}
+```
+
+Replay a full session in order:
+```json
+{"query":{"term":{"session_id":"<uuid>"}},"sort":[{"turn_number":"asc"}]}
+```
+
+Tool usage frequency (aggregation, no document content needed):
+```json
+{"query":{"match_all":{}},"aggs":{"tools":{"terms":{"field":"tools_used","size":20}}},"size":0}
+```
+
+Turns that used a specific tool:
+```json
+{"query":{"term":{"tools_used":"cric_query"}},"sort":[{"@timestamp":"desc"}]}
+```
+
+### Architecture
+
+```
+opensearch_promptlog_query   (convenience wrapper)
+        │  injects index_pattern + default source_fields
+        ▼
+opensearch_query             (general tool, registered in TOOLS)
+        │  allow-list check → DSL parse → asyncio.to_thread
+        ▼
+_run_query()                 (synchronous, blocking)
+        │
+        ▼
+bamboo.llm.opensearch_client.create_os_client(ASKPANDA_OPENSEARCH)
+```
+
+The shared client factory (`core/bamboo/llm/opensearch_client.py`) is used by
+all three read/write paths so TLS settings and environment-variable names stay
+consistent.
+
+### Adding a new index
+
+1. Add the index pattern to `BAMBOO_OPENSEARCH_ALLOWED_INDICES`.
+2. Optionally write a convenience tool (see `opensearch_promptlog_query.py` as
+   a template) with a schema description that helps the LLM construct useful
+   queries for that specific index.
+3. Register the convenience tool in `TOOLS` in `core/bamboo/core.py`.
+
+No code changes are needed for `opensearch_query` itself — it is already
+general.

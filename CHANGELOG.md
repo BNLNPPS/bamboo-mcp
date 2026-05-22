@@ -287,6 +287,55 @@ All notable changes to Bamboo are documented here.
   | `docs/tools/pilot_code_query.md` | `docs/tools/code_query.md` |
 
 
+### Added
+
+- **OpenSearch read-query tools.** Bamboo can now query any index on the CERN
+  OpenSearch cluster directly from the TUI, Streamlit, or any MCP client —
+  without needing the OpenSearch Dashboards web UI.
+
+  - **`opensearch_query`** — general-purpose MCP tool that executes an
+    OpenSearch DSL query (supplied as a JSON string) against any index pattern
+    in a configurable allow-list.  Arguments: `index_pattern`, `query` (DSL
+    JSON string), optional `max_hits` (1–100, default 10), optional
+    `source_fields` projection.  Returns `{"hits": [...], "total": N,
+    "took_ms": N, "aggregations": {...}}`.  Uses `ASKPANDA_OPENSEARCH`
+    (shared read credential with harvester timeseries).  Allow-list controlled
+    by `BAMBOO_OPENSEARCH_ALLOWED_INDICES` (default:
+    `atlas_harvesterworkers-*,bamboomcp-promptlog-*`).
+
+  - **`opensearch_promptlog_query`** — convenience wrapper pre-wired to
+    `bamboomcp-promptlog-*` with the three large text fields
+    (`system_prompt`, `user_prompt`, `response`) excluded from results by
+    default.  Rich schema description in the tool definition lets the LLM
+    construct useful queries without knowing the field names.  Supports
+    session replay, tool-usage analytics, token cost comparisons, and
+    per-provider breakdowns.
+
+  - **`core/bamboo/llm/opensearch_client.py`** — new shared client factory
+    (`create_os_client(password)`) used by all three OpenSearch paths (prompt
+    log write, harvester timeseries read, general read).  Eliminates the
+    duplicate connection logic previously duplicated between `prompt_log.py`
+    and `harvester_timeseries_impl.py`.
+
+  - Registered in `core.py` `TOOLS` dict.  25 new unit tests in
+    `tests/test_opensearch_query.py` covering allow-list logic, error
+    handling, max_hits clamping, aggregation passthrough, and the
+    promptlog-query projection defaults.
+
+  - `docs/opensearch.md` extended with a "Read queries from Bamboo" section:
+    example DSL queries, architecture diagram, and "Adding a new index"
+    instructions.
+
+### Changed
+
+- **`prompt_log._create_os_client` and
+  `harvester_timeseries_impl.create_os_client` now delegate to the shared
+  `bamboo.llm.opensearch_client.create_os_client` factory.**  Both functions
+  are preserved at their original names for backward compatibility; no
+  call-site or test changes are required.
+
+
+
 ## v1.0.7 — 2026-05-15
 
 ### Added

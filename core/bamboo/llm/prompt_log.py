@@ -200,12 +200,17 @@ def drain_events() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# OpenSearch connection constants (shared with harvester_timeseries_impl.py).
+# OpenSearch connection constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_HOST: str = "https://os-atlas.cern.ch/os"
-_DEFAULT_USER: str = "pilot-monitor-agent"
-_DEFAULT_CA: str = "/etc/pki/tls/certs/CERN-bundle.pem"
+# Re-export defaults from the shared client module so external code that
+# imports them from prompt_log continues to work without changes.
+from bamboo.llm.opensearch_client import (  # noqa: E402,F401
+    DEFAULT_HOST as _DEFAULT_HOST,  # noqa: F401
+    DEFAULT_USER as _DEFAULT_USER,  # noqa: F401
+    DEFAULT_CA as _DEFAULT_CA,      # noqa: F401
+)
+
 _DEFAULT_INDEX_BASE: str = "bamboomcp-promptlog"
 
 # ---------------------------------------------------------------------------
@@ -418,9 +423,10 @@ def _build_index_name() -> str:
 def _create_os_client() -> Any:
     """Create an authenticated OpenSearch client for prompt logging.
 
-    Reads connection parameters from the same environment variables used by
-    :mod:`~askpanda_atlas.harvester_timeseries_impl` so that operators only
-    need one set of credentials.
+    Delegates to :func:`bamboo.llm.opensearch_client.create_os_client` using
+    the ``BAMBOO_OPENSEARCH_PROMPTLOG`` write password.  Kept as a module-level
+    function so existing call sites and tests that patch it by name continue to
+    work without modification.
 
     Returns:
         An :class:`opensearchpy.OpenSearch` client instance.
@@ -429,30 +435,14 @@ def _create_os_client() -> Any:
         ImportError: If ``opensearch-py`` is not installed.
         RuntimeError: If ``BAMBOO_OPENSEARCH_PROMPTLOG`` is not set.
     """
-    from opensearchpy import OpenSearch  # optional dep — guarded at call site
+    from bamboo.llm.opensearch_client import create_os_client as _shared_factory
 
     password = os.environ.get("BAMBOO_OPENSEARCH_PROMPTLOG", "")
     if not password:
         raise RuntimeError(
             "BAMBOO_OPENSEARCH_PROMPTLOG is not set — prompt logging is disabled."
         )
-
-    host = os.environ.get("ASKPANDA_OPENSEARCH_HOST", _DEFAULT_HOST)
-    user = os.environ.get("ASKPANDA_OPENSEARCH_USER", _DEFAULT_USER)
-    ca = os.environ.get("ASKPANDA_OPENSEARCH_CA", _DEFAULT_CA)
-    verify_raw = os.environ.get("ASKPANDA_OPENSEARCH_VERIFY_CERTS", "true").lower()
-    verify = verify_raw != "false"
-
-    client_kwargs: dict[str, Any] = {
-        "hosts": [host],
-        "http_auth": (user, password),
-        "use_ssl": True,
-        "verify_certs": verify,
-    }
-    if verify and os.path.exists(ca):
-        client_kwargs["ca_certs"] = ca
-
-    return OpenSearch(**client_kwargs)
+    return _shared_factory(password)
 
 
 def _write_document(doc: dict[str, Any]) -> None:
