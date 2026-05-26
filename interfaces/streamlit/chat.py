@@ -1599,9 +1599,15 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
             "source_fields=[@timestamp, turn_number, session_id, "
             "model, tools_used, user_prompt, rating], "
             "include _id in each hit. "
-            "Format as markdown table: "
-            "Time | Turn | Session (first 8 chars) | Model | "
-            "Tools | Question (first 60 chars) | Rating.",
+            "Format as markdown table with these exact columns: "
+            "Doc ID (full _id value) | Time | Turn | "
+            "Session (first 8 chars) | Model | "
+            "Tools | Question (first 60 chars) | Rating. "
+            "The Doc ID column is critical — it is the only way to "
+            "retrieve the full response for a specific entry. "
+            "To fetch the full response for a row, use opensearch_query "
+            "with {\"query\":{\"ids\":{\"values\":[\"<_id>\"]}}} "
+            "and source_fields=[response, user_prompt].",
             None,
         )
 
