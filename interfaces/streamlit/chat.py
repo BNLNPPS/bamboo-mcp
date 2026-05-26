@@ -11,7 +11,8 @@ Key design decisions
 --------------------
 - ``bamboo_answer`` is always the answer tool — ``_guess_auto_tool`` is gone.
 - Fast-path routing defaults to ON (matches server default).
-- Bearer token, URL, and plugin are all user-visible sidebar controls.
+- Bearer token and URL are user-visible sidebar controls. Plugin is fixed
+  to ``ASKPANDA_PLUGIN`` env var (default ``atlas``) — not user-selectable.
 - After each response, expanders show Tracing, Costs, Evidence (inspect),
   and Raw JSON — equivalent to TUI /tracing, /costs, /inspect, /json.
 - LLM info and experiment display name are fetched on connect via
@@ -390,7 +391,6 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
   body {{ margin: 0; padding: 0; background: transparent; }}
   #container {{
     width: 100%;
-    overflow-x: auto;
     background: white;
     padding: 4px 8px;
     box-sizing: border-box;
@@ -422,11 +422,38 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
       htmlLabels: false
     }}
   }});
+
+  // After Mermaid renders, strip any explicit width/height attributes it
+  // inlines on the SVG (they override CSS and cause oversized rendering),
+  // then report the actual rendered height to Streamlit so the iframe
+  // resizes to fit without a fixed pixel guess.
+  function _fixSvgAndResize() {{
+    var svg = document.querySelector(".mermaid svg");
+    if (!svg) return;
+    svg.removeAttribute("width");
+    svg.removeAttribute("height");
+    svg.style.width = "100%";
+    svg.style.height = "auto";
+    var h = document.body.scrollHeight;
+    window.parent.postMessage({{type:"streamlit:setFrameHeight", height: h}}, "*");
+  }}
+
+  // MutationObserver fires once the SVG is injected by Mermaid.
+  var _obs = new MutationObserver(function(mutations) {{
+    if (document.querySelector(".mermaid svg")) {{
+      _obs.disconnect();
+      _fixSvgAndResize();
+    }}
+  }});
+  _obs.observe(document.body, {{childList: true, subtree: true}});
+
+  // Fallback: also run after a short delay in case the observer fires early.
+  setTimeout(_fixSvgAndResize, 600);
 </script>
 </body>
 </html>
 """
-        components.html(html, height=height_px, scrolling=True)
+        components.html(html, height=height_px, scrolling=False)
 
 
 # ---------------------------------------------------------------------------
@@ -740,8 +767,12 @@ def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
 def _render_sidebar() -> tuple[str, str, str, str, str]:
     """Render sidebar controls and return connection parameters.
 
+    ``plugin_id`` is not user-selectable — it is fixed to the
+    ``ASKPANDA_PLUGIN`` environment variable (default ``"atlas"``).
+
     Returns:
-        Tuple of ``(transport, http_url, bearer_token, plugin_id, stdio_command)``.
+        Tuple of ``(transport, http_url, bearer_token, plugin_id,
+        stdio_command)`` where ``plugin_id`` equals ``_DEFAULT_PLUGIN``.
     """
     st.sidebar.title(st.session_state.get("display_name", "AskPanDA"))
 
@@ -767,18 +798,10 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
         help="Leave empty if the server has no auth configured.",
     )
 
-    _plugin_options = ["atlas", "epic", "cgsim"]
-    _plugin_default_index = (
-        _plugin_options.index(_DEFAULT_PLUGIN)
-        if _DEFAULT_PLUGIN in _plugin_options
-        else 0
-    )
-    plugin_id = st.sidebar.selectbox(
-        "Experiment / plugin",
-        _plugin_options,
-        index=_plugin_default_index,
-        help="Selects the ui_manifest tool and display name.",
-    )
+    # Plugin is fixed to the ASKPANDA_PLUGIN env var (default "atlas").
+    # Not exposed as a UI control — switch experiments by restarting with a
+    # different env var rather than hot-switching in the sidebar.
+    plugin_id = _DEFAULT_PLUGIN
 
     stdio_command = sys.executable  # not exposed to users; used internally
 
@@ -1625,24 +1648,48 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
 
     if cmd == "/rates":
         scope = args[0].lower() if args else ""
+        # Build the OpenSearch query here so the LLM never has to construct
+        # or modify it — that was the source of malformed range queries.
         if scope == "today":
-            date_clause = "today (filter @timestamp gte:now/d)"
+            label = "today"
+            query_json = (
+                '{"query":{"bool":{"must":[' +
+                '{"exists":{"field":"rating"}},' +
+                '{"range":{"@timestamp":{"gte":"now/d"}}}' +
+                ']}},' +
+                '"sort":[{"rating":{"order":"desc"}}]}'
+            )
         elif scope == "week":
-            date_clause = "this week (filter @timestamp gte:now-7d/d)"
+            label = "this week"
+            query_json = (
+                '{"query":{"bool":{"must":[' +
+                '{"exists":{"field":"rating"}},' +
+                '{"range":{"@timestamp":{"gte":"now-7d/d"}}}' +
+                ']}},' +
+                '"sort":[{"rating":{"order":"desc"}}]}'
+            )
         elif scope == "month":
-            date_clause = "this month (filter @timestamp gte:now-30d/d)"
+            label = "this month"
+            query_json = (
+                '{"query":{"bool":{"must":[' +
+                '{"exists":{"field":"rating"}},' +
+                '{"range":{"@timestamp":{"gte":"now-30d/d"}}}' +
+                ']}},' +
+                '"sort":[{"rating":{"order":"desc"}}]}'
+            )
         else:
-            date_clause = "all time (no date filter)"
+            label = "all time"
+            query_json = (
+                '{"query":{"exists":{"field":"rating"}},' +
+                '"sort":[{"rating":{"order":"desc"}}]}'
+            )
         return (
-            f"Show all rated responses for {date_clause} as a markdown "
-            "table sorted by rating descending. "
+            f"Show all rated responses for {label} as a markdown table. "
             "Call the opensearch_promptlog_query tool. "
             "Pass max_hits=50 as a separate argument. "
             "Pass source_fields=[@timestamp,turn_number,session_id,"
             "model,tools_used,raw_question,rating] as a separate argument. "
-            "Pass this exact JSON as the query argument (nothing else): "
-            '{"query":{"exists":{"field":"rating"}},'
-            '"sort":[{"rating":{"order":"desc"}}]} '
+            f"Pass this exact JSON as the query argument (nothing else): {query_json} "
             "Each hit includes _id automatically. "
             "Format as markdown table: "
             "Doc ID (full _id) | Time | Turn | Session (first 8 chars) "

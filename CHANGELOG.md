@@ -12,6 +12,11 @@ All notable changes to Bamboo are documented here.
   is rendered after the full chat history during the pending-question pass, so
   it appears at the bottom of the page just above the input box rather than
   at the top where it was invisible in long conversations.
+- **Streamlit: remove Experiment/plugin selector from sidebar.** The plugin
+  is now fixed to the ``ASKPANDA_PLUGIN`` environment variable (default
+  ``atlas``).  Switching experiments requires restarting the server with a
+  different env var rather than hot-switching in the UI, which avoids
+  confusing mid-session state resets.
 - **Streamlit: rating widget retry on first question after restart.**
   If the deferred prompt-log poll fires before OpenSearch has flushed the
   background write (``last_doc_id`` still ``None``), a ``retry_promptlog``
@@ -41,12 +46,26 @@ All notable changes to Bamboo are documented here.
   instead of arrow count, which overcounted for state diagrams and produced
   oversized iframes that pushed nodes below the visible area.  Mermaid CDN
   bumped from `@10` to `@11` for improved state diagram rendering.
+- **Streamlit: Mermaid diagrams scale and auto-size correctly.** A
+  ``MutationObserver`` strips Mermaid's inline ``width``/``height``
+  attributes from the SVG after render (they override CSS and cause
+  oversized output), then posts the actual rendered height to Streamlit
+  so the iframe auto-resizes to fit.  A 600 ms fallback ``setTimeout``
+  handles edge cases where the observer fires before layout settles.
+  ``scrolling=False`` — no scroll bar needed once the iframe matches the
+  diagram height.
 - **Streamlit: Mermaid diagrams scale to fit iframe width.** Switched to
   ``useMaxWidth: true`` with ``width: 100% !important`` on the SVG so
   diagrams shrink to fit rather than rendering at natural size and pushing
   content off-screen.  Reduced node/rank spacing (40/50 px) and tightened
   the height estimate to 14 px per line (cap 600 px) so diagrams are
   compact.  Mermaid CDN bumped to v11.
+- **Streamlit: `/rates` date-filtered queries no longer fail.** The
+  ``/rates today``, ``/rates week``, and ``/rates month`` slash commands
+  now pass a fully pre-built OpenSearch ``bool/must`` query with both the
+  ``exists`` on ``rating`` and the ``range`` on ``@timestamp`` baked in,
+  leaving nothing for the LLM to construct or modify.  Previously the LLM
+  generated a malformed ``range`` query combining multiple fields.
 - **Streamlit: `st.components.v1.html` deprecation noted.** `st.iframe`
   (the advertised replacement) accepts a URL `src`, not raw HTML, so it
   cannot replace `components.v1.html` for inline Mermaid rendering.
