@@ -295,6 +295,45 @@ def _wrap_mermaid_labels(diagram: str, max_chars: int = 20) -> str:
     return "\n".join(result_lines)
 
 
+def _normalise_latex(text: str) -> str:
+    r"""Convert common LaTeX delimiter styles to Streamlit-compatible KaTeX syntax.
+
+    Streamlit's ``st.markdown()`` renders LaTeX via KaTeX using ``$...$``
+    (inline) and ``$$...$$`` (display) delimiters.  LLMs frequently produce
+    other standard delimiter styles which render as raw text without conversion.
+
+    Conversions applied (in order):
+
+    - ``\[ ... \]``  →  ``$$...$$``  (standard LaTeX display math)
+    - ``\( ... \)``  →  ``$...$``   (standard LaTeX inline math)
+    - ``[ ... ]`` where content looks like a LaTeX expression  →  ``$$...$$``
+      (bare bracket style sometimes emitted by LLMs)
+
+    The bare-bracket heuristic matches ``[`` followed by content that contains
+    a backslash (indicating a LaTeX command), ending at the next ``]``.  Plain
+    prose in square brackets is not affected.
+
+    Args:
+        text: Raw assistant response text.
+
+    Returns:
+        Text with LaTeX delimiters normalised for Streamlit KaTeX rendering.
+    """
+    # \[ ... \] → $$...$$  (display math, one or two backslashes before bracket)
+    text = re.sub(r'\\{1,2}\[(.+?)\\{1,2}\]', r'$$\1$$', text, flags=re.DOTALL)
+
+    # \( ... \) → $...$  (inline math)
+    # Use word-boundary assertion to avoid matching \left( and \right).
+    text = re.sub(r'\\{1,2}\((?!left\b)(.+?)\\{1,2}\)(?!right\b)',
+                  r'$\1$', text, flags=re.DOTALL)
+
+    # [ ... ] → $$...$$ only when content contains a LaTeX command (backslash)
+    # and the bracket is not already inside a $...$ block.
+    text = re.sub(r'(?<!\$)\[([^\[\]]*\\[^\[\]]*)\](?!\$)', r'$$\1$$', text)
+
+    return text
+
+
 def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     r"""Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
 
@@ -1378,7 +1417,12 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
     # Render chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            rendered = (
+                _normalise_latex(msg["content"])
+                if msg["role"] == "assistant"
+                else msg["content"]
+            )
+            st.markdown(rendered)
 
     # After the last assistant reply: render diagrams, plot, detail expanders.
     if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
