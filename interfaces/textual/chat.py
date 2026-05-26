@@ -560,6 +560,7 @@ class BambooTui(App):
         self._thinking_task: Optional[Any] = None  # Textual Timer for animated thinking indicator
         self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
         self._last_response_links: List[Tuple[str, str]] = []  # (label, url) pairs from last assistant response
+        self._last_response_text: str = ""  # raw text of last assistant response, for /script
         self._last_rated_doc: tuple[str, str] | None = None  # (index, doc_id) for /rate
         # Session-level cost accumulators — updated after every completed request.
         self._session_input_tokens: int = 0
@@ -1355,6 +1356,9 @@ class BambooTui(App):
                 )
             await self._handle_question(faq_q)
             return
+        if cmd == "/script":
+            self._cmd_script(args[0] if args else "")
+            return
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
     def _cmd_help(self) -> None:
@@ -1370,6 +1374,7 @@ class BambooTui(App):
             "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
             "  /faq [today|week|month]  Most frequently asked questions (default: all time)\n"
             "  /rates [today|week|month] Show rated responses as a table (default: all time)\n"
+            "  /script [filename]       Write code block(s) from last response to file\n"
             "  /rate <1-5>           Rate the last response (1=poor, 5=excellent)\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
@@ -2059,6 +2064,7 @@ class BambooTui(App):
             msg (str): Message text (Markdown or pre-formatted plain text).
         """
         self._last_response_links = self._extract_links(msg)
+        self._last_response_text = msg
         display_msg = self._expand_links_for_display(msg)
         renderable = Text(display_msg) if self._is_preformatted(display_msg) else Markdown(display_msg)
         self._write_panel(renderable, title=f"{_now()}  Bamboo MCP", border_style="dim")
@@ -2066,6 +2072,165 @@ class BambooTui(App):
             n = len(self._last_response_links)
             word = "link" if n == 1 else "links"
             self._write_system(f"{n} {word} in this response — type /links to list, /links N to open.")
+
+    @staticmethod
+    def _extract_code_blocks(text: str) -> list[tuple[str, str]]:
+        """Extract fenced code blocks from a Markdown response.
+
+        Matches blocks delimited by triple backticks, optionally with a
+        language identifier.  Returns blocks in order of appearance.
+
+        Args:
+            text: Raw Markdown response text.
+
+        Returns:
+            List of ``(language, code)`` tuples.  ``language`` is the
+            identifier after the opening fence (e.g. ``"python"``,
+            ``"bash"``), or an empty string when none is specified.
+            ``code`` is the block content with leading/trailing whitespace
+            stripped.
+        """
+        import re as _re
+        pattern = _re.compile(r"```(\w*)\s*\n(.*?)```", _re.DOTALL)
+        return [(lang.lower(), code.strip()) for lang, code in pattern.findall(text)]
+
+    @staticmethod
+    def _extract_suggested_filename(text: str) -> str:
+        """Extract a suggested script filename from a Markdown response.
+
+        Recognises common patterns the LLM uses to label a script:
+
+        - ``Script: calculate_pi.py``
+        - ``**Script:** calculate_pi.py``
+        - ``File: calculate_pi.py``
+        - ``**File:** calculate_pi.py``
+        - ``Filename: calculate_pi.py``
+        - Code fence with inline filename: ` ```python calculate_pi.py `
+
+        Args:
+            text: Raw Markdown response text.
+
+        Returns:
+            The suggested filename string, or an empty string when none
+            is found.
+        """
+        import re as _re
+        # "Script: foo.py", "File: foo.py", "Filename: foo.py"
+        # with optional Markdown bold markers
+        label_re = _re.compile(
+            r"(?:^|\n)\s*\*{0,2}(?:Script|File|Filename)\*{0,2}:\s*([\w.\-]+)"
+            r"(?=\s|$)",
+            _re.IGNORECASE,
+        )
+        m = label_re.search(text)
+        if m:
+            return m.group(1).strip()
+        # Code fence with inline filename: ```python calculate_pi.py
+        fence_re = _re.compile(
+            r"```\w*\s+([\w.\-]+\.\w+)\s*\n",
+        )
+        m = fence_re.search(text)
+        if m:
+            return m.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _lang_to_extension(lang: str) -> str:
+        """Map a code fence language identifier to a file extension.
+
+        Args:
+            lang: Language string from the code fence (e.g. ``"python"``).
+
+        Returns:
+            File extension including the leading dot (e.g. ``".py"``).
+            Defaults to ``.txt`` for unknown or empty languages.
+        """
+        _MAP = {
+            "python": ".py", "py": ".py",
+            "bash": ".sh", "sh": ".sh", "shell": ".sh",
+            "javascript": ".js", "js": ".js",
+            "typescript": ".ts", "ts": ".ts",
+            "json": ".json",
+            "yaml": ".yaml", "yml": ".yaml",
+            "toml": ".toml",
+            "cpp": ".cpp", "c++": ".cpp", "c": ".c",
+            "java": ".java",
+            "ruby": ".rb",
+            "go": ".go",
+            "rust": ".rs",
+            "sql": ".sql",
+            "r": ".r",
+        }
+        return _MAP.get(lang.lower(), ".txt")
+
+    def _cmd_script(self, filename: str) -> None:
+        """Write code block(s) from the last response to a local file.
+
+        Resolution order for the output filename:
+        1. Explicit filename supplied by the user (``/script foo.py``).
+        2. Filename suggested in the response body (e.g. ``Script: foo.py``).
+        3. Auto-generated name from language + timestamp.
+
+        The proposed path is shown to the user before writing; the write
+        proceeds immediately (TUI is single-user/expert context).
+
+        Args:
+            filename: Optional target filename supplied by the user.
+        """
+        import os as _os
+        from datetime import datetime as _dt
+
+        if not self._last_response_text:
+            self._write_system("No previous response available for /script.")
+            return
+
+        blocks = self._extract_code_blocks(self._last_response_text)
+        if not blocks:
+            self._write_system(
+                "No code blocks found in the last response.  "
+                "The response must contain a fenced ``` code block."
+            )
+            return
+
+        cwd = _os.getcwd()
+        stamp = _dt.now().strftime("%H%M%S")
+        # Try to honour a filename suggested in the response body
+        suggested = self._extract_suggested_filename(self._last_response_text)
+        written: list[str] = []
+
+        for i, (lang, code) in enumerate(blocks):
+            ext = self._lang_to_extension(lang)
+            if filename and i == 0:
+                # User-supplied filename takes priority
+                target = filename
+            elif filename and len(blocks) > 1:
+                base, orig_ext = _os.path.splitext(filename)
+                target = f"{base}_{i + 1}{orig_ext or ext}"
+            elif suggested and i == 0:
+                # Honour the LLM-suggested filename
+                target = suggested
+            elif suggested and len(blocks) > 1:
+                base, orig_ext = _os.path.splitext(suggested)
+                target = f"{base}_{i + 1}{orig_ext or ext}"
+            else:
+                label = lang if lang else "script"
+                suffix = f"_{i + 1}" if len(blocks) > 1 else ""
+                target = f"{label}_{stamp}{suffix}{ext}"
+
+            path = _os.path.join(cwd, target)
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(code + "\n")
+                written.append(path)
+            except OSError as exc:
+                self._write_error(f"/script: could not write {path!r}: {exc}")
+                return
+
+        if len(written) == 1:
+            self._write_system(f"Script written to: {written[0]}")
+        else:
+            joined = "\n  ".join(written)
+            self._write_system(f"{len(written)} scripts written:\n  {joined}")
 
     def _write_error(self, msg: str) -> None:
         """Write an error message.

@@ -1467,6 +1467,10 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
         # Rating widget — shown after every assistant response.
         _render_rating_widget(mcp)
 
+        # Script download button(s) — shown when the last response
+        # contains one or more fenced code blocks.
+        _render_script_download()
+
     # Chat input — must be the last widget
     question = st.chat_input(st.session_state.get("display_name", "Ask PanDA"))
     if question:
@@ -1670,6 +1674,103 @@ _RATING_LABELS: dict[int, str] = {
     4: "🟢 4",
     5: "💚 5",
 }
+
+
+def _extract_code_blocks_st(text: str) -> list[tuple[str, str]]:
+    """Extract fenced code blocks from a Markdown response.
+
+    Args:
+        text: Raw Markdown response text.
+
+    Returns:
+        List of ``(language, code)`` tuples.
+    """
+    pattern = re.compile(r"```(\w*)\s*\n(.*?)```", re.DOTALL)
+    return [(lang.lower(), code.strip()) for lang, code in pattern.findall(text)]
+
+
+def _extract_suggested_filename_st(text: str) -> str:
+    """Extract a suggested filename from a Markdown response.
+
+    Recognises ``Script: foo.py``, ``File: foo.py``, ``**Script:** foo.py``
+    and code fences with inline filenames.
+
+    Args:
+        text: Raw Markdown response text.
+
+    Returns:
+        Suggested filename or empty string.
+    """
+    label_re = re.compile(
+        r"(?:^|\n)\s*\*{0,2}(?:Script|File|Filename)\*{0,2}:\s*([\w.\-]+)"
+        r"(?=\s|$)",
+        re.IGNORECASE,
+    )
+    m = label_re.search(text)
+    if m:
+        return m.group(1).strip()
+    fence_re = re.compile(r"```\w*\s+([\w.\-]+\.\w+)\s*\n")
+    m = fence_re.search(text)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+_LANG_EXT_MAP: dict[str, str] = {
+    "python": ".py", "py": ".py",
+    "bash": ".sh", "sh": ".sh", "shell": ".sh",
+    "javascript": ".js", "js": ".js",
+    "typescript": ".ts", "ts": ".ts",
+    "json": ".json", "yaml": ".yaml", "yml": ".yaml",
+    "toml": ".toml", "cpp": ".cpp", "c": ".c",
+    "java": ".java", "ruby": ".rb", "go": ".go",
+    "rust": ".rs", "sql": ".sql", "r": ".r",
+}
+
+
+def _render_script_download() -> None:
+    """Render download button(s) for code block(s) in the last response.
+
+    Extracts all fenced code blocks from the last assistant message.
+    For each block, renders a ``st.download_button`` so the user can
+    save the script to their local machine directly from the browser.
+    No server-side file is written — the content is streamed to the
+    browser as a download.
+    """
+    messages = st.session_state.get("messages", [])
+    last_assistant = next(
+        (m["content"] for m in reversed(messages) if m["role"] == "assistant"),
+        None,
+    )
+    if not last_assistant:
+        return
+
+    blocks = _extract_code_blocks_st(last_assistant)
+    if not blocks:
+        return
+
+    suggested = _extract_suggested_filename_st(last_assistant)
+
+    for i, (lang, code) in enumerate(blocks):
+        ext = _LANG_EXT_MAP.get(lang, ".txt")
+        if suggested and i == 0:
+            fname = suggested
+        elif suggested and len(blocks) > 1:
+            base, orig_ext = suggested.rsplit(".", 1) if "." in suggested else (suggested, "")
+            fname = f"{base}_{i + 1}.{orig_ext or ext.lstrip('.')}"
+        else:
+            label = lang if lang else "script"
+            suffix = f"_{i + 1}" if len(blocks) > 1 else ""
+            fname = f"{label}{suffix}{ext}"
+
+        label_text = f"⬇ Download {fname}"
+        st.download_button(
+            label=label_text,
+            data=(code + "\n").encode("utf-8"),
+            file_name=fname,
+            mime="text/plain",
+            key=f"dl_script_{i}_{hash(code) & 0xFFFFFF}",
+        )
 
 
 def _render_rating_widget(mcp: MCPClientSync) -> None:
