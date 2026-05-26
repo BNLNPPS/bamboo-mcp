@@ -1773,8 +1773,8 @@ def _render_script_download() -> None:
         if suggested and i == 0:
             fname = suggested
         elif suggested and len(blocks) > 1:
-            base, orig_ext = suggested.rsplit(".", 1) if "." in suggested else (suggested, "")
-            fname = f"{base}_{i + 1}.{orig_ext or ext.lstrip('.')}"
+            base = suggested.rsplit(".", 1)[0] if "." in suggested else suggested
+            fname = f"{base}_{i + 1}{ext}"
         else:
             label = lang if lang else "script"
             suffix = f"_{i + 1}" if len(blocks) > 1 else ""
