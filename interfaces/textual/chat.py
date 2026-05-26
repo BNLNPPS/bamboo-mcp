@@ -2144,6 +2144,14 @@ class BambooTui(App):
         m = fence_re.search(text)
         if m:
             return m.group(1).strip()
+        # "Save the script as random_numbers.C" / "name it foo.py" etc.
+        save_re = _re.compile(
+            r"(?:save|name|call)\s.*?\bas\s+([\w.][\w.\-]*\.\w+)",
+            _re.IGNORECASE,
+        )
+        m = save_re.search(text)
+        if m:
+            return m.group(1).strip()
         return ""
 
     @staticmethod
@@ -2165,7 +2173,7 @@ class BambooTui(App):
             "json": ".json",
             "yaml": ".yaml", "yml": ".yaml",
             "toml": ".toml",
-            "cpp": ".cpp", "c++": ".cpp", "c": ".c",
+            "cpp": ".cpp", "c++": ".cpp", "c": ".c", "root": ".C",
             "java": ".java",
             "ruby": ".rb",
             "go": ".go",

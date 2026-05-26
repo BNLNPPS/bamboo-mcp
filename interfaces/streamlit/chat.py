@@ -1730,6 +1730,14 @@ def _extract_suggested_filename_st(text: str) -> str:
     m = fence_re.search(text)
     if m:
         return m.group(1).strip()
+    # "Save the script as random_numbers.C" / "name it foo.py" etc.
+    save_re = re.compile(
+        r"(?:save|name|call)\s.*?\bas\s+([\w.][\w.\-]*\.\w+)",
+        re.IGNORECASE,
+    )
+    m = save_re.search(text)
+    if m:
+        return m.group(1).strip()
     return ""
 
 
@@ -1739,7 +1747,7 @@ _LANG_EXT_MAP: dict[str, str] = {
     "javascript": ".js", "js": ".js",
     "typescript": ".ts", "ts": ".ts",
     "json": ".json", "yaml": ".yaml", "yml": ".yaml",
-    "toml": ".toml", "cpp": ".cpp", "c": ".c",
+    "toml": ".toml", "cpp": ".cpp", "c": ".c", "root": ".C",
     "java": ".java", "ruby": ".rb", "go": ".go",
     "rust": ".rs", "sql": ".sql", "r": ".r",
 }
