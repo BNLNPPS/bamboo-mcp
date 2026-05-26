@@ -1456,9 +1456,115 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
     # Chat input — must be the last widget
     question = st.chat_input(st.session_state.get("display_name", "Ask PanDA"))
     if question:
-        st.session_state["messages"].append({"role": "user", "content": question})
-        st.session_state["pending_question"] = question
-        st.rerun()
+        expanded_q, help_md = _expand_slash_command(question)
+        if help_md is not None:
+            # Display help inline without submitting to the MCP server.
+            st.session_state["messages"].append({"role": "user", "content": question})
+            st.session_state["messages"].append(
+                {"role": "assistant", "content": help_md}
+            )
+            st.rerun()
+        else:
+            submitted = expanded_q if expanded_q is not None else question
+            st.session_state["messages"].append(
+                {"role": "user", "content": question}
+            )
+            st.session_state["pending_question"] = submitted
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Slash-command expansion (Streamlit)
+# ---------------------------------------------------------------------------
+
+#: Displayed when the user types /help in the Streamlit chat input.
+_STREAMLIT_HELP = """**Bamboo slash commands**
+
+| Command | Description |
+|---|---|
+| `/help` | Show this help |
+| `/faq` | Most frequently asked questions — all time |
+| `/faq today` | Most frequently asked questions today |
+| `/faq week` | Most frequently asked questions this week |
+| `/faq month` | Most frequently asked questions this month |
+| `/task <id>` | Summarise status of task *id* |
+| `/job <id>` | Analyse failure of job *id* |
+
+For all other questions, type naturally — no slash needed.
+"""
+
+_TASK_CMD_RE_ST = re.compile(r"^/task\s+(\d+)\s*$", re.IGNORECASE)
+_JOB_CMD_RE_ST = re.compile(r"^/job\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:
+    """Expand a slash command into a question or a help string.
+
+    Returns a tuple ``(question, help_markdown)`` where exactly one element
+    is non-None.  If the input is not a slash command both elements are None
+    and the caller should treat it as a plain question.
+
+    Args:
+        raw: Raw text submitted by the user.
+
+    Returns:
+        ``(question, None)`` when the command maps to a question to submit,
+        ``(None, help_md)`` when the command should display help inline,
+        ``(None, None)`` when the input is not a slash command.
+    """
+    stripped = raw.strip()
+    if not stripped.startswith("/"):
+        return None, None
+
+    parts = stripped.split()
+    cmd = parts[0].lower()
+    args = parts[1:]
+
+    if cmd in ("/help", "/?"):
+        return None, _STREAMLIT_HELP
+
+    m_task = _TASK_CMD_RE_ST.match(stripped)
+    if m_task:
+        return (
+            f"Summarize the status of task {m_task.group(1)} including dataset info.",
+            None,
+        )
+
+    m_job = _JOB_CMD_RE_ST.match(stripped)
+    if m_job:
+        return (
+            f"Analyse the failure of job {m_job.group(1)} and explain why it failed.",
+            None,
+        )
+
+    if cmd == "/faq":
+        scope = args[0].lower() if args else ""
+        if scope == "today":
+            return (
+                "What are the most frequently asked questions in Bamboo today? "
+                "Use a terms aggregation on user_prompt.keyword filtered to gte:now/d.",
+                None,
+            )
+        if scope == "week":
+            return (
+                "What are the most frequently asked questions in Bamboo this week? "
+                "Use a terms aggregation on user_prompt.keyword filtered to gte:now-7d/d.",
+                None,
+            )
+        if scope == "month":
+            return (
+                "What are the most frequently asked questions in Bamboo this month? "
+                "Use a terms aggregation on user_prompt.keyword filtered to gte:now-30d/d.",
+                None,
+            )
+        return (
+            "What are the most frequently asked questions in Bamboo across all time? "
+            "Use a terms aggregation on user_prompt.keyword with no date filter.",
+            None,
+        )
+
+    # Unknown command — return a short inline error as help text
+    return None, f"❓ Unknown command `{cmd}`. Type `/help` for available commands."
 
 
 # ---------------------------------------------------------------------------
