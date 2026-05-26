@@ -63,6 +63,11 @@ except ValueError:
 _ANSWER_TOOL = "bamboo_answer"
 _DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
+#: Diagram rendering mode.  ``classic`` = one components.html iframe per
+#: diagram (stable).  ``single-iframe`` = all text + diagrams in one iframe
+#: (experimental, enables CSS-controlled layout).
+_DIAGRAM_MODE: str = os.getenv("BAMBOO_DIAGRAM_MODE", "classic").lower()
+
 # ---------------------------------------------------------------------------
 # Mermaid diagram support
 # ---------------------------------------------------------------------------
@@ -336,32 +341,78 @@ def _normalise_latex(text: str) -> str:
     return text
 
 
-def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
-    r"""Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
+# ---------------------------------------------------------------------------
+# Shared Mermaid JS snippets
+# ---------------------------------------------------------------------------
 
-    Uses :func:`streamlit.components.v1.html` with the Mermaid CDN rather than
-    the ``streamlit-mermaid`` component.  This gives full control over the
-    Mermaid ``initialize()`` config and allows a ``parseError`` handler that
-    shows a plain-text fallback instead of Mermaid's error graphic.
+_MERMAID_INIT_JS: str = """
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'default',
+    securityLevel: 'loose',
+    flowchart:   { useMaxWidth: true, htmlLabels: true,
+                   nodeSpacing: 40, rankSpacing: 50 },
+    stateDiagram:{ useMaxWidth: true, htmlLabels: false }
+  });
+"""
 
-    .. note::
-        ``st.iframe`` (the intended replacement for ``components.v1.html``)
-        accepts a URL ``src``, not raw HTML, so it cannot be used here.
-        ``components.v1.html`` remains the correct API for inline HTML blobs
-        until Streamlit provides a direct equivalent.
+_MERMAID_CDN: str = (
+    "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"
+)
 
-    Height is estimated using a diagram-type-aware heuristic (state diagrams
-    ~80 px/state, sequence ~30 px/line, others ~22 px/line) with
-    ``scrolling=True`` as a safety net.  The ``streamlit:setFrameHeight``
-    postMessage approach is not reliably honoured by Streamlit and is not
-    used.  A ``MutationObserver`` strips Mermaid's inline ``width``/``height``
-    SVG attributes after render so that CSS ``width: 100%`` takes effect.
 
-    Falls back silently when ``diagram_defs`` is empty.
+def _mermaid_height_estimate(defn: str) -> int:
+    """Estimate a reasonable iframe height for a Mermaid diagram.
+
+    Uses a diagram-type-aware heuristic because Mermaid inlines absolute
+    pixel dimensions on the SVG that cannot be overridden from outside the
+    iframe.  The estimate is intentionally generous; ``scrolling=True`` acts
+    as a safety net.
 
     Args:
-        diagram_defs: List of raw Mermaid definition strings (without fenced
-            block markers).
+        defn: Raw Mermaid definition string.
+
+    Returns:
+        Pixel height to pass to ``components.html(height=...)``.
+    """
+    first = defn.strip().splitlines()[0].lower() if defn.strip() else ""
+    if first.startswith("statediagram"):
+        _skip = ("%%", "statediagram", "[*]", "note", "direction")
+        state_count = sum(
+            1 for ln in defn.splitlines()
+            if ln.strip()
+            and not ln.strip().lower().startswith(_skip)
+            and "-->" not in ln
+            and ":" not in ln
+        )
+        return min(900, max(300, state_count * 80 + 150))
+    if first.startswith("sequencediagram"):
+        lc = sum(1 for ln in defn.splitlines() if ln.strip())
+        return min(900, max(300, lc * 30 + 100))
+    lc = sum(1 for ln in defn.splitlines() if ln.strip())
+    return min(700, max(250, lc * 22 + 80))
+
+
+def _render_mermaid_classic(diagram_defs: list[str]) -> None:
+    r"""Render Mermaid diagrams — one ``components.html`` iframe per diagram.
+
+    Uses ``mermaid.render()`` (Promise-based API) rather than
+    ``startOnLoad`` so we know exactly when rendering completes.  After
+    render, a ``MutationObserver`` strips Mermaid's inline ``width``/
+    ``height`` SVG attributes so that ``width: 100%`` CSS takes effect.
+    On parse error, Mermaid's logo graphic is suppressed and the raw
+    definition is shown in a plain ``<pre>`` block instead.
+
+    Height is estimated by :func:`_mermaid_height_estimate`.
+    ``scrolling=True`` is always enabled as a safety net.
+
+    .. note::
+        ``st.iframe`` accepts a URL ``src``, not raw HTML, so
+        ``components.v1.html`` remains the correct API for inline HTML
+        blobs until Streamlit provides a direct equivalent.
+
+    Args:
+        diagram_defs: Raw Mermaid definition strings (one per block).
     """
     if not diagram_defs:
         return
@@ -372,126 +423,201 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
         if len(diagram_defs) > 1:
             st.caption(f"Diagram {i + 1}")
 
-        # Height estimate by diagram type.
-        #
-        # Mermaid inlines an absolute pixel height on the SVG that our CSS
-        # cannot override from outside the iframe, so we must pass a good
-        # initial height to components.html().  The postMessage approach
-        # (streamlit:setFrameHeight) is not reliably honoured by Streamlit,
-        # so we use a type-aware heuristic instead and enable scrolling=True
-        # as a safety net for diagrams that exceed the estimate.
-        #
-        # State diagrams: count state definitions (lines starting with
-        # a word char that are not directives/transitions).
-        # Flowcharts / sequence / others: count non-empty lines.
-        first_line = defn.strip().splitlines()[0].lower() if defn.strip() else ""
-        if first_line.startswith("statediagram"):
-            # Each state ~ 80px tall in vertical layout; add padding.
-            _skip = ("%%", "stateDiagram", "[*]", "note", "direction")
-            state_count = sum(
-                1 for ln in defn.splitlines()
-                if ln.strip()
-                and not ln.strip().startswith(_skip)
-                and "-->" not in ln
-                and ":" not in ln
-            )
-            height_px = min(900, max(300, state_count * 80 + 150))
-        elif first_line.startswith("sequencediagram"):
-            line_count = sum(1 for ln in defn.splitlines() if ln.strip())
-            height_px = min(900, max(300, line_count * 30 + 100))
-        else:
-            line_count = sum(1 for ln in defn.splitlines() if ln.strip())
-            height_px = min(700, max(250, line_count * 22 + 80))
-
-        # Escape & for HTML; < > are valid Mermaid arrow syntax and must not
-        # be escaped.  Backtick labels (Mermaid v11 markdown strings) are
-        # passed through as-is — securityLevel:'loose' allows them.
+        height_px = _mermaid_height_estimate(defn)
         safe_defn = defn.replace("&", "&amp;")
+        uid = f"mermaid-{i}"
 
-        html = f"""
-<!DOCTYPE html>
+        html = f"""<!DOCTYPE html>
 <html>
 <head>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="{_MERMAID_CDN}"></script>
 <style>
   body {{ margin: 0; padding: 0; background: transparent; }}
-  #container {{
-    width: 100%;
-    background: white;
-    padding: 4px 8px;
-    box-sizing: border-box;
-  }}
-  .mermaid svg {{
-    width: 100% !important;
-    max-width: 100% !important;
-    height: auto !important;
-  }}
-  /* Hide Mermaid's own error graphic; we show a plain text fallback. */
-  #d{{display:none}}
+  #container {{ width: 100%; background: white; padding: 4px 8px;
+                box-sizing: border-box; }}
+  #container svg {{ width: 100% !important; max-width: 100% !important;
+                    height: auto !important; }}
+  #fallback {{ display:none; color:#c00; font-family:monospace;
+               font-size:13px; padding:8px; }}
 </style>
 </head>
 <body>
-<div id="container">
-  <div id="mermaid-diagram" class="mermaid">{safe_defn}</div>
-</div>
-<div id="fallback" style="display:none;color:#c00;font-family:monospace;font-size:13px;padding:8px">
-  ⚠ Diagram syntax error — raw definition:<br><pre>{safe_defn}</pre>
-</div>
+<div id="container"><div id="{uid}"></div></div>
+<div id="fallback">⚠ Diagram syntax error — raw definition:
+<pre>{safe_defn}</pre></div>
 <script>
-  mermaid.initialize({{
-    startOnLoad: true,
-    theme: 'default',
-    securityLevel: 'loose',
-    flowchart: {{
-      useMaxWidth: true,
-      htmlLabels: true,
-      nodeSpacing: 40,
-      rankSpacing: 50
-    }},
-    stateDiagram: {{
-      useMaxWidth: true,
-      htmlLabels: false
+{_MERMAID_INIT_JS}
+(async function() {{
+  try {{
+    const {{ svg }} = await mermaid.render("{uid}-svg", `{safe_defn}`);
+    const el = document.getElementById("{uid}");
+    el.innerHTML = svg;
+    const s = el.querySelector("svg");
+    if (s) {{
+      s.removeAttribute("width");
+      s.removeAttribute("height");
+      s.style.width  = "100%";
+      s.style.height = "auto";
     }}
-  }});
-
-  // After Mermaid renders, strip explicit width/height attrs it inlines on
-  // the SVG (they override CSS and cause oversized output), then report the
-  // actual rendered height to Streamlit so the iframe fits without guessing.
-  function _fixSvgAndResize() {{
-    var svg = document.querySelector(".mermaid svg");
-    if (!svg) return;
-    svg.removeAttribute("width");
-    svg.removeAttribute("height");
-    svg.style.width = "100%";
-    svg.style.height = "auto";
-    var h = document.body.scrollHeight;
-    window.parent.postMessage({{type:"streamlit:setFrameHeight", height: h}}, "*");
-  }}
-
-  // Show plain-text fallback when Mermaid reports a parse error.
-  mermaid.parseError = function(err) {{
-    document.getElementById("mermaid-diagram").style.display = "none";
+  }} catch(e) {{
+    document.getElementById("{uid}").style.display = "none";
     document.getElementById("fallback").style.display = "block";
-    var h = document.body.scrollHeight;
-    window.parent.postMessage({{type:"streamlit:setFrameHeight", height: h}}, "*");
-  }};
-
-  // MutationObserver fires once the SVG is injected by Mermaid.
-  var _obs = new MutationObserver(function() {{
-    if (document.querySelector(".mermaid svg")) {{
-      _obs.disconnect();
-      _fixSvgAndResize();
-    }}
-  }});
-  _obs.observe(document.body, {{childList: true, subtree: true}});
-
-  // Fallback: run after delay in case the observer fires before layout settles.
-  setTimeout(_fixSvgAndResize, 600);
+  }}
+}})();
 </script>
 </body>
-</html>
-"""
+</html>"""
         components.html(html, height=height_px, scrolling=True)
+
+
+def _render_mermaid_single_iframe(
+    diagram_defs: list[str],
+    markdown_text: str,
+) -> None:
+    r"""Render text and Mermaid diagrams together in a single iframe.
+
+    Experimental renderer enabled by ``BAMBOO_DIAGRAM_MODE=single-iframe``.
+    Laying text and SVG out in the same document gives full CSS control:
+
+    - **Portrait diagram** (naturalHeight > naturalWidth after render):
+      floated right at 38% width so prose wraps alongside it.
+    - **Landscape diagram**: full width, placed after the text.
+    - Multiple diagrams: all appended below the text section.
+
+    The iframe reports its total ``scrollHeight`` to Streamlit via
+    ``streamlit:setFrameHeight`` postMessage so the component auto-sizes.
+    A 500 px initial height is passed; Streamlit updates it once the
+    message arrives.
+
+    Falls back to :func:`_render_mermaid_classic` when ``diagram_defs``
+    is empty (nothing to lay out together).
+
+    Args:
+        diagram_defs: Raw Mermaid definition strings.
+        markdown_text: The assistant reply with Mermaid fences already
+            stripped (i.e. ``clean_answer`` from
+            :func:`_extract_mermaid_blocks`).
+    """
+    if not diagram_defs:
+        st.markdown(markdown_text)
+        return
+
+    import streamlit.components.v1 as components  # deferred import
+
+    # Escape the markdown for injection into a JS string literal.
+    # We hand it to marked.js for rendering inside the iframe.
+    md_escaped = (
+        markdown_text
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("${", "\\${")
+    )
+
+    # Build one render call per diagram.
+    diagram_js_array = "[" + ",".join(
+        f"`{d.replace('&', '&amp;').replace('`', chr(96))}`"
+        for d in diagram_defs
+    ) + "]"
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<script src="{_MERMAID_CDN}"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-size: 15px; line-height: 1.6; background: white; padding: 8px 12px; }}
+  #prose {{ overflow: hidden; }}
+  #prose h1,h2,h3 {{ margin: 0.6em 0 0.3em; font-weight: 600; }}
+  #prose p  {{ margin: 0.4em 0; }}
+  #prose ul,ol {{ margin: 0.4em 0 0.4em 1.4em; }}
+  #prose code {{ background:#f3f3f3; border-radius:3px; padding:1px 4px;
+                 font-size:0.88em; }}
+  #prose pre  {{ background:#f3f3f3; border-radius:4px; padding:8px;
+                 overflow-x:auto; }}
+  .diagram-wrap {{ margin: 12px 0; overflow: hidden; }}
+  .diagram-wrap.portrait {{ float: right; width: 38%;
+                            margin: 0 0 12px 16px; clear: right; }}
+  .diagram-wrap.landscape {{ width: 100%; clear: both; }}
+  .diagram-wrap svg {{ width: 100% !important; height: auto !important; }}
+  .diagram-error {{ color:#c00; font-family:monospace; font-size:12px;
+                    padding:6px; border:1px solid #fcc; border-radius:4px; }}
+  #clearfix {{ clear: both; }}
+</style>
+</head>
+<body>
+<div id="prose"></div>
+<div id="diagrams"></div>
+<div id="clearfix"></div>
+<script>
+{_MERMAID_INIT_JS}
+
+document.getElementById("prose").innerHTML = marked.parse(`{md_escaped}`);
+
+const defs = {diagram_js_array};
+
+(async function() {{
+  const container = document.getElementById("diagrams");
+  for (let i = 0; i < defs.length; i++) {{
+    const wrap = document.createElement("div");
+    wrap.className = "diagram-wrap";
+    container.appendChild(wrap);
+    try {{
+      const id = "mermaid-si-" + i;
+      const {{ svg }} = await mermaid.render(id, defs[i]);
+      wrap.innerHTML = svg;
+      const s = wrap.querySelector("svg");
+      if (s) {{
+        s.removeAttribute("width");
+        s.removeAttribute("height");
+        const vb = s.getAttribute("viewBox");
+        if (vb) {{
+          const parts = vb.split(" ").map(Number);
+          const nw = parts[2] || 1;
+          const nh = parts[3] || 1;
+          wrap.classList.add(nh > nw ? "portrait" : "landscape");
+        }} else {{
+          wrap.classList.add("landscape");
+        }}
+      }}
+    }} catch(e) {{
+      wrap.innerHTML =
+        "<div class=\\"diagram-error\\">⚠ Diagram error: " +
+        e.toString().replace(/</g,"&lt;") + "</div>";
+      wrap.classList.add("landscape");
+    }}
+  }}
+  // Report total height so Streamlit auto-sizes the iframe.
+  const h = document.body.scrollHeight + 24;
+  window.parent.postMessage({{type:"streamlit:setFrameHeight", height:h}}, "*");
+}})();
+</script>
+</body>
+</html>"""
+
+    components.html(html, height=500, scrolling=True)
+
+
+def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
+    """Dispatch to the active diagram renderer (classic or single-iframe).
+
+    In ``classic`` mode (default, ``BAMBOO_DIAGRAM_MODE=classic``) each
+    diagram is rendered in its own ``components.html`` iframe via
+    :func:`_render_mermaid_classic`.
+
+    In ``single-iframe`` mode (``BAMBOO_DIAGRAM_MODE=single-iframe``) this
+    function is a no-op — the call site in :func:`_render_chat` calls
+    :func:`_render_mermaid_single_iframe` directly, passing the markdown
+    text alongside the diagrams so they can share a single iframe.
+
+    Args:
+        diagram_defs: Raw Mermaid definition strings extracted by
+            :func:`_extract_mermaid_blocks`.
+    """
+    if _DIAGRAM_MODE == "single-iframe":
+        return  # handled at call site in _render_chat
+    _render_mermaid_classic(diagram_defs)
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +866,7 @@ def _init_session() -> None:
         "superuser": False,
         "superuser_warning": None,
         "last_diagrams": [],
+        "last_clean_answer": "",
         "trace_file": os.path.join(
             tempfile.gettempdir(), f"bamboo_streamlit_{os.getpid()}.jsonl"
         ),
@@ -1473,6 +1600,7 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
         # so follow-up context is not polluted with raw Mermaid syntax.
         clean_answer, diagram_defs = _extract_mermaid_blocks(answer)
         st.session_state["last_diagrams"] = diagram_defs
+        st.session_state["last_clean_answer"] = clean_answer
 
         # Collect spans (stdio only)
         spans: list[dict[str, Any]] = []
@@ -1535,8 +1663,18 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
 
     # After the last assistant reply: render diagrams, plot, detail expanders.
     if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
-        # Mermaid diagrams inline (Phase 1)
-        _render_mermaid_blocks(st.session_state.get("last_diagrams") or [])
+        # Mermaid diagrams — dispatch to the active renderer.
+        # In single-iframe mode the last st.markdown() call (inside the chat
+        # message loop above) has already rendered the clean text; the
+        # single-iframe renderer replaces it with a combined text+diagram
+        # iframe.  In classic mode _render_mermaid_blocks() is a no-op when
+        # there are no diagrams, so no extra guard is needed here.
+        _diagrams = st.session_state.get("last_diagrams") or []
+        if _DIAGRAM_MODE == "single-iframe" and _diagrams:
+            _clean = st.session_state.get("last_clean_answer", "")
+            _render_mermaid_single_iframe(_diagrams, _clean)
+        else:
+            _render_mermaid_blocks(_diagrams)
 
         _render_plot_expander(
             st.session_state["last_evidence"],

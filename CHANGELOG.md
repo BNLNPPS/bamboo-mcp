@@ -50,6 +50,17 @@ All notable changes to Bamboo are documented here.
   instead of arrow count, which overcounted for state diagrams and produced
   oversized iframes that pushed nodes below the visible area.  Mermaid CDN
   bumped from `@10` to `@11` for improved state diagram rendering.
+- **Streamlit: dual Mermaid renderer via ``BAMBOO_DIAGRAM_MODE``.** The
+  existing per-diagram ``components.html`` renderer is refactored into
+  ``_render_mermaid_classic()`` and now uses ``mermaid.render()``
+  (Promise API) instead of ``startOnLoad`` for precise post-render SVG
+  attribute cleanup.  A new experimental ``_render_mermaid_single_iframe()``
+  renderer (``BAMBOO_DIAGRAM_MODE=single-iframe``) places text and all
+  diagrams into a single iframe with CSS layout: portrait diagrams float
+  right at 38% width so prose wraps alongside them; landscape diagrams
+  span full width below the text.  ``_render_mermaid_blocks()`` dispatches
+  to the active mode; ``last_clean_answer`` is stored in session state so
+  the single-iframe renderer can access the stripped markdown text.
 - **Streamlit: Mermaid syntax errors show plain-text fallback.** Added a
   ``mermaid.parseError`` handler that hides the Mermaid error graphic and
   displays the raw diagram definition in a styled ``<pre>`` block instead,
