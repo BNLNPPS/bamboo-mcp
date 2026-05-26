@@ -337,7 +337,7 @@ def _normalise_latex(text: str) -> str:
 def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     r"""Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
 
-    Uses :func:`st.components.v1.html` with the Mermaid CDN rather than the
+    Uses :func:`st.iframe` with the Mermaid CDN rather than the
     ``streamlit-mermaid`` component.  This gives full control over the Mermaid
     ``initialize()`` config, in particular ``useMaxWidth: false``, which
     prevents svgPanZoom from scaling the diagram down to fit a narrow iframe
@@ -353,8 +353,6 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
         diagram_defs: List of raw Mermaid definition strings (without fenced
             block markers).
     """
-    import streamlit.components.v1 as components  # deferred import
-
     if not diagram_defs:
         return
 
@@ -416,7 +414,7 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
 </body>
 </html>
 """
-        components.html(html, height=height_px, scrolling=True)
+        st.iframe(html, height=height_px, scrolling=True)
 
 
 # ---------------------------------------------------------------------------

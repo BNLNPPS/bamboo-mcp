@@ -22,6 +22,20 @@ All notable changes to Bamboo are documented here.
   command, server and Streamlit startup, health-check verification, and a
   troubleshooting table for common failure modes.
 
+### Fixed
+
+- **Streamlit: `st.components.v1.html` deprecation.** Mermaid diagram
+  rendering now uses `st.iframe` instead of the deprecated
+  `st.components.v1.html`, which is removed after 2026-06-01.  The deferred
+  import of `streamlit.components.v1` is no longer needed and has been
+  removed.
+- **Prompt log: suppress 403 index-template spam.** `_ensure_index_template`
+  now detects `AuthorizationException(403)` responses, sets the
+  ``_template_applied`` flag to prevent retries, and logs at ``INFO`` rather
+  than ``WARNING``.  The OpenSearch ``pilot-monitor-agent`` user lacks
+  ``indices:admin/index_template/put`` permission; retrying on every server
+  start was pointless and noisy.  Document writes are unaffected.
+
 
 - **PanDA MCP OIDC token file support.** `panda_mcp_session.py` now reads
   the `id_token` field from the OIDC token cache file written by

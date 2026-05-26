@@ -517,8 +517,16 @@ _PROMPTLOG_TEMPLATE_NAME: str = "bamboomcp-promptlog"
 def _ensure_index_template(client: Any) -> None:
     """Apply the bamboomcp-promptlog index template if not yet applied.
 
-    Idempotent — skipped after the first successful call per process.
-    Failures are logged at WARNING level and do not abort the write.
+    Idempotent — skipped after the first successful call per process (or
+    after a permanent 403 permission error).
+
+    A 403 AuthorizationException means the OpenSearch user lacks
+    ``indices:admin/index_template/put`` permission.  Retrying would be
+    pointless, so the flag is set to suppress further attempts and the
+    failure is logged at INFO level rather than WARNING — it does not
+    affect document writes, only date-range mapping quality.
+
+    All other failures are logged at WARNING level and do not abort writes.
 
     Args:
         client: An authenticated :class:`opensearchpy.OpenSearch` client.
@@ -536,12 +544,23 @@ def _ensure_index_template(client: Any) -> None:
             "prompt_log: index template '%s' applied", _PROMPTLOG_TEMPLATE_NAME
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        logger.warning(
-            "prompt_log: failed to apply index template '%s': %s — "
-            "date range queries may not work if mapping was auto-detected as text",
-            _PROMPTLOG_TEMPLATE_NAME,
-            exc,
-        )
+        exc_str = str(exc)
+        if "403" in exc_str or "AuthorizationException" in exc_str:
+            # Permanent permission error — suppress future attempts and log
+            # quietly; document writes are unaffected.
+            _template_applied = True
+            logger.info(
+                "prompt_log: index template '%s' skipped (insufficient permissions) — "
+                "date range queries may not work if mapping was auto-detected as text",
+                _PROMPTLOG_TEMPLATE_NAME,
+            )
+        else:
+            logger.warning(
+                "prompt_log: failed to apply index template '%s': %s — "
+                "date range queries may not work if mapping was auto-detected as text",
+                _PROMPTLOG_TEMPLATE_NAME,
+                exc,
+            )
 
 
 def _write_document(doc: dict[str, Any]) -> None:
