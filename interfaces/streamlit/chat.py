@@ -337,11 +337,17 @@ def _normalise_latex(text: str) -> str:
 def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     r"""Render Mermaid diagram definitions inline using direct CDN Mermaid.js.
 
-    Uses :func:`st.iframe` with the Mermaid CDN rather than the
-    ``streamlit-mermaid`` component.  This gives full control over the Mermaid
-    ``initialize()`` config, in particular ``useMaxWidth: false``, which
-    prevents svgPanZoom from scaling the diagram down to fit a narrow iframe
-    (the root cause of text clipping in ``streamlit-mermaid``).
+    Uses :func:`streamlit.components.v1.html` with the Mermaid CDN rather than
+    the ``streamlit-mermaid`` component.  This gives full control over the
+    Mermaid ``initialize()`` config, in particular ``useMaxWidth: false``,
+    which prevents svgPanZoom from scaling the diagram down to fit a narrow
+    iframe (the root cause of text clipping in ``streamlit-mermaid``).
+
+    .. note::
+        ``st.iframe`` (the intended replacement for ``components.v1.html``)
+        accepts a URL ``src``, not raw HTML, so it cannot be used here.
+        ``components.v1.html`` remains the correct API for inline HTML blobs
+        until Streamlit provides a direct equivalent.
 
     The container div has ``overflow-x: auto`` so wide diagrams scroll
     horizontally rather than being compressed.  ``htmlLabels: true`` is set
@@ -355,6 +361,8 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     """
     if not diagram_defs:
         return
+
+    import streamlit.components.v1 as components  # deferred import
 
     for i, defn in enumerate(diagram_defs):
         if len(diagram_defs) > 1:
@@ -414,7 +422,7 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
 </body>
 </html>
 """
-        st.iframe(html, height=height_px, scrolling=True)
+        components.html(html, height=height_px, scrolling=True)
 
 
 # ---------------------------------------------------------------------------

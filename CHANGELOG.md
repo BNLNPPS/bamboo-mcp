@@ -24,11 +24,12 @@ All notable changes to Bamboo are documented here.
 
 ### Fixed
 
-- **Streamlit: `st.components.v1.html` deprecation.** Mermaid diagram
-  rendering now uses `st.iframe` instead of the deprecated
-  `st.components.v1.html`, which is removed after 2026-06-01.  The deferred
-  import of `streamlit.components.v1` is no longer needed and has been
-  removed.
+- **Streamlit: `st.components.v1.html` deprecation noted.** `st.iframe`
+  (the advertised replacement) accepts a URL `src`, not raw HTML, so it
+  cannot replace `components.v1.html` for inline Mermaid rendering.
+  A ``.. note::`` has been added to the docstring documenting this
+  constraint.  The call site is unchanged pending a Streamlit fix or
+  alternative approach.
 - **Prompt log: suppress 403 index-template spam.** `_ensure_index_template`
   now detects `AuthorizationException(403)` responses, sets the
   ``_template_applied`` flag to prevent retries, and logs at ``INFO`` rather
