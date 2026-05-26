@@ -1535,6 +1535,7 @@ _STREAMLIT_HELP = """**Bamboo slash commands**
 | `/rates week` | Rated responses this week |
 | `/rates month` | Rated responses this month |
 | `/rate <1-5>` | Rate the last response (1=very poor 🔴, 5=excellent 💚) |
+| `/script` | Download code block(s) from the last response |
 | `/task <id>` | Summarise status of task *id* |
 | `/job <id>` | Analyse failure of job *id* |
 
@@ -1649,6 +1650,14 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
             return None, "❓ Rating must be between 1 and 5."
         return f"__rate__{n}", None
 
+    if cmd == "/script":
+        return (
+            None,
+            "Use the **⬇ Download** button(s) below the last response "
+            "to save code block(s) to your computer. "
+            "The button appears automatically when the response contains a code block.",
+        )
+
     # Unknown command — return a short inline error as help text
     return None, f"❓ Unknown command `{cmd}`. Type `/help` for available commands."
 
@@ -1702,11 +1711,19 @@ def _extract_suggested_filename_st(text: str) -> str:
         Suggested filename or empty string.
     """
     label_re = re.compile(
-        r"(?:^|\n)\s*\*{0,2}(?:Script|File|Filename)\*{0,2}:\s*([\w.\-]+)"
-        r"(?=\s|$)",
-        re.IGNORECASE,
+        r"(?:^|[\n\r])[ \t]*\*{0,2}(?:Script|File|Filename)\*{0,2}:[ \t]*([\w.][\w.\-]*)"
+        r"[ \t]*(?:[\n\r]|$)",
+        re.IGNORECASE | re.UNICODE,
     )
     m = label_re.search(text)
+    if m:
+        return m.group(1).strip()
+    simple_re = re.compile(
+        r"(?:Script|File|Filename):\s*([\w.\-]+\.(?:py|sh|js|ts|cpp|c|java|go|rs|r|sql|yaml|yml|toml|json))"
+        r"\b",
+        re.IGNORECASE,
+    )
+    m = simple_re.search(text)
     if m:
         return m.group(1).strip()
     fence_re = re.compile(r"```\w*\s+([\w.\-]+\.\w+)\s*\n")

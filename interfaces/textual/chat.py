@@ -2117,12 +2117,24 @@ class BambooTui(App):
         import re as _re
         # "Script: foo.py", "File: foo.py", "Filename: foo.py"
         # with optional Markdown bold markers
+        # Match "Script: foo.py", "File: foo.py" etc. — allow any surrounding
+        # whitespace, Unicode separators, and optional Markdown bold markers.
         label_re = _re.compile(
-            r"(?:^|\n)\s*\*{0,2}(?:Script|File|Filename)\*{0,2}:\s*([\w.\-]+)"
-            r"(?=\s|$)",
-            _re.IGNORECASE,
+            r"(?:^|[\n\r])[ \t]*\*{0,2}(?:Script|File|Filename)\*{0,2}:[ \t]*([\w.][\w.\-]*)"
+            r"[ \t]*(?:[\n\r]|$)",
+            _re.IGNORECASE | _re.UNICODE,
         )
         m = label_re.search(text)
+        if m:
+            return m.group(1).strip()
+        # Also try a simpler fallback: any word that looks like a filename
+        # on a line by itself immediately after "Script" or "File"
+        simple_re = _re.compile(
+            r"(?:Script|File|Filename):\s*([\w.\-]+\.(?:py|sh|js|ts|cpp|c|java|go|rs|r|sql|yaml|yml|toml|json))"
+            r"\b",
+            _re.IGNORECASE,
+        )
+        m = simple_re.search(text)
         if m:
             return m.group(1).strip()
         # Code fence with inline filename: ```python calculate_pi.py
