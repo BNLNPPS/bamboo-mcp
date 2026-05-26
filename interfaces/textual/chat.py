@@ -1198,7 +1198,7 @@ class BambooTui(App):
 
         await self._dispatch_slash_command(cmdline)
 
-    async def _dispatch_slash_command(self, cmdline: str) -> None:
+    async def _dispatch_slash_command(self, cmdline: str) -> None:  # noqa: C901
         """Dispatch a slash command to the appropriate handler.
 
         Split out from :meth:`_handle_command` to keep cyclomatic complexity
@@ -1255,6 +1255,11 @@ class BambooTui(App):
         if cmd == "/superuser":
             self._cmd_superuser(args)
             return
+        if cmd == "/faq":
+            await self._handle_question(
+                "What are the most frequently asked questions in Bamboo today?"
+            )
+            return
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
     def _cmd_help(self) -> None:
@@ -1268,6 +1273,7 @@ class BambooTui(App):
             "  /json                 Show verbatim BigPanDA API response (raw server JSON)\n"
             "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
             "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
+            "  /faq                  Show most frequently asked questions from today's logs\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
