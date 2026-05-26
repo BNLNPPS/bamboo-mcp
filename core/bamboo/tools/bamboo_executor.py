@@ -1619,3 +1619,110 @@ class BambooPromptLogStatusTool:
 
 
 bamboo_promptlog_status_tool = BambooPromptLogStatusTool()
+
+
+class BambooPromptlogRateTool:
+    """MCP tool for rating a Bamboo prompt-log entry (1–5 stars).
+
+    Updates the ``rating`` field of an existing OpenSearch document using
+    the ``update`` API.  The ``index`` and ``doc_id`` are obtained from the
+    system panel notification shown after each indexed turn
+    (``index='…'`` and ``id='…'``).
+    """
+
+    @staticmethod
+    def get_definition() -> dict[str, Any]:
+        """Return the MCP tool definition for ``bamboo_promptlog_rate``.
+
+        Returns:
+            Tool definition dict compatible with MCP discovery.
+        """
+        return {
+            "name": "bamboo_promptlog_rate",
+            "description": (
+                "Rate a Bamboo LLM response by updating its OpenSearch prompt-log "
+                "document with a star rating (1–5). "
+                "1 = very poor (red), 5 = excellent (green). "
+                "Requires the index name and document id from the system panel "
+                "notification (e.g. index='bamboomcp-promptlog-2026.05.26' "
+                "id='abc123'). "
+                "Requires BAMBOO_OPENSEARCH_PROMPTLOG to be set."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "string",
+                        "description": (
+                            "OpenSearch index name, e.g. "
+                            "'bamboomcp-promptlog-2026.05.26'."
+                        ),
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "OpenSearch document _id from the system panel.",
+                    },
+                    "rating": {
+                        "type": "integer",
+                        "description": "Star rating 1 (very poor) to 5 (excellent).",
+                        "minimum": 1,
+                        "maximum": 5,
+                    },
+                },
+                "required": ["index", "doc_id", "rating"],
+                "additionalProperties": False,
+            },
+        }
+
+    async def call(self, arguments: dict[str, Any]) -> Any:
+        """Apply the star rating to the specified prompt-log document.
+
+        Args:
+            arguments: MCP tool argument dict with ``index``, ``doc_id``,
+                and ``rating`` keys.
+
+        Returns:
+            One-element MCP content list with a JSON confirmation or error.
+        """
+        from bamboo.llm.prompt_log import update_rating  # local import
+
+        index: str = arguments.get("index", "").strip()
+        doc_id: str = arguments.get("doc_id", "").strip()
+        rating_raw = arguments.get("rating")
+
+        if not index or not doc_id:
+            return text_content(json.dumps(
+                {"error": "Both 'index' and 'doc_id' are required."}
+            ))
+        try:
+            rating = int(rating_raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return text_content(json.dumps(
+                {"error": f"rating must be an integer 1–5, got {rating_raw!r}"}
+            ))
+
+        try:
+            resp = await asyncio.to_thread(
+                update_rating, index, doc_id, rating
+            )
+            result = resp.get("result", "?") if isinstance(resp, dict) else str(resp)
+            return text_content(json.dumps({
+                "rated": True,
+                "index": index,
+                "doc_id": doc_id,
+                "rating": rating,
+                "result": result,
+            }))
+        except ValueError as exc:
+            return text_content(json.dumps({"error": str(exc)}))
+        except RuntimeError as exc:
+            return text_content(json.dumps({"error": str(exc)}))
+        except ImportError:
+            return text_content(json.dumps(
+                {"error": "opensearch-py not installed: pip install opensearch-py"}
+            ))
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return text_content(json.dumps({"error": str(exc)}))
+
+
+bamboo_promptlog_rate_tool = BambooPromptlogRateTool()

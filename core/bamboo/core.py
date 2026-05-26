@@ -80,7 +80,7 @@ except ImportError:
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.bamboo_answer import bamboo_answer_tool
 from bamboo.tools.planner import bamboo_plan_tool
-from bamboo.tools.bamboo_executor import bamboo_last_evidence_tool, bamboo_promptlog_status_tool
+from bamboo.tools.bamboo_executor import bamboo_last_evidence_tool, bamboo_promptlog_status_tool, bamboo_promptlog_rate_tool
 from bamboo.tools.code_query import code_query_tool
 from bamboo.tools.opensearch_query import opensearch_query_tool
 from bamboo.tools.opensearch_promptlog_query import opensearch_promptlog_query_tool
@@ -98,6 +98,7 @@ TOOLS = {
     "bamboo_plan": bamboo_plan_tool,
     "bamboo_last_evidence": bamboo_last_evidence_tool,
     "bamboo_promptlog_status": bamboo_promptlog_status_tool,
+    "bamboo_promptlog_rate": bamboo_promptlog_rate_tool,
     "opensearch_query": opensearch_query_tool,
     "opensearch_promptlog_query": opensearch_promptlog_query_tool,
     "panda_doc_search": panda_doc_search_tool,

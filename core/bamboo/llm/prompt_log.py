@@ -182,6 +182,10 @@ _template_applied: bool = False
 #: at most 20 entries; oldest are discarded automatically.
 _event_log: deque[dict[str, Any]] = deque(maxlen=20)
 
+#: Stores the (index, doc_id) of the most recently indexed document so
+#: rating tools can locate the document without a search query.
+_last_doc_store: deque[tuple[str, str]] = deque(maxlen=1)
+
 
 def drain_events() -> list[dict[str, Any]]:
     """Return all buffered prompt-log events and clear the buffer.
@@ -199,6 +203,48 @@ def drain_events() -> list[dict[str, Any]]:
     events = list(_event_log)
     _event_log.clear()
     return events
+
+
+def get_last_doc_id() -> tuple[str, str] | None:
+    """Return ``(index, doc_id)`` of the most recently indexed document.
+
+    Used by rating tools to locate the correct document without a search.
+    Returns ``None`` when no document has been indexed in this process.
+
+    Returns:
+        Tuple of ``(index_name, doc_id)`` or ``None``.
+    """
+    return _last_doc_store[-1] if _last_doc_store else None
+
+
+def update_rating(index: str, doc_id: str, rating: int) -> dict[str, Any]:
+    """Update the ``rating`` field of an existing prompt-log document.
+
+    Calls the OpenSearch ``update`` API with a partial document.  Uses
+    the write credential (``BAMBOO_OPENSEARCH_PROMPTLOG``) since it
+    modifies an existing document.
+
+    Args:
+        index: Index name, e.g. ``bamboomcp-promptlog-2026.05.26``.
+        doc_id: OpenSearch document ``_id``.
+        rating: Integer rating 1–5.
+
+    Returns:
+        The raw OpenSearch update response dict.
+
+    Raises:
+        ValueError: If *rating* is not in the range 1–5.
+        RuntimeError: If ``BAMBOO_OPENSEARCH_PROMPTLOG`` is not set.
+        ImportError: If ``opensearch-py`` is not installed.
+    """
+    if not 1 <= rating <= 5:
+        raise ValueError(f"rating must be 1–5, got {rating!r}")
+    client = _create_os_client()
+    return client.update(
+        index=index,
+        id=doc_id,
+        body={"doc": {"rating": rating}},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +505,7 @@ _PROMPTLOG_TEMPLATE: dict = {
                 "system_prompt": {"type": "text"},
                 "user_prompt": {"type": "text"},
                 "response": {"type": "text"},
+                "rating": {"type": "integer"},
             }
         }
     },
@@ -535,6 +582,7 @@ def _write_document(doc: dict[str, Any]) -> None:
         logger.debug(msg)
         _notify("info", msg)
         _event_log.append({"turn": turn, "severity": "info", "message": msg})
+        _last_doc_store.append((index, doc_id))
         # Success — reset failure counter.
         _consecutive_failures = 0
     except ImportError:

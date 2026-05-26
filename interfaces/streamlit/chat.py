@@ -671,6 +671,8 @@ def _init_session() -> None:
         "pending_question": None,
         "promptlog_notices": [],
         "poll_promptlog": False,
+        "last_doc_id": None,   # (index, doc_id) of most recent indexed turn
+        "last_rating": None,   # rating submitted for that turn
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -813,6 +815,8 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
         st.session_state["last_raw"] = None
         st.session_state["last_tool"] = None
         st.session_state["last_diagrams"] = []
+        st.session_state["last_doc_id"] = None
+        st.session_state["last_rating"] = None
         st.rerun()
 
     with st.sidebar.expander("Tools registered on server"):
@@ -1282,6 +1286,13 @@ def _poll_promptlog_events(mcp: MCPClientSync) -> None:
             message = str(event.get("message", ""))
             if message:
                 notices.append((severity, message))
+                # Extract (index, doc_id) for the rating widget.
+                _m = re.search(
+                    r"index='([^']+)'.*?id='([^']+)'",
+                    message,
+                )
+                if _m:
+                    st.session_state["last_doc_id"] = (_m.group(1), _m.group(2))
         st.session_state["promptlog_notices"] = notices
     except Exception:  # pylint: disable=broad-exception-caught
         pass  # Never let observability polling affect the main response path.
@@ -1314,7 +1325,7 @@ def _render_promptlog_notices() -> None:
             st.toast(message, icon="✅")
 
 
-def _render_chat(mcp: MCPClientSync, transport: str) -> None:
+def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
     """Render the main chat panel.
 
     Handles the two-rerun pattern required by Streamlit:
@@ -1453,6 +1464,9 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
             if show_evidence_detail:
                 _render_raw_expander(st.session_state["last_raw"])
 
+        # Rating widget — shown after every assistant response.
+        _render_rating_widget(mcp)
+
     # Chat input — must be the last widget
     question = st.chat_input(st.session_state.get("display_name", "Ask PanDA"))
     if question:
@@ -1466,11 +1480,36 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:
             st.rerun()
         else:
             submitted = expanded_q if expanded_q is not None else question
-            st.session_state["messages"].append(
-                {"role": "user", "content": question}
-            )
-            st.session_state["pending_question"] = submitted
-            st.rerun()
+            if isinstance(submitted, str) and submitted.startswith("__rate__"):
+                try:
+                    rating_val = int(submitted.split("__rate__")[1])
+                    doc_ref = st.session_state.get("last_doc_id")
+                    tool_names = st.session_state.get("tool_names", [])
+                    if doc_ref and "bamboo_promptlog_rate" in tool_names:
+                        idx_name, doc_id = doc_ref
+                        raw = mcp.call_tool(
+                            "bamboo_promptlog_rate",
+                            {"index": idx_name, "doc_id": doc_id,
+                             "rating": rating_val},
+                        )
+                        parsed_r = json.loads(_extract_text(raw) or "{}")
+                        if not parsed_r.get("error"):
+                            st.session_state["last_rating"] = rating_val
+                    else:
+                        st.session_state["messages"].append(
+                            {"role": "assistant",
+                             "content": "No response to rate yet."}
+                        )
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+                st.rerun()
+            else:
+                st.session_state["messages"].append(
+                    {"role": "user", "content": question}
+                )
+                st.session_state["pending_question"] = submitted
+                st.session_state["last_rating"] = None
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1487,6 +1526,7 @@ _STREAMLIT_HELP = """**Bamboo slash commands**
 | `/faq today` | Most frequently asked questions today |
 | `/faq week` | Most frequently asked questions this week |
 | `/faq month` | Most frequently asked questions this month |
+| `/rate <1-5>` | Rate the last response (1=very poor 🔴, 5=excellent 💚) |
 | `/task <id>` | Summarise status of task *id* |
 | `/job <id>` | Analyse failure of job *id* |
 
@@ -1563,8 +1603,96 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:
             None,
         )
 
+    if cmd == "/rate":
+        scope = args[0] if args else ""
+        try:
+            n = int(scope)
+        except (ValueError, TypeError):
+            return None, "❓ Usage: `/rate <1-5>` — e.g. `/rate 4`"
+        if not 1 <= n <= 5:
+            return None, "❓ Rating must be between 1 and 5."
+        return f"__rate__{n}", None
+
     # Unknown command — return a short inline error as help text
     return None, f"❓ Unknown command `{cmd}`. Type `/help` for available commands."
+
+
+# ---------------------------------------------------------------------------
+# Star rating widget
+# ---------------------------------------------------------------------------
+
+#: Star labels per rating value, colour-coded via emoji.
+_RATING_STARS: dict[int, str] = {
+    1: "⭐",
+    2: "⭐⭐",
+    3: "⭐⭐⭐",
+    4: "⭐⭐⭐⭐",
+    5: "⭐⭐⭐⭐⭐",
+}
+
+#: Button labels with colour-coded text shown inside each star button.
+_RATING_LABELS: dict[int, str] = {
+    1: "🔴 1",
+    2: "🟠 2",
+    3: "🟡 3",
+    4: "🟢 4",
+    5: "💚 5",
+}
+
+
+def _render_rating_widget(mcp: MCPClientSync) -> None:
+    """Render the star rating widget below the last assistant response.
+
+    Displays five colour-coded buttons (1–5).  On click the rating is
+    submitted via ``bamboo_promptlog_rate`` and stored in session state so
+    the widget reflects the current value on the next render cycle.
+
+    Does nothing when:
+    - No document has been indexed yet (``last_doc_id`` is None).
+    - The ``bamboo_promptlog_rate`` tool is not registered on the server.
+
+    Args:
+        mcp: Connected MCP client.
+    """
+    doc_ref: tuple[str, str] | None = st.session_state.get("last_doc_id")
+    if doc_ref is None:
+        return
+    tool_names: list[str] = st.session_state.get("tool_names", [])
+    if "bamboo_promptlog_rate" not in tool_names:
+        return
+
+    current_rating: int | None = st.session_state.get("last_rating")
+    index, doc_id = doc_ref
+
+    st.markdown("**Rate this response:**")
+    cols = st.columns(5)
+    for i, col in enumerate(cols, start=1):
+        label = _RATING_LABELS[i]
+        # Highlight the selected star with a border via markdown.
+        selected = current_rating == i
+        btn_label = f"**{label}**" if selected else label
+        if col.button(btn_label, key=f"rate_{i}_{doc_id}", use_container_width=True):
+            try:
+                raw = mcp.call_tool(
+                    "bamboo_promptlog_rate",
+                    {"index": index, "doc_id": doc_id, "rating": i},
+                )
+                text = _extract_text(raw) or "{}"
+                parsed = json.loads(text)
+                if parsed.get("error"):
+                    st.error(f"Rating failed: {parsed['error']}", icon="🔴")
+                else:
+                    st.session_state["last_rating"] = i
+                    st.rerun()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                st.error(f"Rating error: {exc}", icon="🔴")
+
+    if current_rating is not None:
+        stars = _RATING_STARS.get(current_rating, str(current_rating))
+        labels = {1: "Very poor", 2: "Poor", 3: "Fair", 4: "Good", 5: "Excellent"}
+        st.caption(
+            f"Your rating: {stars} — {labels.get(current_rating, '')} ({current_rating}/5)"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ ANSWER_TOOL_CANDIDATES: List[str] = ["bamboo_answer", "askpanda_answer", "bamboo
 
 _TASK_CMD_RE = re.compile(r"^/task\s+(\d{1,12})\s*$", re.IGNORECASE)
 _JOB_CMD_RE = re.compile(r"^/job\s+(\d{1,12})\s*$", re.IGNORECASE)
+_RATE_CMD_RE = re.compile(r"^/rate\s+([1-5])\s*$", re.IGNORECASE)
 
 # Matches Markdown inline links: [label](url)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
@@ -559,6 +560,7 @@ class BambooTui(App):
         self._thinking_task: Optional[Any] = None  # Textual Timer for animated thinking indicator
         self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
         self._last_response_links: List[Tuple[str, str]] = []  # (label, url) pairs from last assistant response
+        self._last_rated_doc: tuple[str, str] | None = None  # (index, doc_id) for /rate
         # Session-level cost accumulators — updated after every completed request.
         self._session_input_tokens: int = 0
         self._session_output_tokens: int = 0
@@ -1196,7 +1198,50 @@ class BambooTui(App):
             )
             return
 
+        m_rate = _RATE_CMD_RE.match(cmdline.strip())
+        if m_rate:
+            await self._handle_rate_command(int(m_rate.group(1)))
+            return
+
         await self._dispatch_slash_command(cmdline)
+
+    async def _handle_rate_command(self, rating: int) -> None:
+        """Submit a star rating for the most recent response.
+
+        Args:
+            rating: Integer 1–5.
+        """
+        _STARS = {1: "★☆☆☆☆", 2: "★★☆☆☆", 3: "★★★☆☆", 4: "★★★★☆", 5: "★★★★★"}
+        if self._last_rated_doc is None:
+            self._write_system(
+                "No response to rate yet — ask a question first."
+            )
+            return
+        if "bamboo_promptlog_rate" not in self.tool_names:
+            self._write_system(
+                "bamboo_promptlog_rate tool not available — "
+                "is BAMBOO_OPENSEARCH_PROMPTLOG set on the server?"
+            )
+            return
+        index, doc_id = self._last_rated_doc
+        try:
+            res = await self._to_thread(
+                self.mcp.call_tool,
+                "bamboo_promptlog_rate",
+                {"index": index, "doc_id": doc_id, "rating": rating},
+            )
+            text = _extract_text(res) or "{}"
+            parsed = json.loads(text)
+            if parsed.get("error"):
+                self._write_system(f"Rating failed: {parsed['error']}")
+            else:
+                stars = _STARS.get(rating, str(rating))
+                self._write_system(
+                    f"Rated {stars} ({rating}/5) — "
+                    f"index={index!r} id={doc_id!r}"
+                )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._write_system(f"Rating error: {exc}")
 
     async def _dispatch_slash_command(self, cmdline: str) -> None:  # noqa: C901
         """Dispatch a slash command to the appropriate handler.
@@ -1293,6 +1338,7 @@ class BambooTui(App):
             "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
             "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
             "  /faq [today|week|month]  Most frequently asked questions (default: all time)\n"
+            "  /rate <1-5>           Rate the last response (1=poor, 5=excellent)\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
@@ -1792,6 +1838,14 @@ class BambooTui(App):
                         message = str(event.get("message", ""))
                         if not message:
                             continue
+                        # Extract (index, doc_id) so /rate can reference
+                        # the most recently indexed turn.
+                        _m = re.search(
+                            r"index='([^']+)'.*?id='([^']+)'",
+                            message,
+                        )
+                        if _m:
+                            self._last_rated_doc = (_m.group(1), _m.group(2))
                         if severity == "error":
                             self._write_error(message)
                         else:
