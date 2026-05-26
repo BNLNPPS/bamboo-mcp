@@ -1594,23 +1594,20 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
         return (
             f"Show all rated responses for {date_clause} as a markdown "
             "table sorted by rating descending. "
-            "Query opensearch_promptlog_query with max_hits=50, "
-            "query={bool:{must:["
-            "  {exists:{field:rating}},"
-            "  {range:{rating:{gte:1}}}"
-            "]}}, "
-            "source_fields=[@timestamp, turn_number, session_id, "
-            "model, tools_used, user_prompt, rating], "
-            "include _id in each hit. "
-            "Format as markdown table with these exact columns: "
-            "Doc ID (full _id value) | Time | Turn | "
-            "Session (first 8 chars) | Model | "
-            "Tools | Question (first 60 chars) | Rating. "
-            "The Doc ID column is critical — it is the only way to "
-            "retrieve the full response for a specific entry. "
-            "To fetch the full response for a row, use opensearch_query "
-            "with {\"query\":{\"ids\":{\"values\":[\"<_id>\"]}}} "
-            "and source_fields=[response, user_prompt].",
+            "Call the opensearch_promptlog_query tool. "
+            "Pass max_hits=50 as a separate argument. "
+            "Pass source_fields=[@timestamp,turn_number,session_id,"
+            "model,tools_used,user_prompt,rating] as a separate argument. "
+            "Pass this exact JSON as the query argument (nothing else): "
+            '{"bool":{"must":[{"exists":{"field":"rating"}},'
+            '{"range":{"rating":{"gte":1}}}]},'
+            '"sort":[{"rating":{"order":"desc"}}]} '
+            "Each hit includes _id automatically. "
+            "Format as markdown table: "
+            "Doc ID (full _id) | Time | Turn | Session (first 8 chars) "
+            "| Model | Tools | Question (first 60 chars) | Rating. "
+            "To fetch a full response for any row: use opensearch_query "
+            "with ids query on the Doc ID value.",
             None,
         )
 
