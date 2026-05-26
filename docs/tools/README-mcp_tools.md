@@ -67,6 +67,24 @@ These tools fetch and analyse PanDA Pilot source code from GitHub.
 
 ---
 
+## Self-observability tools
+
+These tools query Bamboo's own prompt/response log index in OpenSearch.
+
+| Tool | Description |
+|---|---|
+| `opensearch_query` | General-purpose read-only DSL query against any allowed OpenSearch index. Accepts `index_pattern`, `query` (JSON DSL string), `max_hits`, `source_fields`. |
+| `opensearch_promptlog_query` | Convenience wrapper pre-wired to `bamboomcp-promptlog-*`. Schema-aware: documents turn counts, session replay, FAQ analysis, tool usage, ratings. Uses `raw_question.keyword` for accurate frequency aggregations. |
+| `bamboo_promptlog_status` | Drains the server-side event ring buffer of OpenSearch write notifications (destructive read, delivered exactly once). Used by TUI and Streamlit to surface write confirmations. |
+| `bamboo_promptlog_rate` | Updates the `rating` field (1–5) on an existing prompt-log document via partial OpenSearch `update`. Uses the write credential (`BAMBOO_OPENSEARCH_PROMPTLOG`). |
+
+Environment variables: `ASKPANDA_OPENSEARCH` (read), `BAMBOO_OPENSEARCH_PROMPTLOG` (write),
+`BAMBOO_OPENSEARCH_ALLOWED_INDICES` (read allow-list, default: `atlas_harvesterworkers-*,bamboomcp-promptlog-*`).
+
+See [`docs/opensearch.md`](../opensearch.md) for the full schema, DSL examples, and rating query patterns.
+
+---
+
 ## Infrastructure tools
 
 | Tool | Document | Description |

@@ -458,6 +458,86 @@ All notable changes to Bamboo are documented here.
 
 
 
+### Added
+
+- **`/script [filename]` TUI command.**  Extracts fenced code blocks from the
+  last assistant response and writes them to the current working directory.
+  Filename resolution order: (1) user-supplied argument, (2) label in the
+  response body (`Script: foo.py`, `File: foo.py`, `Save the script as foo.C`,
+  code fence with inline filename), (3) auto-generated from language + timestamp.
+  Multiple blocks are written with numeric suffixes, each using its own detected
+  language extension (`.py`, `.cpp`, `.sh`, `.C`, etc.).  If the user supplies
+  a filename without an extension, the first block's language extension is appended
+  automatically.  Added to `/help`.
+
+- **Streamlit download button.**  `_render_script_download()` detects fenced code
+  blocks in the last assistant message and renders `st.download_button` for each.
+  File content is streamed directly to the browser — no server-side file is written.
+  Correct approach for browser-based deployment.  Suggested filename is honoured
+  using the same resolution order as the TUI `/script` command.
+
+- **`/script` in Streamlit slash commands.**  Typing `/script` in the Streamlit
+  chat input displays an explanation of the download button mechanism.
+
+### Fixed
+
+- **`/rates` missing entries (exists filter).**  `range:{rating:{gte:1}}` silently
+  skips documents where the `rating` field is absent.  Changed to
+  `exists:{field:rating}` so all rated documents are returned regardless of how the
+  field was mapped.  `max_hits` set explicitly to 50.
+
+- **`/rates` 400 parsing_exception.**  The submitted question was embedding `max_hits`
+  and `source_fields` inside the JSON query body, causing OpenSearch to return
+  `Unknown key for a START_OBJECT in [bool]`.  Rewrote the question text to label
+  each argument separately and provide the DSL body as a standalone JSON string.
+
+- **`/rates` showing only top entries.**  `user_prompt` (full synthesis prompt) was
+  included in `source_fields`, consuming large amounts of context window and causing
+  early truncation.  Replaced with `raw_question` (short original question).
+
+- **`/rates` wrong extensions on multi-block output.**  When `/script calc.py` was
+  used with a response containing multiple code blocks (Python + C++ + bash), all
+  subsequent blocks inherited the `.py` extension from the user-supplied filename
+  instead of using their own detected language extension.  Each block now uses its
+  own `_lang_to_extension` result for blocks after the first.
+
+- **`/script` missing extension when user omits it.**  `/script rnd` produced a file
+  named `rnd` with no extension.  If the user-supplied filename has no extension,
+  the first block's detected language extension is now appended automatically.
+
+- **`/script` not honouring "Save the script as X.C" pattern.**  The
+  `_extract_suggested_filename` function did not match the LLM's common phrasing
+  *"Save the script as random_numbers.C"*.  Added a `save_re` pattern matching
+  `save/name/call ... as <filename.ext>` (case-insensitive) as a fourth extraction
+  strategy, after `Script:/File:` labels and inline fence filenames.
+
+- **ROOT `.C` extension missing.**  Added `"root": ".C"` to both the TUI
+  `_lang_to_extension` map and the Streamlit `_LANG_EXT_MAP` so ROOT macro
+  code blocks get the correct `.C` extension in auto-named output.
+
+- **`/rates` and "show me all the rates" misrouted to PanDA jobs.**  Promptlog
+  routing was checked after the topic guard, which could substitute the original
+  question with a prior PanDA-domain turn (context bleed).  Moved
+  `_is_promptlog_question` into `_run_fast_path_intercepts`, before the topic
+  guard, so the original question text is always used.
+
+- **Rating vocabulary not in routing signals.**  "Show me all the rates from today"
+  was misrouted to PanDA job tools because "rates" is ambiguous.  Added `rating`,
+  `ratings`, `rated`, `star rating`, `lowest rated`, `highest rated`, `average
+  rating` to `_PROMPTLOG_SIGNALS`, `_PROMPTLOG_PHRASES`, and `topic_guard`
+  `_ALLOW_TERMS`.
+
+- **`raw_question.keyword` for accurate FAQ aggregations.**  `user_prompt` contains
+  the full synthesis context (question + evidence) and is unique per turn even for
+  identical questions — aggregating on `user_prompt.keyword` produces no useful
+  frequency data.  Added `raw_question: str | None` to `log_prompt()` and threaded
+  it from `execute_plan()` via `call_llm()`.  `raw_question` stores the user's
+  original typed question and its `.keyword` sub-field enables correct `terms`
+  aggregations for `/faq`.  Updated all FAQ examples and `/faq` command text to
+  use `raw_question.keyword`.
+
+
+
 ## v1.0.7 — 2026-05-15
 
 ### Added

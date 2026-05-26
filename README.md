@@ -7,17 +7,16 @@ experiment operations, and CGSim distributed computing simulation.
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (May 2026):** core infrastructure is stable. The ATLAS plugin
-> includes `cric_query` for natural-language queries against the CRIC Computing
-> Resource Information Catalogue. The AskCGSim plugin provides documentation
-> search (RAG + BM25) and `cgsim.sim_query` for natural-language queries
-> against the CGSim simulation output SQLite database. Recent additions:
-> Mermaid diagram rendering in Streamlit, superuser / developer mode
-> (`BAMBOO_SUPERUSER_PASSWORD`), and the `code_query` developer tool for
-> on-demand source code fetch, review, and algorithm explanation with
-> optional Mermaid diagram output. `code_query` targets any GitHub
-> repository (configured via `BAMBOO_CODE_QUERY_REPO`); PanDA Pilot 3
-> is the default.
+> **Status (May 2026):** core infrastructure is stable. Recent additions include
+> full OpenSearch self-observability — Bamboo logs every prompt/response turn and
+> can query its own logs for FAQ analysis, session replay, tool-usage analytics,
+> and per-model token cost breakdowns. Users can rate responses (1–5 stars) from
+> both the TUI (`/rate N`) and Streamlit (star buttons). LaTeX formulas render
+> natively in Streamlit. Slash commands (`/faq`, `/rates`, `/script`, `/rate`)
+> are available in both interfaces. The `code_query` developer tool fetches and
+> analyses source files from any GitHub repository (`BAMBOO_CODE_QUERY_REPO`);
+> the `cric_query` tool answers natural-language questions about ATLAS queue and
+> site configuration; `cgsim.sim_query` queries CGSim simulation output.
 
 ---
 
@@ -187,6 +186,10 @@ Type any question and press Enter.
 | `/help` | Show all commands |
 | `/task <id>` | Shorthand for "summarise task \<id\>" |
 | `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
+| `/faq [today\|week\|month]` | Most frequently asked questions from prompt logs (default: all time) |
+| `/rates [today\|week\|month]` | Rated responses as a markdown table (default: all time) |
+| `/rate <1-5>` | Rate the last response (1 = poor 🔴, 5 = excellent 💚) |
+| `/script [filename]` | Write code block(s) from the last response to a local file |
 | `/tracing` | Show timing and trace spans for the last request |
 | `/costs` | Show estimated LLM token cost for the last request |
 | `/json` | Show raw BigPanDA JSON for the last query |
@@ -204,6 +207,50 @@ Type any question and press Enter.
 Hold **Option** (macOS) or **Shift** (Linux/Windows) to select text with the mouse.
 
 See [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) for ready-to-paste test questions.
+
+---
+
+## Streamlit slash commands
+
+All slash commands are available in the Streamlit chat input box too:
+
+| Command | What it does |
+|---|---|
+| `/help` or `/?` | Show available commands inline |
+| `/faq [today\|week\|month]` | Most frequently asked questions from prompt logs |
+| `/rates [today\|week\|month]` | Rated responses as a markdown table |
+| `/rate <1-5>` | Rate the last response |
+| `/script` | Show instructions for downloading code blocks |
+| `/task <id>` | Shorthand for "summarise task \<id\>" |
+| `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
+
+The Streamlit interface also shows **⬇ Download** button(s) automatically below
+any response that contains a fenced code block, and **star rating buttons**
+(🔴 1 – 💚 5) after every response. No slash command is needed for either.
+
+---
+
+## Self-observability
+
+Bamboo logs every prompt/response turn to an OpenSearch index
+(`bamboomcp-promptlog-YYYY.MM.DD`). The following questions are answered
+directly from the prompt log without touching PanDA or documentation tools:
+
+- "How many turns have I had today?"
+- "What are the most frequently asked questions?" → `/faq`
+- "Show all rated responses this week" → `/rates week`
+- "Which tools were used most often today?"
+- "Show me the full response for doc id `<id>`"
+- "What is the average rating per model?"
+
+Ratings (1–5 stars) are stored on each logged document and queryable via
+`opensearch_promptlog_query`. See [`docs/opensearch.md`](docs/opensearch.md)
+for the full schema, DSL query examples, and architecture diagram.
+
+The `raw_question` field stores the user's original question as typed — use
+`raw_question.keyword` for accurate frequency aggregations (FAQ analysis).
+The `user_prompt` field stores the full synthesis prompt (question + evidence
+context) and is unsuitable for frequency analysis.
 
 ---
 
@@ -257,7 +304,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
-| [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — harvester timeseries, prompt logging, GDPR pseudonymisation |
+| [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — prompt logging, read queries, self-observability, rating, GDPR pseudonymisation |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
 | [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions, including code review question patterns and `code_query` examples |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
