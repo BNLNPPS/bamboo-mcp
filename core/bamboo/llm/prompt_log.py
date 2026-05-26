@@ -503,6 +503,7 @@ _PROMPTLOG_TEMPLATE: dict = {
                 "input_tokens": {"type": "integer"},
                 "output_tokens": {"type": "integer"},
                 "system_prompt": {"type": "text"},
+                "raw_question": {"type": "text"},
                 "user_prompt": {"type": "text"},
                 "response": {"type": "text"},
                 "rating": {"type": "integer"},
@@ -631,6 +632,7 @@ async def log_prompt(
     max_tokens: int,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    raw_question: str | None = None,
 ) -> None:
     """Fire-and-forget: build a redacted document and ship it to OpenSearch.
 
@@ -649,6 +651,10 @@ async def log_prompt(
         system_prompt: The system prompt string for this call, before redaction.
         user_prompt: The synthesised user prompt for this call (contains the
             question and injected evidence), before redaction.
+        raw_question: The user's original question as typed, before synthesis
+            prompt construction.  Stored as a ``keyword`` field to enable
+            accurate frequency aggregations (``raw_question.keyword``).
+            When ``None`` the field is omitted from the document.
         response: Raw LLM response text, before redaction.
         tools_used: Names of the MCP tools called during this turn (e.g.
             ``["cric_query"]``).
@@ -677,6 +683,7 @@ async def log_prompt(
         "max_tokens": max_tokens,
         "system_prompt": redact_names(system_prompt),
         "user_prompt": redact_names(user_prompt),
+        **({"raw_question": raw_question} if raw_question is not None else {}),
         "response": redact_names(response),
         "tools_used": tools_used,
         "input_tokens": input_tokens,

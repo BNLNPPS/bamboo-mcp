@@ -664,6 +664,7 @@ async def call_llm(
     history: list[Message] | None = None,
     max_tokens: int = 2048,
     tools_used: list[str] | None = None,
+    raw_question: str | None = None,
 ) -> str:
     """Call the default LLM with a system + user prompt and return the text.
 
@@ -725,6 +726,7 @@ async def call_llm(
                 max_tokens=max_tokens,
                 input_tokens=None,
                 output_tokens=None,
+                raw_question=raw_question,
             ),
             name="bamboo.prompt_log",
         )
@@ -1322,6 +1324,7 @@ async def execute_plan(
             system, user, history,
             max_tokens=synthesis_max_tokens,
             tools_used=called_tool_names,
+            raw_question=original_question if original_question else question,
         )
 
     # For log analysis: strip any LLM-invented Links section and append the

@@ -1599,8 +1599,7 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
             "Pass source_fields=[@timestamp,turn_number,session_id,"
             "model,tools_used,user_prompt,rating] as a separate argument. "
             "Pass this exact JSON as the query argument (nothing else): "
-            '{"query":{"bool":{"must":[{"exists":{"field":"rating"}},'
-            '{"range":{"rating":{"gte":1}}}]}},'
+            '{"query":{"exists":{"field":"rating"}},'
             '"sort":[{"rating":{"order":"desc"}}]} '
             "Each hit includes _id automatically. "
             "Format as markdown table: "
@@ -1616,24 +1615,24 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
         if scope == "today":
             return (
                 "What are the most frequently asked questions in Bamboo today? "
-                "Use a terms aggregation on user_prompt.keyword filtered to gte:now/d.",
+                "Use a terms aggregation on raw_question.keyword filtered to gte:now/d.",
                 None,
             )
         if scope == "week":
             return (
                 "What are the most frequently asked questions in Bamboo this week? "
-                "Use a terms aggregation on user_prompt.keyword filtered to gte:now-7d/d.",
+                "Use a terms aggregation on raw_question.keyword filtered to gte:now-7d/d.",
                 None,
             )
         if scope == "month":
             return (
                 "What are the most frequently asked questions in Bamboo this month? "
-                "Use a terms aggregation on user_prompt.keyword filtered to gte:now-30d/d.",
+                "Use a terms aggregation on raw_question.keyword filtered to gte:now-30d/d.",
                 None,
             )
         return (
             "What are the most frequently asked questions in Bamboo across all time? "
-            "Use a terms aggregation on user_prompt.keyword with no date filter.",
+            "Use a terms aggregation on raw_question.keyword with no date filter.",
             None,
         )
 

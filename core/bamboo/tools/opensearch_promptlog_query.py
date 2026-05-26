@@ -61,6 +61,7 @@ DEFAULT_SOURCE_FIELDS: list[str] = [
     "tools_used",
     "input_tokens",
     "output_tokens",
+    "raw_question",
 ]
 
 
@@ -104,9 +105,12 @@ class OpenSearchPromptlogQueryTool:
                 "  input_tokens  (integer)  input token count (null if unavailable)\n"
                 "  output_tokens (integer)  output token count (null if unavailable)\n"
                 "  system_prompt (text)     redacted system prompt (large; omitted by default)\n"
-                "  user_prompt   (text+keyword) redacted synthesis prompt — use "
-                "user_prompt.keyword for aggregations/terms, user_prompt for "
-                "full-text search\n"
+                "  raw_question  (text+keyword) the user's original question as typed "
+                "(not redacted, not surrounded by context). "
+                "USE raw_question.keyword for FAQ frequency aggregations — "
+                "this is the correct field, not user_prompt.keyword.\n"
+                "  user_prompt   (text) redacted synthesis prompt including "
+                "evidence context (large; omitted by default)\n"
                 "  response      (text)     redacted LLM response (large; "
                 "omitted by default)\n"
                 "  NOTE: there is no user_id field.  session_id identifies a "
@@ -150,12 +154,13 @@ class OpenSearchPromptlogQueryTool:
                 "   exist, the field may be mapped as text (index created before the "
                 "   template was applied).  In that case try "
                 "   {\"term\":{\"session_id.keyword\":\"<uuid>\"}} as a fallback.\n"
-                "   text fields (user_prompt, response, system_prompt) CANNOT be "
-                "   used in terms aggregations directly — you MUST use the .keyword "
-                "   sub-field or results will be wrong: user_prompt.keyword, "
-                "   response.keyword.  This is the most common mistake — "
-                "   user_prompt aggregations without .keyword return token buckets "
-                "   (individual words) instead of full questions.\n"
+                "   For FAQ frequency queries ALWAYS use raw_question.keyword "
+                "   (not user_prompt.keyword — user_prompt contains the full "
+                "   synthesis context and is unique per turn even for the same "
+                "   question).  raw_question is the user's original typed question, "
+                "   stored as keyword, ideal for terms aggregations.\n"
+                "   text fields (user_prompt, response, system_prompt) cannot be "
+                "   used in terms aggregations at all.\n"
                 "5. The id= value shown in the TUI system panel after each turn "
                 "   (e.g. id='5rNAUJ4By913oBqgRMjO') is the OpenSearch document _id, "
                 "   NOT the session_id.  To replay a session, use the UUID-format "
@@ -213,14 +218,14 @@ class OpenSearchPromptlogQueryTool:
                 r'"aggs":{"count":{"value_count":{"field":"turn_number"}}},"size":0}'
                 "\n"
                 r'  Most frequently asked questions all time'
-                "  (MUST use user_prompt.keyword not user_prompt):\n"
-                r'    {"aggs":{"faq":{"terms":{"field":"user_prompt.keyword",'
+                "  (use raw_question.keyword):\n"
+                r'    {"aggs":{"faq":{"terms":{"field":"raw_question.keyword",'
                 r'"size":20}}},"size":0}'
                 "\n"
                 r'  Most frequently asked questions today:'
                 "\n"
                 r'    {"query":{"range":{"@timestamp":{"gte":"now/d"}}},'
-                r'"aggs":{"faq":{"terms":{"field":"user_prompt.keyword",'
+                r'"aggs":{"faq":{"terms":{"field":"raw_question.keyword",'
                 r'"size":20}}},"size":0}'
                 "\n"
                 r'  Show recent turns including what was asked (display — no size:0):'

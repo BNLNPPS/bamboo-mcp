@@ -1320,8 +1320,7 @@ class BambooTui(App):
                 "Pass source_fields=[@timestamp,turn_number,session_id,"
                 "model,tools_used,user_prompt,rating] as a separate argument. "
                 "Pass this exact JSON as the query argument (nothing else): "
-                '{"query":{"bool":{"must":[{"exists":{"field":"rating"}},'
-                '{"range":{"rating":{"gte":1}}}]}},'
+                '{"query":{"exists":{"field":"rating"}},'
                 '"sort":[{"rating":{"order":"desc"}}]} '
                 "Each hit includes _id automatically. "
                 "Format as markdown table with these exact columns: "
@@ -1341,22 +1340,22 @@ class BambooTui(App):
             if scope == "today":
                 faq_q = (
                     "What are the most frequently asked questions in Bamboo today? "
-                    "Use a terms aggregation on user_prompt.keyword filtered to gte:now/d."
+                    "Use a terms aggregation on raw_question.keyword filtered to gte:now/d."
                 )
             elif scope == "week":
                 faq_q = (
                     "What are the most frequently asked questions in Bamboo this week? "
-                    "Use a terms aggregation on user_prompt.keyword filtered to gte:now-7d/d."
+                    "Use a terms aggregation on raw_question.keyword filtered to gte:now-7d/d."
                 )
             elif scope == "month":
                 faq_q = (
                     "What are the most frequently asked questions in Bamboo this month? "
-                    "Use a terms aggregation on user_prompt.keyword filtered to gte:now-30d/d."
+                    "Use a terms aggregation on raw_question.keyword filtered to gte:now-30d/d."
                 )
             else:
                 faq_q = (
                     "What are the most frequently asked questions in Bamboo across all time? "
-                    "Use a terms aggregation on user_prompt.keyword with no date filter."
+                    "Use a terms aggregation on raw_question.keyword with no date filter."
                 )
             await self._handle_question(faq_q)
             return
