@@ -336,6 +336,128 @@ All notable changes to Bamboo are documented here.
 
 
 
+### Added
+
+- **OpenSearch prompt-log self-observability and analytics.**  Bamboo can now
+  answer questions about its own usage — turn counts, session replay, FAQ
+  analysis, tool call frequency, model/provider breakdowns — by querying the
+  `bamboomcp-promptlog-*` index directly from the TUI or Streamlit.
+
+  - **`bamboo_promptlog_rate` MCP tool.**  Rates a logged response (1–5 stars)
+    by applying a partial `update` to the existing OpenSearch document.
+    `prompt_log.py` gains `_last_doc_store` (deque maxlen=1),
+    `get_last_doc_id()`, and `update_rating(index, doc_id, rating)`.
+    The `rating` field (integer, nullable) is included in the index template
+    mapping.  Uses the write credential (`BAMBOO_OPENSEARCH_PROMPTLOG`).
+
+  - **`prompt_log.py` — index mapping and timestamp fixes.**
+    `_ensure_index_template()` applies a `bamboomcp-promptlog` index template
+    on the first write of each process, ensuring `@timestamp` is always mapped
+    as `date` (not auto-detected as `text`).  This fixes date-range queries
+    such as `gte:now/d` that silently returned zero results when the mapping
+    was wrong.  Timestamps changed from `isoformat()+00:00` to explicit
+    `Z`-suffix `strftime` format (`strict_date_optional_time` canonical form).
+    Notification messages now include `session=` so the UUID is visible
+    directly in the TUI system panel for use in session-replay queries.
+
+  - **Promptlog fast-path routing in `bamboo_answer.py`.**
+    `_is_promptlog_question()` detects self-observability queries
+    (FAQ, session replay, tool-usage analytics, turn counts, model queries)
+    and routes them directly to `opensearch_promptlog_query` via a new rule 7
+    in `_build_deterministic_plan`, before the doc-search RAG fallback (which
+    becomes rule 8).  `_build_promptlog_plan()` helper extracted consistent
+    with `_build_code_query_plan`.  `# noqa: C901` added to
+    `_build_deterministic_plan` (intentional dispatcher).
+
+  - **Topic guard self-observability terms.**  `topic_guard.py` gains a
+    `# Bamboo self-observability` block in `_ALLOW_TERMS` covering `session`,
+    `turns`, `bamboo`, `opensearch`, `which model`, `tool usage`, `faq`, and
+    related phrases.  These now fast-path to `keyword_allow` without invoking
+    the LLM classifier, preventing prompt-log queries from being incorrectly
+    rejected as off-topic.
+
+  - **`opensearch_promptlog_query` description improvements.**  Accumulated
+    fixes to the LLM-facing tool description across multiple iterations:
+    OpenSearch date-math rules (`now/d`, `now-7d/d`); `size:0` rules
+    (display queries must omit `size`; aggregation-only queries use
+    `size:0 + source_fields=[]`); `total` field semantics (pre-size-limit
+    document count, not value_count result); `session_id.keyword` fallback
+    for indices created before the template; mandatory `user_prompt.keyword`
+    for terms aggregations (without `.keyword` the field is tokenised,
+    producing word-level buckets instead of full-question buckets);
+    multi-user deployment note (cross-session queries must omit
+    `session_id` filter); explicit FAQ examples.
+
+- **LaTeX formula rendering in Streamlit.**  `_normalise_latex()` in
+  `interfaces/streamlit/chat.py` converts common LLM LaTeX delimiter styles
+  (`\[ \]`, `\( \)`, bare `[ ]` with a backslash in the content) to the
+  `$$...$$` / `$...$` forms that Streamlit's built-in KaTeX renderer
+  understands.  Applied to every assistant message before `st.markdown()`.
+  No new dependencies — KaTeX is bundled in Streamlit.
+  12 unit tests in `tests/test_normalise_latex.py`.
+
+- **Slash commands — TUI.**  New commands added to `/help`:
+
+  | Command | Action |
+  |---|---|
+  | `/faq [today\|week\|month]` | Most frequently asked questions from prompt logs; default scope is all time |
+  | `/rate <1-5>` | Rate the most recent response; submits `bamboo_promptlog_rate` with the `(index, doc_id)` extracted from the last notification |
+
+  `/rate` confirmation displays `★☆☆☆☆`–`★★★★★` stars inline.
+
+- **Slash commands — Streamlit.**  `_expand_slash_command()` intercepts slash
+  commands at the `st.chat_input` level before submission to the MCP server.
+  `/help` and unknown commands render as inline assistant messages with no
+  server round-trip.  Commands supported:
+
+  | Command | Action |
+  |---|---|
+  | `/help`, `/?` | Formatted markdown command reference |
+  | `/faq [today\|week\|month]` | Most frequently asked questions |
+  | `/task <id>` | Summarise task status |
+  | `/job <id>` | Analyse job failure |
+  | `/rate <1-5>` | Rate the last response |
+
+- **Star rating widget — Streamlit.**  `_render_rating_widget()` displays five
+  colour-coded buttons below each assistant response: 🔴 1, 🟠 2, 🟡 3, 🟢 4,
+  💚 5.  Clicking submits `bamboo_promptlog_rate` and reruns; the selected star
+  is shown bold and a caption confirms the rating (e.g. "Your rating: ⭐⭐⭐⭐
+  — Good (4/5)").  Widget is suppressed when `bamboo_promptlog_rate` is not
+  registered on the server or no document has been indexed yet.
+  `(index, doc_id)` is extracted from `bamboo_promptlog_status` notification
+  events and stored in `st.session_state["last_doc_id"]`.
+
+### Fixed
+
+- **Prompt-log queries routing to RAG instead of OpenSearch.**  Questions such
+  as *"show me the frequently asked questions"*, *"how many turns today?"*, and
+  *"what was the last question I asked?"* were falling through to the doc-search
+  fallback because `_build_deterministic_plan` had no promptlog routing rule.
+  Fixed by the new rule 7 described above.
+
+- **FAQ aggregation returning wrong counts.**  `terms` aggregations on the
+  `user_prompt` field (a `text` type) bucket on individual tokens rather than
+  full question strings, causing *"What is PanDA?"* (asked 4 times) to appear
+  as three separate single-occurrence buckets.  Fixed by enforcing
+  `user_prompt.keyword` in the tool description and in the `/faq` command
+  question text.
+
+- **Session replay and turn queries returning zero results.**  Two causes:
+  (1) The `@timestamp` field was auto-mapped as `text` on indices created
+  before the template fix, silently breaking `range`/date-math queries.
+  Fixed by the index template.  (2) `term:{session_id:...}` queries returned
+  zero on such indices because `session_id` was also mapped as `text`.
+  `session_id.keyword` fallback documented in the tool description.
+
+- **`test_superuser_guard.py` failures when run after `test_normalise_latex`.**
+  `_import_normalise_latex` was leaving `interfaces.shared` stubbed as a plain
+  `types.ModuleType` in `sys.modules`, causing subsequent imports of
+  `interfaces.shared.superuser_guard` to return `MagicMock` objects.  Fixed by
+  wrapping stub injection in a `try/finally` that restores `sys.modules` to its
+  original state after the import.
+
+
+
 ## v1.0.7 — 2026-05-15
 
 ### Added

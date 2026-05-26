@@ -362,3 +362,109 @@ consistent.
 
 No code changes are needed for `opensearch_query` itself — it is already
 general.
+
+---
+
+## Rating responses
+
+Every indexed turn can be given a star rating (1–5) that is stored back into
+the same OpenSearch document via a partial `update`.
+
+### How it works
+
+After each response, Bamboo extracts the `(index, doc_id)` pair from the
+`bamboo_promptlog_status` notification and stores it locally.  The
+`bamboo_promptlog_rate` MCP tool then calls `update_rating()` in
+`prompt_log.py`, which issues:
+
+```
+POST /<index>/_update/<doc_id>
+{"doc": {"rating": N}}
+```
+
+using the write credential (`BAMBOO_OPENSEARCH_PROMPTLOG`).
+
+### TUI
+
+```
+/rate 4
+```
+
+Rates the most recently indexed response.  Confirmation:
+`★★★★☆ (4/5) — index='bamboomcp-promptlog-2026.05.26' id='...'`
+
+If no response has been indexed yet (e.g. first turn of a fresh session before
+the background write completes), `/rate` shows a helpful message and does
+nothing.
+
+### Streamlit
+
+Five colour-coded buttons appear below each assistant response:
+
+| Button | Meaning |
+|---|---|
+| 🔴 1 | Very poor |
+| 🟠 2 | Poor |
+| 🟡 3 | Fair |
+| 🟢 4 | Good |
+| 💚 5 | Excellent |
+
+The selected star is shown bold; a caption confirms the rating.  The widget is
+suppressed when `bamboo_promptlog_rate` is not registered (i.e.
+`BAMBOO_OPENSEARCH_PROMPTLOG` is not set on the server).
+
+### Querying ratings
+
+```json
+{"query":{"range":{"rating":{"gte":1}}},"sort":[{"rating":"desc"}]}
+```
+
+Or aggregate the average rating per model:
+
+```json
+{
+  "query": {"range": {"rating": {"gte": 1}}},
+  "aggs": {
+    "by_model": {
+      "terms": {"field": "model"},
+      "aggs": {"avg_rating": {"avg": {"field": "rating"}}}
+    }
+  },
+  "size": 0
+}
+```
+
+---
+
+## Self-observability — prompts you can ask Bamboo
+
+The following questions are routed directly to `opensearch_promptlog_query`
+via the deterministic fast-path (no RAG, no LLM planner needed):
+
+**Session and turn queries**
+- "How many turns have I had today?"
+- "Show all turns from session `<uuid>`"  *(use the `session=` value from the system panel)*
+- "Replay my last session"
+- "What was the last question I asked?"
+
+**FAQ and frequency**
+- "What are the most frequently asked questions?" → `/faq`
+- "What are the most frequently asked questions today?" → `/faq today`
+- "What are the most frequently asked questions this week?" → `/faq week`
+- "What are the most frequently asked questions this month?" → `/faq month`
+
+**Tool usage**
+- "Which tools were used most often today?"
+- "How many times was `cric_query` called this week?"
+
+**Model and provider**
+- "Which model am I using?"
+- "How many turns used mistral-large-latest today?"
+
+**Ratings**
+- "Show me the lowest-rated responses this week"
+- "What is the average rating per model?"
+
+All these questions bypass the topic guard (self-observability terms are in
+`_ALLOW_TERMS`) and bypass the doc-search fallback (rule 7 in
+`_build_deterministic_plan`).
