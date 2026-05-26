@@ -341,9 +341,8 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
 
     Uses :func:`streamlit.components.v1.html` with the Mermaid CDN rather than
     the ``streamlit-mermaid`` component.  This gives full control over the
-    Mermaid ``initialize()`` config, in particular ``useMaxWidth: false``,
-    which prevents svgPanZoom from scaling the diagram down to fit a narrow
-    iframe (the root cause of text clipping in ``streamlit-mermaid``).
+    Mermaid ``initialize()`` config and allows a ``parseError`` handler that
+    shows a plain-text fallback instead of Mermaid's error graphic.
 
     .. note::
         ``st.iframe`` (the intended replacement for ``components.v1.html``)
@@ -351,9 +350,12 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
         ``components.v1.html`` remains the correct API for inline HTML blobs
         until Streamlit provides a direct equivalent.
 
-    The container div has ``overflow-x: auto`` so wide diagrams scroll
-    horizontally rather than being compressed.  ``htmlLabels: true`` is set
-    so ``<br/>`` and ``\\n`` in node labels render as real line breaks.
+    Height is estimated using a diagram-type-aware heuristic (state diagrams
+    ~80 px/state, sequence ~30 px/line, others ~22 px/line) with
+    ``scrolling=True`` as a safety net.  The ``streamlit:setFrameHeight``
+    postMessage approach is not reliably honoured by Streamlit and is not
+    used.  A ``MutationObserver`` strips Mermaid's inline ``width``/``height``
+    SVG attributes after render so that CSS ``width: 100%`` takes effect.
 
     Falls back silently when ``diagram_defs`` is empty.
 
@@ -370,12 +372,36 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
         if len(diagram_defs) > 1:
             st.caption(f"Diagram {i + 1}")
 
-        # Height estimate: ~14px per non-empty line + 60px padding.
-        # Capped at 600px — diagrams should be compact, not dominate the page.
-        # The SVG is constrained to fit the iframe width via useMaxWidth:true
-        # so tall diagrams scroll vertically rather than overflowing.
-        line_count = sum(1 for ln in defn.splitlines() if ln.strip())
-        height_px = min(600, max(200, line_count * 14 + 60))
+        # Height estimate by diagram type.
+        #
+        # Mermaid inlines an absolute pixel height on the SVG that our CSS
+        # cannot override from outside the iframe, so we must pass a good
+        # initial height to components.html().  The postMessage approach
+        # (streamlit:setFrameHeight) is not reliably honoured by Streamlit,
+        # so we use a type-aware heuristic instead and enable scrolling=True
+        # as a safety net for diagrams that exceed the estimate.
+        #
+        # State diagrams: count state definitions (lines starting with
+        # a word char that are not directives/transitions).
+        # Flowcharts / sequence / others: count non-empty lines.
+        first_line = defn.strip().splitlines()[0].lower() if defn.strip() else ""
+        if first_line.startswith("statediagram"):
+            # Each state ~ 80px tall in vertical layout; add padding.
+            _skip = ("%%", "stateDiagram", "[*]", "note", "direction")
+            state_count = sum(
+                1 for ln in defn.splitlines()
+                if ln.strip()
+                and not ln.strip().startswith(_skip)
+                and "-->" not in ln
+                and ":" not in ln
+            )
+            height_px = min(900, max(300, state_count * 80 + 150))
+        elif first_line.startswith("sequencediagram"):
+            line_count = sum(1 for ln in defn.splitlines() if ln.strip())
+            height_px = min(900, max(300, line_count * 30 + 100))
+        else:
+            line_count = sum(1 for ln in defn.splitlines() if ln.strip())
+            height_px = min(700, max(250, line_count * 22 + 80))
 
         # Escape & for HTML; < > are valid Mermaid arrow syntax and must not
         # be escaped.  Backtick labels (Mermaid v11 markdown strings) are
@@ -465,7 +491,7 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
 </body>
 </html>
 """
-        components.html(html, height=height_px, scrolling=False)
+        components.html(html, height=height_px, scrolling=True)
 
 
 # ---------------------------------------------------------------------------
