@@ -1139,6 +1139,9 @@ _PROMPTLOG_SIGNALS: frozenset[str] = frozenset({
     "input tokens", "output tokens",
     # Prompt-log index
     "prompt log", "prompt logging", "bamboomcp-promptlog",
+    # Ratings
+    "rating", "ratings", "rated", "star rating", "star ratings",
+    "lowest rated", "highest rated", "average rating",
 })
 
 # Multi-word phrase signals for promptlog queries (checked via substring match).
@@ -1170,6 +1173,17 @@ _PROMPTLOG_PHRASES: tuple[str, ...] = (
     "token count",
     "token usage",
     "which model",
+    "all the rates",
+    "all rates",
+    "show rates",
+    "my ratings",
+    "all ratings",
+    "rated today",
+    "rated this",
+    "lowest rated",
+    "highest rated",
+    "average rating",
+    "star rating",
 )
 
 

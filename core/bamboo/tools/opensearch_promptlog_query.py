@@ -221,6 +221,21 @@ class OpenSearchPromptlogQueryTool:
                 r'    {"query":{"match_all":{}},"sort":[{"@timestamp":{"order":"desc"}}]}'
                 "  + source_fields="
                 "[\"@timestamp\",\"turn_number\",\"tools_used\",\"user_prompt\"]\n"
+                r'  Show all rated responses today:'
+                "\n"
+                r'    {"query":{"bool":{"must":['
+                r'      {"range":{"@timestamp":{"gte":"now/d"}}},'
+                r'      {"range":{"rating":{"gte":1}}}]}},'
+                r'"sort":[{"rating":{"order":"desc"}}]}'
+                "\n"
+                r'  Average rating per model (all time):'
+                "\n"
+                r'    {"query":{"range":{"rating":{"gte":1}}},'
+                r'"aggs":{"by_model":{"terms":{"field":"model"},'
+                r'"aggs":{"avg":{"avg":{"field":"rating"}}}}},"size":0}'
+                "\n"
+                "NOTE: rating is null when not yet rated — always filter "
+                "with range:{rating:{gte:1}} to exclude unrated turns.\n"
                 "Requires ASKPANDA_OPENSEARCH to be set (same credential as "
                 "harvester timeseries)."
             ),

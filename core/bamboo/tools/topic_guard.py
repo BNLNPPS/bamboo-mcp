@@ -77,6 +77,8 @@ _ALLOW_TERMS: list[str] = [
     "token count", "token counts", "input tokens", "output tokens",
     "replay session", "last session", "most recent",
     "how many turns", "how many sessions",
+    "rating", "ratings", "rated", "star rating",
+    "lowest rated", "highest rated", "average rating",
 ]
 
 # Questions containing any of these terms (and none of the allow terms) are
