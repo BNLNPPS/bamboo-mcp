@@ -106,12 +106,13 @@ class OpenSearchPromptlogQueryTool:
                 "  system_prompt (text)     redacted system prompt (large; omitted by default)\n"
                 "  user_prompt   (text)     redacted synthesis prompt (large; omitted by default)\n"
                 "  response      (text)     redacted LLM response (large; omitted by default)\n\n"
-                "source_fields guidance: the three large text fields are omitted by "
-                "default to save context window.  For queries that display what the "
-                "user asked ('show recent turns', 'replay session'), add "
-                "'user_prompt' to source_fields.  For aggregation-only queries "
-                "(counts, averages, groupings) pass source_fields=[] and size:0 in "
-                "the DSL to suppress _source entirely.\n\n"
+                "source_fields guidance: system_prompt, user_prompt, and response "
+                "are omitted by default.  RULES: (a) For display queries (show "
+                "recent turns, replay session) — do NOT put size:0 in the DSL; "
+                "omit size entirely and let max_hits control the result count; add "
+                "user_prompt to source_fields to show what was asked. "
+                "(b) For aggregation-only queries (counts, averages, groupings) — "
+                "put size:0 in the DSL AND pass source_fields=[].\n\n"
                 "IMPORTANT RULES for building queries:\n"
                 "1. Date math: always use OpenSearch date math for temporal filters, "
                 "   e.g. 'today' = gte:now/d, 'this week' = gte:now-7d/d, "
@@ -147,10 +148,12 @@ class OpenSearchPromptlogQueryTool:
                 r'    {"query":{"term":{"session_id":"<uuid>"}},'
                 r'"aggs":{"turns":{"value_count":{"field":"turn_number"}}},"size":0}'
                 "\n"
-                r'  Replay a session in order:'
+                r'  Replay a session in order (display — no size:0, add user_prompt):'
                 "\n"
                 r'    {"query":{"term":{"session_id":"<uuid>"}},'
                 r'"sort":[{"turn_number":{"order":"asc"}}]}'
+                "  + source_fields="
+                "[\"@timestamp\",\"turn_number\",\"tools_used\",\"user_prompt\"]\n"
                 "\n"
                 r'  Tool usage counts today (date math, agg only):'
                 "\n"
@@ -181,12 +184,11 @@ class OpenSearchPromptlogQueryTool:
                 r'      {"term":{"tools_used":"opensearch_promptlog_query"}}]}},'
                 r'"aggs":{"count":{"value_count":{"field":"turn_number"}}},"size":0}'
                 "\n"
-                r'  Show recent turns including what the user asked:'
+                r'  Show recent turns including what was asked (display — no size:0):'
                 "\n"
-                r'    {"query":{"match_all":{}},"sort":[{"@timestamp":{"order":"desc"}}],'
-                r'"size":5}  + source_fields=["@timestamp","turn_number",'
-                r'"tools_used","user_prompt"]'
-                "\n"
+                r'    {"query":{"match_all":{}},"sort":[{"@timestamp":{"order":"desc"}}]}'
+                "  + source_fields="
+                "[\"@timestamp\",\"turn_number\",\"tools_used\",\"user_prompt\"]\n"
                 "Requires ASKPANDA_OPENSEARCH to be set (same credential as "
                 "harvester timeseries)."
             ),
