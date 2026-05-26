@@ -1176,6 +1176,8 @@ _PROMPTLOG_PHRASES: tuple[str, ...] = (
     "all the rates",
     "all rates",
     "show rates",
+    "show me rates",
+    "the rates",
     "my ratings",
     "all ratings",
     "rated today",
@@ -2102,6 +2104,18 @@ async def _run_fast_path_intercepts(
     )
 
     if not task_id_early and not job_id_early:
+        # Promptlog fast-path — checked before topic guard so the original
+        # question is used and history-based reformulation cannot corrupt it.
+        # "Show me all the rates from today" must not be rewritten to a
+        # PanDA jobs question by the topic guard.
+        if _is_promptlog_question(question):
+            return await execute_plan(
+                _build_promptlog_plan(question, ReusePolicy()),
+                question,
+                history,
+                plugin_id=plugin_id,
+            )
+
         # PanDA server health fast-path — highest priority before site/pilot/jobs.
         if _is_panda_health_question(question):
             plan = Plan(
