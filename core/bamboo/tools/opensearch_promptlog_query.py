@@ -143,12 +143,12 @@ class OpenSearchPromptlogQueryTool:
                 "   exist, the field may be mapped as text (index created before the "
                 "   template was applied).  In that case try "
                 "   {\"term\":{\"session_id.keyword\":\"<uuid>\"}} as a fallback.\n"
-                "   text fields (user_prompt, response, system_prompt) cannot be "
-                "   used in terms aggregations directly — always use the .keyword "
-                "   sub-field: user_prompt.keyword, response.keyword.  "
-                "   For FAQ aggregation use user_prompt.keyword as the "
-                "   terms field (see Tool usage counts example above, "
-                "   substituting tools_used with user_prompt.keyword).\n"
+                "   text fields (user_prompt, response, system_prompt) CANNOT be "
+                "   used in terms aggregations directly — you MUST use the .keyword "
+                "   sub-field or results will be wrong: user_prompt.keyword, "
+                "   response.keyword.  This is the most common mistake — "
+                "   user_prompt aggregations without .keyword return token buckets "
+                "   (individual words) instead of full questions.\n"
                 "5. The id= value shown in the TUI system panel after each turn "
                 "   (e.g. id='5rNAUJ4By913oBqgRMjO') is the OpenSearch document _id, "
                 "   NOT the session_id.  To replay a session, use the UUID-format "
@@ -204,6 +204,17 @@ class OpenSearchPromptlogQueryTool:
                 r'      {"range":{"@timestamp":{"gte":"now/d"}}},'
                 r'      {"term":{"tools_used":"opensearch_promptlog_query"}}]}},'
                 r'"aggs":{"count":{"value_count":{"field":"turn_number"}}},"size":0}'
+                "\n"
+                r'  Most frequently asked questions all time'
+                "  (MUST use user_prompt.keyword not user_prompt):\n"
+                r'    {"aggs":{"faq":{"terms":{"field":"user_prompt.keyword",'
+                r'"size":20}}},"size":0}'
+                "\n"
+                r'  Most frequently asked questions today:'
+                "\n"
+                r'    {"query":{"range":{"@timestamp":{"gte":"now/d"}}},'
+                r'"aggs":{"faq":{"terms":{"field":"user_prompt.keyword",'
+                r'"size":20}}},"size":0}'
                 "\n"
                 r'  Show recent turns including what was asked (display — no size:0):'
                 "\n"

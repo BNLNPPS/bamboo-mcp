@@ -1256,9 +1256,28 @@ class BambooTui(App):
             self._cmd_superuser(args)
             return
         if cmd == "/faq":
-            await self._handle_question(
-                "What are the most frequently asked questions in Bamboo today?"
-            )
+            scope = args[0].lower() if args else ""
+            if scope == "today":
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo today? "
+                    "Use a terms aggregation on user_prompt.keyword filtered to gte:now/d."
+                )
+            elif scope == "week":
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo this week? "
+                    "Use a terms aggregation on user_prompt.keyword filtered to gte:now-7d/d."
+                )
+            elif scope == "month":
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo this month? "
+                    "Use a terms aggregation on user_prompt.keyword filtered to gte:now-30d/d."
+                )
+            else:
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo across all time? "
+                    "Use a terms aggregation on user_prompt.keyword with no date filter."
+                )
+            await self._handle_question(faq_q)
             return
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
@@ -1273,7 +1292,7 @@ class BambooTui(App):
             "  /json                 Show verbatim BigPanDA API response (raw server JSON)\n"
             "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
             "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
-            "  /faq                  Show most frequently asked questions from today's logs\n"
+            "  /faq [today|week|month]  Most frequently asked questions (default: all time)\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
