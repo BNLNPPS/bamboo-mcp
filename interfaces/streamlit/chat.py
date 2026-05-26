@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import traceback
 from collections.abc import Sequence  # noqa: F401  (kept for type annotations in helpers)
 from pathlib import Path
@@ -368,9 +369,12 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
         if len(diagram_defs) > 1:
             st.caption(f"Diagram {i + 1}")
 
-        # Estimate height: ~60px per node/edge + 150px padding, min 300px
-        node_count = defn.count("-->") + defn.count("---") + defn.count("->") + 2
-        height_px = max(300, node_count * 60 + 150)
+        # Height estimate: ~14px per non-empty line + 60px padding.
+        # Capped at 600px — diagrams should be compact, not dominate the page.
+        # The SVG is constrained to fit the iframe width via useMaxWidth:true
+        # so tall diagrams scroll vertically rather than overflowing.
+        line_count = sum(1 for ln in defn.splitlines() if ln.strip())
+        height_px = min(600, max(200, line_count * 14 + 60))
 
         # Only escape & in the diagram text — < and > are valid Mermaid syntax
         # (e.g. --> arrows) and must not be escaped. Mermaid reads innerHTML so
@@ -381,20 +385,20 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
 <!DOCTYPE html>
 <html>
 <head>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <style>
   body {{ margin: 0; padding: 0; background: transparent; }}
   #container {{
     width: 100%;
     overflow-x: auto;
     background: white;
-    padding: 8px;
+    padding: 4px 8px;
     box-sizing: border-box;
   }}
-  .mermaid {{ min-width: 500px; }}
   .mermaid svg {{
-    max-width: none !important;
-    height: auto;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
   }}
 </style>
 </head>
@@ -408,13 +412,13 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     theme: 'default',
     securityLevel: 'loose',
     flowchart: {{
-      useMaxWidth: false,
+      useMaxWidth: true,
       htmlLabels: true,
-      nodeSpacing: 60,
-      rankSpacing: 70
+      nodeSpacing: 40,
+      rankSpacing: 50
     }},
     stateDiagram: {{
-      useMaxWidth: false,
+      useMaxWidth: true,
       htmlLabels: false
     }}
   }});
@@ -677,6 +681,7 @@ def _init_session() -> None:
         "pending_question": None,
         "promptlog_notices": [],
         "poll_promptlog": False,
+        "retry_promptlog": False,  # one deferred retry if first poll misses doc_id
         "last_doc_id": None,   # (index, doc_id) of most recent indexed turn
         "last_rating": None,   # rating submitted for that turn
     }
@@ -1444,7 +1449,17 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
     # call_llm and may not finish before the response rerun.  The flag set
     # during the response pass signals that we should poll on this render cycle,
     # by which time the OpenSearch write should have completed.
+    #
+    # If the first poll returns before OpenSearch finishes writing (last_doc_id
+    # still None), set retry_promptlog so we poll once more on the next cycle.
+    # This fixes the missing rating widget on the first question after restart.
     if st.session_state.pop("poll_promptlog", False):
+        _poll_promptlog_events(mcp)
+        if st.session_state.get("last_doc_id") is None:
+            st.session_state["retry_promptlog"] = True
+
+    if st.session_state.pop("retry_promptlog", False):
+        time.sleep(0.5)
         _poll_promptlog_events(mcp)
 
     # Render chat history

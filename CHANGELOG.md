@@ -12,10 +12,22 @@ All notable changes to Bamboo are documented here.
   is rendered after the full chat history during the pending-question pass, so
   it appears at the bottom of the page just above the input box rather than
   at the top where it was invisible in long conversations.
+- **Streamlit: rating widget retry on first question after restart.**
+  If the deferred prompt-log poll fires before OpenSearch has flushed the
+  background write (``last_doc_id`` still ``None``), a ``retry_promptlog``
+  flag triggers one additional poll after a 0.5 s sleep on the following
+  render cycle.  Fixes the missing rating buttons on the first response
+  after a server restart.
 - **Streamlit: one-shot rating widget.** After a user submits a star rating,
   the five rating buttons are replaced by a static confirmation caption for
   the remainder of the session, preventing duplicate votes on the same
   response.
+- **Streamlit: retry prompt-log poll for first-question rating.** If the
+  deferred `poll_promptlog` pass completes before the OpenSearch background
+  write finishes (`last_doc_id` still `None`), a `retry_promptlog` flag
+  is set and a second poll runs 0.5 s later on the next render cycle.
+  This fixes the missing rating widget on the first question after a server
+  restart.
 - **`docs/remote-testing.md`:** Step-by-step guide for running the Bamboo MCP
   server and Streamlit UI on lxplus and accessing them from home via an SSH
   port-forwarding tunnel over the CERN VPN.  Covers SSH key setup, tunnel
@@ -24,6 +36,17 @@ All notable changes to Bamboo are documented here.
 
 ### Fixed
 
+- **Streamlit: Mermaid diagram height and rendering.** Height estimation
+  now uses non-empty line count (`line_count * 20 + 80`, capped at 800 px)
+  instead of arrow count, which overcounted for state diagrams and produced
+  oversized iframes that pushed nodes below the visible area.  Mermaid CDN
+  bumped from `@10` to `@11` for improved state diagram rendering.
+- **Streamlit: Mermaid diagrams scale to fit iframe width.** Switched to
+  ``useMaxWidth: true`` with ``width: 100% !important`` on the SVG so
+  diagrams shrink to fit rather than rendering at natural size and pushing
+  content off-screen.  Reduced node/rank spacing (40/50 px) and tightened
+  the height estimate to 14 px per line (cap 600 px) so diagrams are
+  compact.  Mermaid CDN bumped to v11.
 - **Streamlit: `st.components.v1.html` deprecation noted.** `st.iframe`
   (the advertised replacement) accepts a URL `src`, not raw HTML, so it
   cannot replace `components.v1.html` for inline Mermaid rendering.
