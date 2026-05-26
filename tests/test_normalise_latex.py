@@ -14,13 +14,34 @@ from unittest.mock import MagicMock
 def _import_normalise_latex():
     """Import _normalise_latex from streamlit chat without starting Streamlit.
 
+    Stubs are injected only for the duration of this import and are removed
+    from ``sys.modules`` afterwards so they do not interfere with other test
+    modules (in particular ``test_superuser_guard.py`` which imports the real
+    ``interfaces.shared.superuser_guard``).
+
     Returns:
         The _normalise_latex callable.
     """
-    # Stub out streamlit and all heavy optional dependencies so the module
-    # imports cleanly in a headless environment.
+    import importlib.util
+    from pathlib import Path
+
     st_mock = MagicMock()
     st_mock.session_state = {}
+
+    # Track which names we are *adding* so we can remove them afterwards.
+    # Names already present are left untouched (and not removed).
+    stub_names = [
+        "streamlit",
+        "streamlit.components",
+        "streamlit.components.v1",
+        "plotly",
+        "plotly.graph_objects",
+        "plotly.express",
+        "interfaces",
+        "interfaces.shared",
+        "interfaces.shared.mcp_client",
+        "interfaces.shared.superuser_guard",
+    ]
     stubs = {
         "streamlit": st_mock,
         "streamlit.components": MagicMock(),
@@ -33,24 +54,38 @@ def _import_normalise_latex():
         "interfaces.shared.mcp_client": MagicMock(),
         "interfaces.shared.superuser_guard": MagicMock(),
     }
-    for name, mod in stubs.items():
-        sys.modules.setdefault(name, mod)
 
-    import importlib
-    import importlib.util
-    from pathlib import Path
+    added: list[str] = []
+    saved: dict[str, types.ModuleType] = {}
+    for name in stub_names:
+        if name in sys.modules:
+            saved[name] = sys.modules[name]
+        else:
+            added.append(name)
+        sys.modules[name] = stubs[name]  # type: ignore[assignment]
 
-    spec = importlib.util.spec_from_file_location(
-        "streamlit_chat",
-        Path(__file__).parent.parent
-        / "interfaces"
-        / "streamlit"
-        / "chat.py",
-    )
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod._normalise_latex
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "streamlit_chat",
+            Path(__file__).parent.parent
+            / "interfaces"
+            / "streamlit"
+            / "chat.py",
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod._normalise_latex
+    finally:
+        # Restore sys.modules to its pre-stub state so other test modules
+        # that import interfaces.shared.superuser_guard get the real module.
+        for name in added:
+            sys.modules.pop(name, None)
+        for name, original in saved.items():
+            sys.modules[name] = original
+        # Also evict the dynamically loaded chat module so it does not
+        # retain references to the stubs.
+        sys.modules.pop("streamlit_chat", None)
 
 
 class TestNormaliseLatex:
