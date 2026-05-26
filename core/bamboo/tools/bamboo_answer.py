@@ -1142,6 +1142,8 @@ _PROMPTLOG_SIGNALS: frozenset[str] = frozenset({
     # Ratings
     "rating", "ratings", "rated", "star rating", "star ratings",
     "lowest rated", "highest rated", "average rating",
+    # User pseudonym queries (GDPR tokens embedded in user_prompt)
+    "from user", "by user", "user_",
 })
 
 # Multi-word phrase signals for promptlog queries (checked via substring match).
@@ -1186,6 +1188,10 @@ _PROMPTLOG_PHRASES: tuple[str, ...] = (
     "highest rated",
     "average rating",
     "star rating",
+    "from user",
+    "by user",
+    "ratings from",
+    "questions from user",
 )
 
 
