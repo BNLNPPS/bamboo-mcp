@@ -2213,12 +2213,16 @@ class BambooTui(App):
         for i, (lang, code) in enumerate(blocks):
             ext = self._lang_to_extension(lang)
             if filename and i == 0:
-                # First block: use the user-supplied filename exactly.
-                target = filename
+                # First block: use the user-supplied filename, adding the
+                # detected extension if the user omitted one.
+                if _os.path.splitext(filename)[1]:
+                    target = filename
+                else:
+                    target = filename + ext
             elif filename and len(blocks) > 1:
-                # Subsequent blocks: use the base name from user-supplied
-                # filename but each block's own language extension.
-                base = _os.path.splitext(filename)[0]
+                # Subsequent blocks: strip extension from user-supplied name
+                # and append each block's own language extension.
+                base = _os.path.splitext(filename)[0] or filename
                 target = f"{base}_{i + 1}{ext}"
             elif suggested and i == 0:
                 # First block: honour the LLM-suggested filename exactly.
