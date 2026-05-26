@@ -190,9 +190,14 @@ def _run_query(
         else int(total_raw)
     )
 
-    hits: list[dict[str, Any]] = [
-        h.get("_source", {}) for h in hits_raw.get("hits", [])
-    ]
+    # Merge _source fields with _id so callers can reference the document
+    # for follow-up operations (e.g. rating updates, individual entry lookup).
+    hits: list[dict[str, Any]] = []
+    for h in hits_raw.get("hits", []):
+        entry = dict(h.get("_source", {}))
+        if "_id" in h:
+            entry["_id"] = h["_id"]
+        hits.append(entry)
 
     return {
         "hits": hits,

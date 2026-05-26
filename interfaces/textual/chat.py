@@ -1300,6 +1300,32 @@ class BambooTui(App):
         if cmd == "/superuser":
             self._cmd_superuser(args)
             return
+        if cmd == "/rates":
+            scope = args[0].lower() if args else ""
+            if scope == "today":
+                date_clause = (
+                    "today (filter @timestamp gte:now/d)"
+                )
+            elif scope == "week":
+                date_clause = "this week (filter @timestamp gte:now-7d/d)"
+            elif scope == "month":
+                date_clause = "this month (filter @timestamp gte:now-30d/d)"
+            else:
+                date_clause = "all time (no date filter)"
+            rates_q = (
+                f"Show all rated responses for {date_clause} as a markdown "
+                "table sorted by rating descending. "
+                "Query opensearch_promptlog_query with "
+                "range:{rating:{gte:1}}, "
+                "source_fields=[@timestamp, turn_number, session_id, "
+                "model, tools_used, user_prompt, rating], "
+                "include _id in each hit. "
+                "Format as markdown table: "
+                "Time | Turn | Session (first 8 chars) | Model | "
+                "Tools | Question (first 60 chars) | Rating."
+            )
+            await self._handle_question(rates_q)
+            return
         if cmd == "/faq":
             scope = args[0].lower() if args else ""
             if scope == "today":
@@ -1338,6 +1364,7 @@ class BambooTui(App):
             "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
             "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
             "  /faq [today|week|month]  Most frequently asked questions (default: all time)\n"
+            "  /rates [today|week|month] Show rated responses as a table (default: all time)\n"
             "  /rate <1-5>           Rate the last response (1=poor, 5=excellent)\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"

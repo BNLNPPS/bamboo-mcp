@@ -1526,6 +1526,10 @@ _STREAMLIT_HELP = """**Bamboo slash commands**
 | `/faq today` | Most frequently asked questions today |
 | `/faq week` | Most frequently asked questions this week |
 | `/faq month` | Most frequently asked questions this month |
+| `/rates` | Rated responses — all time, as a table |
+| `/rates today` | Rated responses today |
+| `/rates week` | Rated responses this week |
+| `/rates month` | Rated responses this month |
 | `/rate <1-5>` | Rate the last response (1=very poor 🔴, 5=excellent 💚) |
 | `/task <id>` | Summarise status of task *id* |
 | `/job <id>` | Analyse failure of job *id* |
@@ -1537,7 +1541,7 @@ _TASK_CMD_RE_ST = re.compile(r"^/task\s+(\d+)\s*$", re.IGNORECASE)
 _JOB_CMD_RE_ST = re.compile(r"^/job\s+(\d+)\s*$", re.IGNORECASE)
 
 
-def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:
+def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C901
     """Expand a slash command into a question or a help string.
 
     Returns a tuple ``(question, help_markdown)`` where exactly one element
@@ -1574,6 +1578,30 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:
     if m_job:
         return (
             f"Analyse the failure of job {m_job.group(1)} and explain why it failed.",
+            None,
+        )
+
+    if cmd == "/rates":
+        scope = args[0].lower() if args else ""
+        if scope == "today":
+            date_clause = "today (filter @timestamp gte:now/d)"
+        elif scope == "week":
+            date_clause = "this week (filter @timestamp gte:now-7d/d)"
+        elif scope == "month":
+            date_clause = "this month (filter @timestamp gte:now-30d/d)"
+        else:
+            date_clause = "all time (no date filter)"
+        return (
+            f"Show all rated responses for {date_clause} as a markdown "
+            "table sorted by rating descending. "
+            "Query opensearch_promptlog_query with "
+            "range:{rating:{gte:1}}, "
+            "source_fields=[@timestamp, turn_number, session_id, "
+            "model, tools_used, user_prompt, rating], "
+            "include _id in each hit. "
+            "Format as markdown table: "
+            "Time | Turn | Session (first 8 chars) | Model | "
+            "Tools | Question (first 60 chars) | Rating.",
             None,
         )
 

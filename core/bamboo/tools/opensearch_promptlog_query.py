@@ -236,6 +236,19 @@ class OpenSearchPromptlogQueryTool:
                 "\n"
                 "NOTE: rating is null when not yet rated — always filter "
                 "with range:{rating:{gte:1}} to exclude unrated turns.\n"
+                r'  Rated turns as a table (include _id for individual lookup):'
+                "\n"
+                r'    {"query":{"range":{"rating":{"gte":1}}},'
+                r'"sort":[{"rating":{"order":"desc"}},{"@timestamp":{"order":"desc"}}]}'
+                " + source_fields=[\"@timestamp\",\"turn_number\","
+                "\"session_id\",\"model\",\"tools_used\","
+                "\"user_prompt\",\"rating\",\"_id\"]\n"
+                "NOTE: each hit includes _id (the OpenSearch document id). "
+                "To show a full entry for a specific _id, use opensearch_query "
+                "with {\"query\":{\"ids\":{\"values\":[\"<_id>\"]}}}.\n"
+                "When asked for a table of ratings, format the result as a "
+                "markdown table with columns: Time, Turn, Session, Model, "
+                "Tools, Question (truncated to 60 chars), Rating.\n"
                 "Requires ASKPANDA_OPENSEARCH to be set (same credential as "
                 "harvester timeseries)."
             ),
