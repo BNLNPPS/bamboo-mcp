@@ -1597,16 +1597,15 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
             "Call the opensearch_promptlog_query tool. "
             "Pass max_hits=50 as a separate argument. "
             "Pass source_fields=[@timestamp,turn_number,session_id,"
-            "model,tools_used,user_prompt,rating] as a separate argument. "
+            "model,tools_used,raw_question,rating] as a separate argument. "
             "Pass this exact JSON as the query argument (nothing else): "
             '{"query":{"exists":{"field":"rating"}},'
             '"sort":[{"rating":{"order":"desc"}}]} '
             "Each hit includes _id automatically. "
             "Format as markdown table: "
             "Doc ID (full _id) | Time | Turn | Session (first 8 chars) "
-            "| Model | Tools | Question (first 60 chars) | Rating. "
-            "To fetch a full response for any row: use opensearch_query "
-            "with ids query on the Doc ID value.",
+            "| Model | Tools | Question (raw_question field, first 60 chars) | Rating. "
+            "The Doc ID is the only way to retrieve the full response.",
             None,
         )
 

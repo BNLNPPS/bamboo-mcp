@@ -1318,7 +1318,7 @@ class BambooTui(App):
                 "Call the opensearch_promptlog_query tool. "
                 "Pass max_hits=50 as a separate argument. "
                 "Pass source_fields=[@timestamp,turn_number,session_id,"
-                "model,tools_used,user_prompt,rating] as a separate argument. "
+                "model,tools_used,raw_question,rating] as a separate argument. "
                 "Pass this exact JSON as the query argument (nothing else): "
                 '{"query":{"exists":{"field":"rating"}},'
                 '"sort":[{"rating":{"order":"desc"}}]} '
@@ -1326,12 +1326,8 @@ class BambooTui(App):
                 "Format as markdown table with these exact columns: "
                 "Doc ID (full _id value) | Time | Turn | "
                 "Session (first 8 chars) | Model | "
-                "Tools | Question (first 60 chars) | Rating. "
-                "The Doc ID column is critical — it is the only way to "
-                "retrieve the full response for a specific entry. "
-                "To fetch the full response for a row, use opensearch_query "
-                "with {\"query\":{\"ids\":{\"values\":[\"<_id>\"]}}} "
-                "and source_fields=[response, user_prompt]."
+                "Tools | Question (raw_question field, first 60 chars) | Rating. "
+                "The Doc ID is the only way to retrieve the full response. "
             )
             await self._handle_question(rates_q)
             return
