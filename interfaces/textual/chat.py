@@ -1315,8 +1315,11 @@ class BambooTui(App):
             rates_q = (
                 f"Show all rated responses for {date_clause} as a markdown "
                 "table sorted by rating descending. "
-                "Query opensearch_promptlog_query with "
-                "range:{rating:{gte:1}}, "
+                "Query opensearch_promptlog_query with max_hits=50, "
+                "query={bool:{must:["
+                "  {exists:{field:rating}},"
+                "  {range:{rating:{gte:1}}}"
+                "]}}, "
                 "source_fields=[@timestamp, turn_number, session_id, "
                 "model, tools_used, user_prompt, rating], "
                 "include _id in each hit. "
