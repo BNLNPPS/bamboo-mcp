@@ -1116,6 +1116,110 @@ def _is_code_query_question(question: str) -> bool:
     return has_verb and has_kw
 
 
+# Signal phrases that indicate the user is querying Bamboo's own prompt log
+# (self-observability queries rather than PanDA/ATLAS domain questions).
+# Must be checked before the doc-search fallback so that "show me all
+# questions asked today" or "what are the most frequently asked questions?"
+# route to opensearch_promptlog_query rather than RAG.
+_PROMPTLOG_SIGNALS: frozenset[str] = frozenset({
+    # Turn / session vocabulary
+    "turns", "turn number", "my last session", "last session",
+    "replay session", "replay my session", "session id",
+    "how many turns", "how many sessions",
+    # Self-query vocabulary
+    "questions asked", "questions today", "asked today",
+    "frequently asked", "most asked", "faq", "faqs",
+    "most frequent", "common questions", "popular questions",
+    "what did i ask", "what have i asked",
+    # Tool-usage analytics
+    "which tools", "tools used", "tool usage", "tool calls",
+    "tools called", "how many times was", "opensearch_promptlog",
+    # Model / provider introspection
+    "which model", "token count", "token usage",
+    "input tokens", "output tokens",
+    # Prompt-log index
+    "prompt log", "prompt logging", "bamboomcp-promptlog",
+})
+
+# Multi-word phrase signals for promptlog queries (checked via substring match).
+_PROMPTLOG_PHRASES: tuple[str, ...] = (
+    "questions asked",
+    "asked today",
+    "asked this week",
+    "frequently asked",
+    "most asked",
+    "most frequent",
+    "common question",
+    "popular question",
+    "what did i ask",
+    "what have i asked",
+    "show me all questions",
+    "all questions",
+    "replay session",
+    "replay my",
+    "my last session",
+    "last session",
+    "how many turns",
+    "how many sessions",
+    "which tools",
+    "tools used",
+    "tool usage",
+    "tool calls",
+    "how many times was",
+    "prompt log",
+    "token count",
+    "token usage",
+    "which model",
+)
+
+
+def _is_promptlog_question(question: str) -> bool:
+    """Return True when the question targets Bamboo's own prompt/session logs.
+
+    Covers self-observability queries such as:
+    - "show me all questions asked today"
+    - "what are the frequently asked questions?"
+    - "how many turns did my last session have?"
+    - "which tools were used most often this week?"
+
+    These questions should route to ``opensearch_promptlog_query`` rather
+    than the RAG doc-search fallback.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        bool: ``True`` when the question matches a prompt-log routing signal.
+    """
+    q = question.lower()
+    tokens = set(re.findall(r"\b\w+\b", q))
+    if tokens & _PROMPTLOG_SIGNALS:
+        return True
+    return any(phrase in q for phrase in _PROMPTLOG_PHRASES)
+
+
+def _build_promptlog_plan(question: str, reuse: ReusePolicy) -> Plan:
+    """Build a fast-path Plan routing to ``opensearch_promptlog_query``.
+
+    Args:
+        question: User question text.
+        reuse: Reuse policy forwarded from the calling plan builder.
+
+    Returns:
+        A :class:`Plan` routing to ``opensearch_promptlog_query``.
+    """
+    return Plan(
+        route=PlanRoute.FAST_PATH,
+        confidence=0.95,
+        tool_calls=[ToolCall(
+            tool="opensearch_promptlog_query",
+            arguments={"query": question},
+        )],
+        reuse_policy=reuse,
+        explain="Deterministic: prompt-log signals → opensearch_promptlog_query.",
+    )
+
+
 def _build_code_query_plan(question: str, reuse: ReusePolicy) -> Plan:
     """Build a fast-path Plan routing to ``code_query``.
 
@@ -1149,7 +1253,7 @@ def _build_code_query_plan(question: str, reuse: ReusePolicy) -> Plan:
     )
 
 
-def _build_deterministic_plan(
+def _build_deterministic_plan(  # noqa: C901
     question: str,
     task_id: int | None,
     job_id: int | None,
@@ -1168,7 +1272,8 @@ def _build_deterministic_plan(
     4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
     5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
     6. Source code signals          → ``code_query``               FAST_PATH
-    7. No IDs                       → doc_search + doc_bm25        RETRIEVE
+    7. Prompt-log signals           → ``opensearch_promptlog_query`` FAST_PATH
+    8. No IDs                       → doc_search + doc_bm25        RETRIEVE
 
     Args:
         question: User question text.
@@ -1336,6 +1441,14 @@ def _build_deterministic_plan(
             reuse_policy=reuse,
             explain="Deterministic: jobs DB signals, no task/job ID → jobs query.",
         )
+
+    # Prompt-log fast-path: Bamboo self-observability queries.
+    # Must come BEFORE the doc-search fallback so that questions like
+    # "show me all questions asked today" or "what are the most frequently
+    # asked questions?" route to opensearch_promptlog_query rather than RAG.
+    # Checked after all PanDA-domain rules so numeric IDs still win.
+    if _is_promptlog_question(question):
+        return _build_promptlog_plan(question, reuse)
 
     # Code query fast-path: source code file inspection question.
     # Must come after all ID-driven and domain-specific rules so a question
