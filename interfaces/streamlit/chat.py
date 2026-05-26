@@ -1332,6 +1332,11 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
     - Rerun 1: append user message, set ``pending_question``, rerun.
     - Rerun 2: generate assistant response, clear ``pending_question``, rerun.
 
+    During rerun 2 the full chat history is rendered *before* the spinner so
+    that ``st.spinner("Thinking…")`` appears at the bottom of the page, just
+    above the input box, rather than at the top where it would be invisible in
+    long conversations.
+
     Args:
         mcp: Connected MCP client.
         transport: ``"http"`` or ``"stdio"`` — affects tracing availability.
@@ -1365,6 +1370,17 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
 
         trace_file: str = st.session_state["trace_file"]
         pre_pos = _trace_file_size(trace_file) if transport == "stdio" else 0
+
+        # Render chat history first so the spinner appears at the bottom of
+        # the page (just above the input box) rather than at the top.
+        for _msg in messages:
+            with st.chat_message(_msg["role"]):
+                _rendered = (
+                    _normalise_latex(_msg["content"])
+                    if _msg["role"] == "assistant"
+                    else _msg["content"]
+                )
+                st.markdown(_rendered)
 
         with st.spinner("Thinking…"):
             try:
@@ -1801,9 +1817,11 @@ def _render_script_download() -> None:
 def _render_rating_widget(mcp: MCPClientSync) -> None:
     """Render the star rating widget below the last assistant response.
 
-    Displays five colour-coded buttons (1–5).  On click the rating is
-    submitted via ``bamboo_promptlog_rate`` and stored in session state so
-    the widget reflects the current value on the next render cycle.
+    Displays five colour-coded buttons (1–5) when no rating has been submitted
+    for the current response.  Once the user clicks a button the rating is
+    persisted via ``bamboo_promptlog_rate``, ``last_rating`` is stored in
+    session state, and subsequent renders show only a static confirmation
+    caption — preventing duplicate votes.
 
     Does nothing when:
     - No document has been indexed yet (``last_doc_id`` is None).
@@ -1822,14 +1840,22 @@ def _render_rating_widget(mcp: MCPClientSync) -> None:
     current_rating: int | None = st.session_state.get("last_rating")
     index, doc_id = doc_ref
 
+    # Once a rating has been submitted for this document, show only the
+    # confirmation caption — do not render buttons again so the user cannot
+    # vote more than once per response.
+    if current_rating is not None:
+        stars = _RATING_STARS.get(current_rating, str(current_rating))
+        labels = {1: "Very poor", 2: "Poor", 3: "Fair", 4: "Good", 5: "Excellent"}
+        st.caption(
+            f"Your rating: {stars} — {labels.get(current_rating, '')} ({current_rating}/5)"
+        )
+        return
+
     st.markdown("**Rate this response:**")
     cols = st.columns(5)
     for i, col in enumerate(cols, start=1):
         label = _RATING_LABELS[i]
-        # Highlight the selected star with a border via markdown.
-        selected = current_rating == i
-        btn_label = f"**{label}**" if selected else label
-        if col.button(btn_label, key=f"rate_{i}_{doc_id}", use_container_width=True):
+        if col.button(label, key=f"rate_{i}_{doc_id}", use_container_width=True):
             try:
                 raw = mcp.call_tool(
                     "bamboo_promptlog_rate",
@@ -1844,13 +1870,6 @@ def _render_rating_widget(mcp: MCPClientSync) -> None:
                     st.rerun()
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 st.error(f"Rating error: {exc}", icon="🔴")
-
-    if current_rating is not None:
-        stars = _RATING_STARS.get(current_rating, str(current_rating))
-        labels = {1: "Very poor", 2: "Poor", 3: "Fair", 4: "Good", 5: "Excellent"}
-        st.caption(
-            f"Your rating: {stars} — {labels.get(current_rating, '')} ({current_rating}/5)"
-        )
 
 
 # ---------------------------------------------------------------------------

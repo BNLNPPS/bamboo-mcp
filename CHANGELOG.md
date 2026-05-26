@@ -8,6 +8,21 @@ All notable changes to Bamboo are documented here.
 
 ### Added
 
+- **Streamlit: "Thinking…" spinner now visible in long chats.** The spinner
+  is rendered after the full chat history during the pending-question pass, so
+  it appears at the bottom of the page just above the input box rather than
+  at the top where it was invisible in long conversations.
+- **Streamlit: one-shot rating widget.** After a user submits a star rating,
+  the five rating buttons are replaced by a static confirmation caption for
+  the remainder of the session, preventing duplicate votes on the same
+  response.
+- **`docs/remote-testing.md`:** Step-by-step guide for running the Bamboo MCP
+  server and Streamlit UI on lxplus and accessing them from home via an SSH
+  port-forwarding tunnel over the CERN VPN.  Covers SSH key setup, tunnel
+  command, server and Streamlit startup, health-check verification, and a
+  troubleshooting table for common failure modes.
+
+
 - **PanDA MCP OIDC token file support.** `panda_mcp_session.py` now reads
   the `id_token` field from the OIDC token cache file written by
   `get-panda-token` (from the `panda-mcp-client` package).  Token resolution
