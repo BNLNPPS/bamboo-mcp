@@ -1599,8 +1599,8 @@ def _expand_slash_command(raw: str) -> tuple[str | None, str | None]:  # noqa: C
             "Pass source_fields=[@timestamp,turn_number,session_id,"
             "model,tools_used,user_prompt,rating] as a separate argument. "
             "Pass this exact JSON as the query argument (nothing else): "
-            '{"bool":{"must":[{"exists":{"field":"rating"}},'
-            '{"range":{"rating":{"gte":1}}}]},'
+            '{"query":{"bool":{"must":[{"exists":{"field":"rating"}},'
+            '{"range":{"rating":{"gte":1}}}]}},'
             '"sort":[{"rating":{"order":"desc"}}]} '
             "Each hit includes _id automatically. "
             "Format as markdown table: "
