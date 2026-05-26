@@ -377,9 +377,9 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
         line_count = sum(1 for ln in defn.splitlines() if ln.strip())
         height_px = min(600, max(200, line_count * 14 + 60))
 
-        # Only escape & in the diagram text — < and > are valid Mermaid syntax
-        # (e.g. --> arrows) and must not be escaped. Mermaid reads innerHTML so
-        # <br/> labels are preserved correctly with htmlLabels: true.
+        # Escape & for HTML; < > are valid Mermaid arrow syntax and must not
+        # be escaped.  Backtick labels (Mermaid v11 markdown strings) are
+        # passed through as-is — securityLevel:'loose' allows them.
         safe_defn = defn.replace("&", "&amp;")
 
         html = f"""
@@ -400,11 +400,16 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     max-width: 100% !important;
     height: auto !important;
   }}
+  /* Hide Mermaid's own error graphic; we show a plain text fallback. */
+  #d{{display:none}}
 </style>
 </head>
 <body>
 <div id="container">
-  <div class="mermaid">{safe_defn}</div>
+  <div id="mermaid-diagram" class="mermaid">{safe_defn}</div>
+</div>
+<div id="fallback" style="display:none;color:#c00;font-family:monospace;font-size:13px;padding:8px">
+  ⚠ Diagram syntax error — raw definition:<br><pre>{safe_defn}</pre>
 </div>
 <script>
   mermaid.initialize({{
@@ -423,10 +428,9 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     }}
   }});
 
-  // After Mermaid renders, strip any explicit width/height attributes it
-  // inlines on the SVG (they override CSS and cause oversized rendering),
-  // then report the actual rendered height to Streamlit so the iframe
-  // resizes to fit without a fixed pixel guess.
+  // After Mermaid renders, strip explicit width/height attrs it inlines on
+  // the SVG (they override CSS and cause oversized output), then report the
+  // actual rendered height to Streamlit so the iframe fits without guessing.
   function _fixSvgAndResize() {{
     var svg = document.querySelector(".mermaid svg");
     if (!svg) return;
@@ -438,8 +442,16 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     window.parent.postMessage({{type:"streamlit:setFrameHeight", height: h}}, "*");
   }}
 
+  // Show plain-text fallback when Mermaid reports a parse error.
+  mermaid.parseError = function(err) {{
+    document.getElementById("mermaid-diagram").style.display = "none";
+    document.getElementById("fallback").style.display = "block";
+    var h = document.body.scrollHeight;
+    window.parent.postMessage({{type:"streamlit:setFrameHeight", height: h}}, "*");
+  }};
+
   // MutationObserver fires once the SVG is injected by Mermaid.
-  var _obs = new MutationObserver(function(mutations) {{
+  var _obs = new MutationObserver(function() {{
     if (document.querySelector(".mermaid svg")) {{
       _obs.disconnect();
       _fixSvgAndResize();
@@ -447,7 +459,7 @@ def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
   }});
   _obs.observe(document.body, {{childList: true, subtree: true}});
 
-  // Fallback: also run after a short delay in case the observer fires early.
+  // Fallback: run after delay in case the observer fires before layout settles.
   setTimeout(_fixSvgAndResize, 600);
 </script>
 </body>
@@ -2016,11 +2028,14 @@ def main() -> None:
         except Exception:  # pylint: disable=broad-exception-caught
             pass
 
-    # Connect / refresh server metadata if not yet done
+    # Connect / refresh server metadata if not yet done.
+    # After a successful connect we immediately rerun so the sidebar updates
+    # from "Not connected" to "Connected" without waiting for the first question.
     if not st.session_state.get("server_ok"):
         with st.spinner("Connecting to server…"):
             try:
                 _connect(mcp, plugin_id)
+                st.rerun()
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 st.error(f"Could not connect to MCP server: {exc}")
                 st.info(

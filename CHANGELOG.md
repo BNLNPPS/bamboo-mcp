@@ -12,6 +12,10 @@ All notable changes to Bamboo are documented here.
   is rendered after the full chat history during the pending-question pass, so
   it appears at the bottom of the page just above the input box rather than
   at the top where it was invisible in long conversations.
+- **Streamlit: sidebar shows "Connected" immediately on startup.** Added
+  ``st.rerun()`` after a successful first ``_connect()`` call so the
+  sidebar status updates from "Not connected" to "Connected" as soon as
+  the server handshake completes, without waiting for the first question.
 - **Streamlit: remove Experiment/plugin selector from sidebar.** The plugin
   is now fixed to the ``ASKPANDA_PLUGIN`` environment variable (default
   ``atlas``).  Switching experiments requires restarting the server with a
@@ -46,6 +50,11 @@ All notable changes to Bamboo are documented here.
   instead of arrow count, which overcounted for state diagrams and produced
   oversized iframes that pushed nodes below the visible area.  Mermaid CDN
   bumped from `@10` to `@11` for improved state diagram rendering.
+- **Streamlit: Mermaid syntax errors show plain-text fallback.** Added a
+  ``mermaid.parseError`` handler that hides the Mermaid error graphic and
+  displays the raw diagram definition in a styled ``<pre>`` block instead,
+  making it easy to see what the LLM generated without a jarring full-page
+  error image.
 - **Streamlit: Mermaid diagrams scale and auto-size correctly.** A
   ``MutationObserver`` strips Mermaid's inline ``width``/``height``
   attributes from the SVG after render (they override CSS and cause
