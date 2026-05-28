@@ -926,6 +926,17 @@ def _connect(mcp: MCPClientSync, plugin_id: str) -> None:
     except Exception:  # pylint: disable=broad-exception-caught
         st.session_state["llm_info"] = ""
 
+    # LLM probe — check auth/connectivity before the user types a question.
+    st.session_state["llm_probe"] = {"status": "", "detail": ""}
+    try:
+        probe_raw = mcp.call_tool("bamboo_llm_probe", {})
+        probe_text = _extract_text(probe_raw)
+        probe = json.loads(probe_text)
+        if isinstance(probe, dict):
+            st.session_state["llm_probe"] = probe
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # Tool absent on older server — degrade gracefully.
+
     # Display name and banner from ui_manifest
     manifest_tool = f"{plugin_id}.ui_manifest"
     if manifest_tool in tools:
@@ -996,6 +1007,27 @@ def _render_sidebar() -> tuple[str, str, str, str, str]:
             st.sidebar.caption(f"🤖 {llm_info}")
         n_tools = len(st.session_state.get("tool_names", []))
         st.sidebar.caption(f"{n_tools} tools registered")
+        # Surface LLM probe warnings so auth problems are visible before
+        # the user submits a question.
+        _probe = st.session_state.get("llm_probe", {})
+        _probe_status = _probe.get("status", "") if isinstance(_probe, dict) else ""
+        if _probe_status and _probe_status not in ("ok", "not_configured", ""):
+            _probe_detail = _probe.get("detail", "") if isinstance(_probe, dict) else ""
+            if _probe_status == "auth_error":
+                st.sidebar.warning(
+                    "⚠️ LLM authentication failed. "                    "Check your API key and restart the server.",
+                    icon="🔑",
+                )
+            elif _probe_status == "config_error":
+                st.sidebar.warning(
+                    f"⚠️ LLM configuration error: {_probe_detail}",
+                    icon="⚙️",
+                )
+            else:
+                st.sidebar.warning(
+                    f"⚠️ LLM probe: {_probe_status} — {_probe_detail}",
+                    icon="⚠️",
+                )
     else:
         st.sidebar.warning("Not connected")
 

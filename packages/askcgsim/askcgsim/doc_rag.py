@@ -27,6 +27,11 @@ from typing import Any
 
 from bamboo.tools.doc_rag import PandaDocSearchTool  # type: ignore[import-untyped]
 from bamboo.tools._sqlite_compat import ensure_sqlite_compat  # type: ignore[import-untyped]
+from bamboo.tools._chroma_routing import resolve_collection  # type: ignore[import-untyped]
+
+import logging
+
+LOG = logging.getLogger(__name__)
 
 _DEFAULT_CHROMA_PATH = "./chroma_db"
 _CGSIM_DEFAULT_COLLECTION = "cgsim_docs"
@@ -78,18 +83,16 @@ class CgsimDocSearchTool(PandaDocSearchTool):
         }
 
     def _ensure_collection(self) -> str | None:
-        """Initialise the ChromaDB client against the AskCGSim collection.
+        """Initialise (or re-validate) the ChromaDB client against the AskCGSim collection.
 
-        Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` from the
-        environment, defaulting the collection name to ``cgsim_docs`` rather
-        than the core tool's ``bamboo_docs``.
+        Re-reads the routing sidecar on every call to pick up blue/green slot
+        swaps performed by the document-monitor agent without a server restart.
+        If the resolved physical slot name has changed since the last call the
+        cached collection handle is invalidated and reopened.
 
         Returns:
             ``None`` on success, or a human-readable error string on failure.
         """
-        if self._collection is not None:
-            return None
-
         if not ensure_sqlite_compat():
             return (
                 "System SQLite is too old for ChromaDB (need >= 3.35.0) and "
@@ -105,7 +108,7 @@ class CgsimDocSearchTool(PandaDocSearchTool):
             )
 
         chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-        collection_name: str = os.getenv(
+        logical_name: str = os.getenv(
             "BAMBOO_CHROMA_COLLECTION", _CGSIM_DEFAULT_COLLECTION
         )
 
@@ -116,14 +119,30 @@ class CgsimDocSearchTool(PandaDocSearchTool):
                 "ingestion script, or run the ingestion script first."
             )
 
+        physical_name = resolve_collection(chroma_path, logical_name)
+
+        if self._collection is not None and physical_name != self._resolved_physical:
+            LOG.debug(
+                "cgsim doc_rag: slot changed '%s' → '%s'; reopening collection",
+                self._resolved_physical, physical_name,
+            )
+            self._collection = None
+            self._client = None
+            self._resolved_physical = None
+
+        if self._collection is not None:
+            return None
+
         try:
             self._client = chromadb.PersistentClient(path=chroma_path)
-            self._collection = self._client.get_collection(name=collection_name)
+            self._collection = self._client.get_collection(name=physical_name)
+            self._resolved_physical = physical_name
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._client = None
             self._collection = None
+            self._resolved_physical = None
             return (
-                f"Failed to connect to ChromaDB collection '{collection_name}': {exc}"
+                f"Failed to connect to ChromaDB collection '{physical_name}': {exc}"
             )
 
         return None

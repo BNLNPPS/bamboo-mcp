@@ -684,10 +684,30 @@ class BambooTui(App):
                         break
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
-            llm_suffix = f"\n[LLM selected] {llm_info}" if llm_info and llm_info != "not configured" else ""
-            self._write_system(
-                f"Connected via {self.cfg.transport}. Answer tool: {self.answer_tool or 'UNKNOWN'}.{llm_suffix}"
+            # Inform the user that a live LLM round-trip is about to happen.
+            # Written here (after layout is complete) so the panel renders at
+            # full terminal width rather than the narrow pre-layout size.
+            self._write_system("Verifying LLM connection… please wait…")
+            # Run the LLM probe before writing the status line so the verified
+            # badge and any warning appear in the correct order.
+            probe_status, probe_warning = await self._run_llm_probe()
+
+            base_line = (
+                f"Connected via {self.cfg.transport}. "
+                f"Answer tool: {self.answer_tool or 'UNKNOWN'}."
             )
+            if llm_info and llm_info != "not configured":
+                # Build a Rich Text object so the tick can be coloured green
+                # without affecting the rest of the message.
+                msg = Text(base_line)
+                msg.append(f"\n[LLM selected] {llm_info}")
+                if probe_status == "ok":
+                    msg.append(" ✓ verified", style="green")
+            else:
+                msg = Text(base_line)
+            self._write_panel(msg, title=f"{_now()}  system", border_style="dim")
+            if probe_warning:
+                self._write_warning(probe_warning)
 
             await self._shutdown_event.wait()
 
@@ -756,6 +776,66 @@ class BambooTui(App):
         if callable(exit_fn):
             await self._to_thread(exit_fn, None, None, None)
             return
+
+    async def _run_llm_probe(self) -> tuple[str, str]:
+        """Call bamboo_llm_probe and return the probe status and any warning text.
+
+        Sends a minimal single-token request to the configured LLM provider via
+        the server-side probe tool.  Returns a ``(status, warning)`` tuple so the
+        caller can annotate the "Connected" line before writing it and display any
+        warning immediately after.
+
+        The method is best-effort: if the tool is absent (older server version) or
+        the response cannot be parsed, it returns ``("", "")`` silently.
+
+        Returns:
+            Tuple of ``(status, warning)`` where ``status`` is the probe status
+            string (e.g. ``"ok"``, ``"auth_error"``) and ``warning`` is a
+            human-readable warning message, or an empty string when no warning
+            should be displayed.
+        """
+        import json as _json  # noqa: PLC0415
+
+        _AUTH_WARNING = (
+            "⚠️  LLM authentication failed at startup. "
+            "Check that your API key is correct and has not expired, "
+            "then restart the server."
+        )
+        _CONFIG_WARNING = (
+            "⚠️  LLM is not configured. "
+            "Set the required API key environment variable and restart the server."
+        )
+        _PROVIDER_WARNING = (
+            "⚠️  LLM provider returned an error at startup. "
+            "Responses may not work — check server logs for details."
+        )
+
+        try:
+            raw = await self._to_thread(self.mcp.call_tool, "bamboo_llm_probe", {})
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Tool absent or call failed — degrade gracefully.
+            return "", ""
+
+        try:
+            text = _extract_text(raw)
+            probe = _json.loads(text)
+            status = probe.get("status", "")
+        except Exception:  # pylint: disable=broad-exception-caught
+            return "", ""
+
+        if status == "ok" or not status:
+            return status, ""
+
+        if status == "auth_error":
+            return status, _AUTH_WARNING
+        if status == "config_error":
+            detail = probe.get("detail", "")
+            return status, f"⚠️  LLM configuration error: {detail}"
+        if status in ("not_configured",):
+            return status, _CONFIG_WARNING
+        # rate_limit / timeout / provider_error — less critical, but still noteworthy.
+        detail = probe.get("detail", status)
+        return status, _PROVIDER_WARNING + f" ({detail})"
 
     def _render_banner_placeholder(self) -> None:
         """Render a fallback banner before plugin manifest data is loaded."""
@@ -2258,6 +2338,14 @@ class BambooTui(App):
         else:
             joined = "\n  ".join(written)
             self._write_system(f"{len(written)} scripts written:\n  {joined}")
+
+    def _write_warning(self, msg: str) -> None:
+        """Write a warning message with yellow border.
+
+        Args:
+            msg: Warning message text.
+        """
+        self._write_panel(Text(msg), title=f"{_now()}  warning", border_style="yellow")
 
     def _write_error(self, msg: str) -> None:
         """Write an error message.

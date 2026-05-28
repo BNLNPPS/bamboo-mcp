@@ -8,7 +8,46 @@ All notable changes to Bamboo are documented here.
 
 ### Added
 
-- **Streamlit: "Thinking…" spinner now visible in long chats.** The spinner
+- **Blue/green ChromaDB slot routing — live re-resolution without server restart.**
+  The `bamboo-mcp-services` document-monitor agent now stores vectors in two
+  physical ChromaDB collections per logical name (`atlas_docs__a` /
+  `atlas_docs__b`) and swaps between them atomically.  Bamboo MCP now resolves
+  the logical collection name (e.g. `atlas_docs`) to the currently live
+  physical slot on **every RAG query** by reading the routing sidecar
+  (`<BAMBOO_CHROMA_PATH>/collection_routing.json`).  When the document-monitor
+  agent completes an update cycle the next query automatically picks up the new
+  slot with no server restart required.
+
+  If the sidecar is absent or has no entry for the configured logical name
+  Bamboo falls back to using the logical name directly, so deployments that
+  have not yet upgraded to the blue/green agent are unaffected.
+
+  **New module** `core/bamboo/tools/_chroma_routing.py` — standalone
+  `resolve_collection(chroma_path, logical_name)` helper.  Does not import
+  from `bamboo-mcp-services`; Bamboo MCP remains fully independent.
+
+  **Changed:** `core/bamboo/tools/doc_rag.py` (`PandaDocSearchTool`) and
+  all three plugin overrides (`askpanda_atlas`, `askpanda_epic`, `askcgsim`)
+  — `_ensure_collection` now re-reads the sidecar on every call and
+  invalidates the cached collection handle when the physical name changes.
+  A new `_resolved_physical` attribute tracks the currently open physical
+  slot; `_reset()` clears it alongside `_client` and `_collection`.
+
+  **Scripts** `probe_rag.py` and `inspect_chroma.py` both resolve the
+  logical name via the sidecar and print the resolved physical slot name in
+  their output headers.
+
+  **New tests** `tests/test_chroma_routing.py` — 11 tests covering
+  `resolve_collection` (sidecar present, absent, corrupt, missing entry,
+  mid-run update) and `PandaDocSearchTool` live re-resolution (correct slot
+  opened, cache invalidated on swap, no unnecessary reopens, pre-blue/green
+  fallback, `_reset` clears resolved name).
+
+  **Docs** `docs/rag.md` — new *Blue/green slot routing* section explaining
+  the sidecar format, live re-resolution, fallback behaviour, and how to
+  diagnose the active slot with `inspect_chroma.py` and `probe_rag.py`.
+
+ The spinner
   is rendered after the full chat history during the pending-question pass, so
   it appears at the bottom of the page just above the input box rather than
   at the top where it was invisible in long conversations.

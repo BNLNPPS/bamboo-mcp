@@ -195,20 +195,21 @@ askpanda-document-monitor-agent \
 | Environment variable | Default | Description |
 |---|---|---|
 | `BAMBOO_CHROMA_PATH` | `./chroma_db` | Path to the ChromaDB persistent directory |
-| `BAMBOO_CHROMA_COLLECTION` | plugin-dependent | Name of the ChromaDB collection to query |
+| `BAMBOO_CHROMA_COLLECTION` | plugin-dependent | **Logical** name of the ChromaDB collection to query |
 
 Each plugin defaults `BAMBOO_CHROMA_COLLECTION` to its own collection name if
 the variable is unset, so different plugins can coexist in the same ChromaDB
 directory without interfering:
 
-| Plugin | Default collection name |
+| Plugin | Default logical collection name |
 |---|---|
 | `askpanda_atlas` | `atlas_docs` |
 | `askpanda_epic` | `epic_docs` |
 | `cgsim` | `cgsim_docs` |
 
-Set `BAMBOO_CHROMA_COLLECTION` explicitly to override.  The value must match
-exactly (case-sensitive) what was used during ingestion.
+Set `BAMBOO_CHROMA_COLLECTION` explicitly to override.  The value is the
+**logical** name — Bamboo resolves it to the current live physical slot
+automatically (see [Blue/green slot routing](#bluegreen-slot-routing) below).
 
 Set `ASKPANDA_PLUGIN` to select the active plugin for the TUI and Streamlit
 interfaces (`atlas`, `epic`, or `cgsim`; default: `atlas`).
@@ -216,6 +217,59 @@ interfaces (`atlas`, `epic`, or `cgsim`; default: `atlas`).
 Set these in `bamboo_env.sh` before starting the server.
 
 ---
+
+## Blue/green slot routing
+
+The `bamboo-mcp-services` document-monitor agent stores vectors in two physical
+ChromaDB collections per logical name (e.g. `atlas_docs__a` and
+`atlas_docs__b`) and rotates between them atomically on each update cycle.
+Which slot is currently live is recorded in a small JSON sidecar file:
+
+```
+<BAMBOO_CHROMA_PATH>/collection_routing.json
+```
+
+Example content:
+
+```json
+{
+    "atlas_docs": "atlas_docs__a",
+    "epic_docs":  "epic_docs__b"
+}
+```
+
+Bamboo reads this sidecar on **every RAG query** via
+`core/bamboo/tools/_chroma_routing.py` and opens the physical slot that is
+currently live.  If the document-monitor agent completes a swap while Bamboo
+is running, the next query automatically picks up the new slot — no server
+restart is required.
+
+**Fallback behaviour:** if the sidecar is absent, unreadable, or has no entry
+for the configured logical name, Bamboo uses the logical name directly.  This
+means deployments that have not yet upgraded to the blue/green agent continue
+to work without any configuration change.
+
+### Diagnosing routing
+
+`scripts/inspect_chroma.py` now shows the resolved physical slot alongside the
+configured logical name:
+
+```
+ChromaDB path : /abs/path/to/chromadb
+Active collection (RAG/BM25 tools will query): 'atlas_docs'
+  → resolved via collection_routing.json to: 'atlas_docs__a'
+```
+
+`scripts/probe_rag.py` shows the same resolved slot in its header:
+
+```
+Bamboo RAG smoke-test
+  ChromaDB path  : /abs/path/to/chromadb
+  Collection     : atlas_docs
+  Resolved slot  : atlas_docs__a  (via collection_routing.json)
+```
+
+
 
 ## Routing summary
 

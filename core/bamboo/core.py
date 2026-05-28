@@ -44,6 +44,7 @@ from bamboo.llm.selector import LLMSelector
 from bamboo.llm.runtime import set_llm_manager, set_llm_selector
 
 from bamboo.tools.health import bamboo_health_tool
+from bamboo.tools.llm_probe import bamboo_llm_probe_tool
 from bamboo.tools.doc_rag import panda_doc_search_tool
 from bamboo.tools.doc_bm25 import panda_doc_bm25_tool
 from bamboo.tools.queue_info import panda_queue_info_tool
@@ -93,6 +94,7 @@ from bamboo.prompts.templates import (
 
 TOOLS = {
     "bamboo_health": bamboo_health_tool,
+    "bamboo_llm_probe": bamboo_llm_probe_tool,
     "bamboo_llm_answer": bamboo_llm_answer_tool,
     "bamboo_answer": bamboo_answer_tool,
     "bamboo_plan": bamboo_plan_tool,

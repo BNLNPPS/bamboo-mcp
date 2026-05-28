@@ -250,6 +250,18 @@ def main() -> None:
 
     print(f"ChromaDB path : {os.path.abspath(chroma_path)}")
     print(f"Active collection (RAG/BM25 tools will query): '{active_collection}'")
+
+    # Resolve the logical name to the current live physical slot.
+    try:
+        from bamboo.tools._chroma_routing import resolve_collection  # noqa: PLC0415
+        resolved_collection = resolve_collection(chroma_path, active_collection)
+    except ImportError:
+        resolved_collection = active_collection
+
+    if resolved_collection != active_collection:
+        print(
+            f"  → resolved via collection_routing.json to: '{resolved_collection}'"
+        )
     print()
 
     if not collections:
@@ -258,12 +270,12 @@ def main() -> None:
         print("This means no documents have been ingested yet, or the path is wrong.")
         return
 
-    found_active = _print_collection_table(collections, active_collection)
-    _print_diagnosis(client, collections, active_collection, found_active)
+    found_active = _print_collection_table(collections, resolved_collection)
+    _print_diagnosis(client, collections, resolved_collection, found_active)
 
     if args.sources and found_active:
         print()
-        _print_sources(client, active_collection)
+        _print_sources(client, resolved_collection)
 
 
 if __name__ == "__main__":

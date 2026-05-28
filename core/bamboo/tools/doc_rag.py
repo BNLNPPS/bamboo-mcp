@@ -19,11 +19,15 @@ error message rather than raising — callers always receive a result.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from bamboo.tools._sqlite_compat import ensure_sqlite_compat
+from bamboo.tools._chroma_routing import resolve_collection
 from bamboo.tools.base import text_content
+
+LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,6 +59,9 @@ class PandaDocSearchTool:
         """Initialise the tool with no active ChromaDB client or collection."""
         self._client: Any = None
         self._collection: Any = None
+        #: Physical collection name that _collection was opened against.
+        #: Re-checked on every call; reset when the sidecar reports a new slot.
+        self._resolved_physical: str | None = None
 
     # ------------------------------------------------------------------
     # Tool protocol
@@ -139,19 +146,21 @@ class PandaDocSearchTool:
     # ------------------------------------------------------------------
 
     def _ensure_collection(self) -> str | None:
-        """Initialise the ChromaDB client and collection if not already done.
+        """Initialise (or re-validate) the ChromaDB client and collection.
 
-        Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` from the
-        environment at call time so that changes between test runs take effect
-        without restarting the process.
+        Called on every :meth:`call` invocation.  Re-reads the routing sidecar
+        (``<BAMBOO_CHROMA_PATH>/collection_routing.json``) to resolve the
+        logical collection name to the currently live physical slot.  If the
+        resolved physical name has changed since the last call — because the
+        ``bamboo-mcp-services`` document-monitor agent completed a blue/green
+        swap — the cached collection handle is invalidated and a new one is
+        opened against the new slot.  This means the server picks up a freshly
+        ingested corpus without requiring a restart.
 
         Returns:
             ``None`` on success, or a human-readable error string if
             initialisation failed (package missing, path absent, etc.).
         """
-        if self._collection is not None:
-            return None
-
         # --- import guard ---------------------------------------------------
         if not ensure_sqlite_compat():
             return (
@@ -168,7 +177,7 @@ class PandaDocSearchTool:
             )
 
         chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-        collection_name: str = os.getenv(
+        logical_name: str = os.getenv(
             "BAMBOO_CHROMA_COLLECTION", _DEFAULT_CHROMA_COLLECTION
         )
 
@@ -180,15 +189,33 @@ class PandaDocSearchTool:
                 "ingestion script, or run the ingestion script first."
             )
 
+        # --- live re-resolution via routing sidecar -------------------------
+        physical_name = resolve_collection(chroma_path, logical_name)
+
+        # Invalidate the cached handle if the active slot has changed.
+        if self._collection is not None and physical_name != self._resolved_physical:
+            LOG.debug(
+                "doc_rag: slot changed '%s' → '%s'; reopening collection",
+                self._resolved_physical, physical_name,
+            )
+            self._collection = None
+            self._client = None
+            self._resolved_physical = None
+
+        if self._collection is not None:
+            return None
+
         # --- connect --------------------------------------------------------
         try:
             self._client = chromadb.PersistentClient(path=chroma_path)
-            self._collection = self._client.get_collection(name=collection_name)
+            self._collection = self._client.get_collection(name=physical_name)
+            self._resolved_physical = physical_name
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # Reset so the next call retries rather than using a broken handle.
             self._client = None
             self._collection = None
-            return f"Failed to connect to ChromaDB collection '{collection_name}': {exc}"
+            self._resolved_physical = None
+            return f"Failed to connect to ChromaDB collection '{physical_name}': {exc}"
 
         return None
 
@@ -246,7 +273,7 @@ class PandaDocSearchTool:
         return "\n".join(lines)
 
     def _reset(self) -> None:
-        """Clear the cached client and collection.
+        """Clear the cached client, collection, and resolved physical name.
 
         Intended for use in tests to force re-initialisation with different
         environment variables or mock objects.
@@ -256,6 +283,7 @@ class PandaDocSearchTool:
         """
         self._client = None
         self._collection = None
+        self._resolved_physical = None
 
 
 panda_doc_search_tool = PandaDocSearchTool()
