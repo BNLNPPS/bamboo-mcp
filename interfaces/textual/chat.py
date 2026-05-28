@@ -655,6 +655,8 @@ class BambooTui(App):
 
     async def _mcp_main(self) -> None:
         """Own the MCP lifecycle in a single task."""
+        _startup_timeout: int = int(os.getenv("BAMBOO_STARTUP_TIMEOUT", "20"))
+        self._startup_phase: str = "connecting"
         try:
             # Don't wrap _mcp_connect in wait_for — the MCPClientSync._run()
             # has its own timeout (BAMBOO_MCP_CLIENT_TIMEOUT, default 120 s).
@@ -662,11 +664,14 @@ class BambooTui(App):
             # which raises CancelledError through _run() even when the server
             # is starting correctly but slowly.
             await self._mcp_connect()
-            await asyncio.wait_for(self._refresh_tools(), timeout=20)
+            self._startup_phase = "loading tools"
+            await asyncio.wait_for(self._refresh_tools(), timeout=_startup_timeout)
             self._detect_answer_tool()
 
-            await asyncio.wait_for(self._load_banner(), timeout=20)
+            self._startup_phase = "loading banner"
+            await asyncio.wait_for(self._load_banner(), timeout=_startup_timeout)
             self._render_banner()
+            self._startup_phase = "ready"
 
             self._mcp_ready = True
             # Fetch LLM info from the server-side health tool — calling
@@ -713,9 +718,20 @@ class BambooTui(App):
 
         except asyncio.CancelledError:
             raise
+        except (asyncio.TimeoutError, TimeoutError):
+            phase = getattr(self, "_startup_phase", "unknown")
+            self._write_error(
+                f"Startup timed out while {phase} "
+                f"(limit: {_startup_timeout}s). "
+                "The server node may be under load. "
+                "Retry, or set BAMBOO_STARTUP_TIMEOUT to a higher value "
+                "(e.g. export BAMBOO_STARTUP_TIMEOUT=60)."
+            )
+            await self._shutdown_event.wait()
         except Exception as exc:
-            self._write_error(f"Startup failed: {type(exc).__name__}: {exc}")
-            self._write_system("Check ~/.textual/logs for details.")
+            self._write_error(
+                f"Startup failed: {type(exc).__name__}: {exc or '(no detail)'}"
+            )
             await self._shutdown_event.wait()
         finally:
             try:
