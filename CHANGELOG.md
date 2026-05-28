@@ -12,6 +12,13 @@ All notable changes to Bamboo are documented here.
   is rendered after the full chat history during the pending-question pass, so
   it appears at the bottom of the page just above the input box rather than
   at the top where it was invisible in long conversations.
+- **RAG synthesis: prohibit general-knowledge fallback when excerpts are insufficient.**
+  ``_SYSTEM_RAG`` now instructs the LLM to tell the user the documentation
+  did not contain enough information rather than supplementing with general
+  knowledge.  The previous wording ("supplement with your general knowledge
+  but clearly distinguish...") gave the LLM a loophole to produce fully
+  hallucinated answers dressed as general knowledge when the retrieved
+  excerpts were topically adjacent but not actually relevant.
 - **Streamlit: sidebar shows "Connected" immediately on startup.** Added
   ``st.rerun()`` after a successful first ``_connect()`` call so the
   sidebar status updates from "Not connected" to "Connected" as soon as
@@ -21,6 +28,11 @@ All notable changes to Bamboo are documented here.
   ``atlas``).  Switching experiments requires restarting the server with a
   different env var rather than hot-switching in the UI, which avoids
   confusing mid-session state resets.
+- **Streamlit: rating poll retries up to 3×0.5 s.** Replaces the
+  single-retry flag with a tight loop that polls ``bamboo_promptlog_status``
+  up to three times at 0.5 s intervals, stopping as soon as ``last_doc_id``
+  is set.  Fixes intermittent missing rating buttons when OpenSearch flushes
+  slowly.
 - **Streamlit: rating widget retry on first question after restart.**
   If the deferred prompt-log poll fires before OpenSearch has flushed the
   background write (``last_doc_id`` still ``None``), a ``retry_promptlog``
@@ -50,6 +62,15 @@ All notable changes to Bamboo are documented here.
   instead of arrow count, which overcounted for state diagrams and produced
   oversized iframes that pushed nodes below the visible area.  Mermaid CDN
   bumped from `@10` to `@11` for improved state diagram rendering.
+- **Streamlit: single-iframe mode no longer duplicates text.** The chat
+  history render loop now skips ``st.markdown()`` for the last assistant
+  message when ``BAMBOO_DIAGRAM_MODE=single-iframe`` and diagrams are
+  present — ``_render_mermaid_single_iframe()`` renders both text and
+  diagrams together.
+- **Streamlit: classic mode sanitises edge labels with special chars.**
+  A ``re.sub`` pass quotes unquoted Mermaid edge labels containing ``(``,
+  ``)``, or ``<`` before rendering, preventing Mermaid v11 from tokenising
+  them as separate nodes (e.g. ``(loop counter < max)``) .
 - **Streamlit: dual Mermaid renderer via ``BAMBOO_DIAGRAM_MODE``.** The
   existing per-diagram ``components.html`` renderer is refactored into
   ``_render_mermaid_classic()`` and now uses ``mermaid.render()``

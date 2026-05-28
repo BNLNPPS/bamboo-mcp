@@ -424,6 +424,21 @@ def _render_mermaid_classic(diagram_defs: list[str]) -> None:
             st.caption(f"Diagram {i + 1}")
 
         height_px = _mermaid_height_estimate(defn)
+
+        # Quote unquoted edge labels that contain special characters
+        # ( ) < > which Mermaid v11 may tokenise as separate nodes.
+        # Only labels between arrow tokens and a pipe | are affected.
+        import re as _re
+        defn = _re.sub(
+            r'(-->|--[^>]*>|===+>?)\s*([^"|\n{\[\]]+?)\s*(\|)',
+            lambda m: (
+                '{} "{}" {}'.format(
+                    m.group(1), m.group(2).strip(), m.group(3))
+                if any(c in m.group(2) for c in "()<>")
+                else m.group(0)
+            ),
+            defn,
+        )
         safe_defn = defn.replace("&", "&amp;")
         uid = f"mermaid-{i}"
 
@@ -536,11 +551,13 @@ def _render_mermaid_single_iframe(
                  font-size:0.88em; }}
   #prose pre  {{ background:#f3f3f3; border-radius:4px; padding:8px;
                  overflow-x:auto; }}
-  .diagram-wrap {{ margin: 12px 0; overflow: hidden; }}
-  .diagram-wrap.portrait {{ float: right; width: 38%;
-                            margin: 0 0 12px 16px; clear: right; }}
-  .diagram-wrap.landscape {{ width: 100%; clear: both; }}
-  .diagram-wrap svg {{ width: 100% !important; height: auto !important; }}
+  .diagram-wrap {{ margin: 12px 0; }}
+  .diagram-wrap.portrait {{ float: right; width: min(38%, 340px);
+                            margin: 0 0 12px 16px; clear: right;
+                            overflow-x: auto; }}
+  .diagram-wrap.landscape {{ width: 100%; clear: both; overflow-x: auto; }}
+  .diagram-wrap svg {{ width: 100% !important; max-width: 100% !important;
+                       height: auto !important; display: block; }}
   .diagram-error {{ color:#c00; font-family:monospace; font-size:12px;
                     padding:6px; border:1px solid #fcc; border-radius:4px; }}
   #clearfix {{ clear: both; }}
@@ -1645,21 +1662,42 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
     if st.session_state.pop("poll_promptlog", False):
         _poll_promptlog_events(mcp)
         if st.session_state.get("last_doc_id") is None:
-            st.session_state["retry_promptlog"] = True
+            # OpenSearch write not yet flushed — retry up to 3 times with
+            # 0.5 s intervals before giving up and showing no rating widget.
+            for _ in range(3):
+                time.sleep(0.5)
+                _poll_promptlog_events(mcp)
+                if st.session_state.get("last_doc_id") is not None:
+                    break
 
+    # Legacy single-retry flag — kept for safety but no longer set.
     if st.session_state.pop("retry_promptlog", False):
         time.sleep(0.5)
         _poll_promptlog_events(mcp)
 
-    # Render chat history
-    for msg in st.session_state["messages"]:
+    # Render chat history.
+    # In single-iframe mode, skip st.markdown() for the last assistant message
+    # when diagrams exist — _render_mermaid_single_iframe() will render both
+    # the text and diagrams together, preventing duplication.
+    _messages = st.session_state["messages"]
+    _last_idx = len(_messages) - 1
+    _skip_last_markdown = (
+        _DIAGRAM_MODE == "single-iframe"
+        and bool(st.session_state.get("last_diagrams"))
+        and _last_idx >= 0
+        and _messages[_last_idx]["role"] == "assistant"
+    )
+    for _mi, msg in enumerate(_messages):
         with st.chat_message(msg["role"]):
             rendered = (
                 _normalise_latex(msg["content"])
                 if msg["role"] == "assistant"
                 else msg["content"]
             )
-            st.markdown(rendered)
+            if _skip_last_markdown and _mi == _last_idx:
+                pass  # deferred to single-iframe renderer below
+            else:
+                st.markdown(rendered)
 
     # After the last assistant reply: render diagrams, plot, detail expanders.
     if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
