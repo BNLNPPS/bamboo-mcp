@@ -27,6 +27,7 @@ import re
 from typing import Any, cast
 
 from bamboo.tools._sqlite_compat import ensure_sqlite_compat
+from bamboo.tools._chroma_routing import resolve_collection
 from bamboo.tools.base import text_content
 
 _DEFAULT_CHROMA_PATH = "./chroma_db"
@@ -68,6 +69,8 @@ class PandaDocBM25Tool:
         self._metadatas: list[dict[str, Any]] = []
         self._bm25: Any = None
         self._cached_count: int = -1
+        #: Physical collection name the current index was built from.
+        self._resolved_physical: str | None = None
 
     # ------------------------------------------------------------------
     # Tool protocol
@@ -197,7 +200,7 @@ class PandaDocBM25Tool:
             )
 
         chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-        collection_name: str = os.getenv(
+        logical_name: str = os.getenv(
             "BAMBOO_CHROMA_COLLECTION", _DEFAULT_CHROMA_COLLECTION
         )
 
@@ -207,12 +210,20 @@ class PandaDocBM25Tool:
                 "Set BAMBOO_CHROMA_PATH to the directory created by the ingestion script."
             )
 
+        physical_name = resolve_collection(chroma_path, logical_name)
+
+        # Invalidate the cached index if the active slot has changed.
+        if self._bm25 is not None and physical_name != self._resolved_physical:
+            self._bm25 = None
+            self._cached_count = -1
+            self._resolved_physical = None
+
         try:
             client = chromadb.PersistentClient(path=chroma_path)
-            collection = client.get_collection(name=collection_name)
+            collection = client.get_collection(name=physical_name)
             current_count = collection.count()
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            return f"Failed to connect to ChromaDB collection '{collection_name}': {exc}"
+            return f"Failed to connect to ChromaDB collection '{physical_name}': {exc}"
 
         # Rebuild cache only when collection has changed.
         if self._bm25 is not None and current_count == self._cached_count:
@@ -250,6 +261,7 @@ class PandaDocBM25Tool:
             tokenized = [_tokenize(d) for d in all_docs]
             self._bm25 = BM25Okapi(tokenized)
             self._cached_count = current_count
+            self._resolved_physical = physical_name
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._bm25 = None
             self._cached_count = -1
@@ -309,6 +321,7 @@ class PandaDocBM25Tool:
         self._metadatas = []
         self._bm25 = None
         self._cached_count = -1
+        self._resolved_physical = None
 
 
 panda_doc_bm25_tool = PandaDocBM25Tool()

@@ -25,6 +25,7 @@ from typing import Any, cast
 
 from bamboo.tools.doc_bm25 import PandaDocBM25Tool  # type: ignore[import-untyped]
 from bamboo.tools._sqlite_compat import ensure_sqlite_compat  # type: ignore[import-untyped]
+from bamboo.tools._chroma_routing import resolve_collection  # type: ignore[import-untyped]
 
 _DEFAULT_CHROMA_PATH = "./chroma_db"
 _EPIC_DEFAULT_COLLECTION = "epic_docs"
@@ -105,7 +106,7 @@ class EpicDocBM25Tool(PandaDocBM25Tool):
             )
 
         chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-        collection_name: str = os.getenv(
+        logical_name: str = os.getenv(
             "BAMBOO_CHROMA_COLLECTION", _EPIC_DEFAULT_COLLECTION
         )
 
@@ -115,12 +116,19 @@ class EpicDocBM25Tool(PandaDocBM25Tool):
                 "Set BAMBOO_CHROMA_PATH to the directory created by the ingestion script."
             )
 
+        physical_name = resolve_collection(chroma_path, logical_name)
+
+        if self._bm25 is not None and physical_name != self._resolved_physical:
+            self._bm25 = None
+            self._cached_count = -1
+            self._resolved_physical = None
+
         try:
             client = chromadb.PersistentClient(path=chroma_path)
-            collection = client.get_collection(name=collection_name)
+            collection = client.get_collection(name=physical_name)
             current_count = collection.count()
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            return f"Failed to connect to ChromaDB collection '{collection_name}': {exc}"
+            return f"Failed to connect to ChromaDB collection '{physical_name}': {exc}"
 
         # Rebuild cache only when collection has changed.
         if self._bm25 is not None and current_count == self._cached_count:
@@ -162,6 +170,7 @@ class EpicDocBM25Tool(PandaDocBM25Tool):
             from bamboo.tools.doc_bm25 import _tokenize  # type: ignore[import-untyped]
             self._bm25 = BM25Okapi([_tokenize(d) for d in all_docs])
             self._cached_count = current_count
+            self._resolved_physical = physical_name
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._bm25 = None
             self._cached_count = -1
