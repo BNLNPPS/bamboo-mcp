@@ -1,7 +1,7 @@
 """Lightweight caller for upstream MCP tool servers.
 
 Bamboo tools that delegate to external MCP servers (grid-monitoring,
-bigpanda-downloader, etc.) use this module to invoke those tools.
+panda, etc.) use this module to invoke those tools.
 
 The caller spawns a one-shot ``bamboo.server`` subprocess and uses the
 stdio MCP transport, exactly as the Streamlit and Textual interfaces do.

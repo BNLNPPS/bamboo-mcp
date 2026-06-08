@@ -30,7 +30,7 @@ For failure diagnosis (downloading the pilot log, classifying the error, suggest
 
 ## Data source
 
-Fetches from the `bigpanda-downloader` MCP server's `download_bigpanda_metadata` tool, which calls:
+Fetches from the `panda` MCP server's `download_bigpanda_metadata` tool, which calls:
 
 ```
 GET https://bigpanda.cern.ch/job?pandaid=<job_id>&json

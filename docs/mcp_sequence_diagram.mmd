@@ -39,12 +39,12 @@ sequenceDiagram
 
         alt job + analysis keywords → log analysis
             BA->>TOOL: panda_log_analysis.call({job_id})
-            TOOL->>UP: bigpanda-downloader MCP tool
+            TOOL->>UP: panda MCP tool
             UP-->>TOOL: raw log + metadata
             TOOL-->>BA: text_content(json.dumps({evidence}))
         else job_id only → job status
             BA->>TOOL: panda_job_status.call({job_id})
-            TOOL->>UP: bigpanda-downloader MCP tool
+            TOOL->>UP: panda MCP tool
             UP-->>TOOL: job metadata JSON
             TOOL-->>BA: text_content(json.dumps({evidence}))
         else task_id → task status

@@ -96,6 +96,15 @@ All notable changes to Bamboo are documented here.
 
 ### Fixed
 
+- **`panda_job_status`: MCPCaller server name mismatch caused "server not
+  connected" errors.** `job_status.py` used `_SERVER = "bigpanda-downloader"`
+  but `panda_mcp_session.py` registers the session under
+  `PANDA_MCP_SERVER_NAME = "panda"`.  The lookup always returned `None`,
+  so every job-status query failed regardless of whether the PanDA MCP
+  connection was healthy.  Fixed `_SERVER` to `"panda"` and updated the
+  stale server name in `_mcp_caller.py` docstring,
+  `docs/tools/panda_job_status.md`, and `docs/mcp_sequence_diagram.mmd`.
+
 - **Streamlit: Mermaid diagram height and rendering.** Height estimation
   now uses non-empty line count (`line_count * 20 + 80`, capped at 800 px)
   instead of arrow count, which overcounted for state diagrams and produced

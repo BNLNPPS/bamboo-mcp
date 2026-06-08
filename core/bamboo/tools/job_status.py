@@ -1,6 +1,6 @@
 """PanDA job status tool.
 
-Fetches job metadata from BigPanDA via the ``bigpanda-downloader`` MCP
+Fetches job metadata from BigPanDA via the ``panda`` MCP
 server and returns structured evidence suitable for LLM summarisation.
 
 The upstream server returns a JSON object with ``job`` and ``files`` keys.
@@ -18,7 +18,7 @@ from bamboo.tools.base import MCPContent, text_content
 
 logger = logging.getLogger(__name__)
 
-_SERVER = "bigpanda-downloader"
+_SERVER = "panda"
 _TOOL = "download_bigpanda_metadata"
 
 
