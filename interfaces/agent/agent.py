@@ -865,15 +865,20 @@ class BambooAgent:
         same LLM configuration (provider, model, API key resolution) used by
         the server is respected, without duplicating the initialisation logic.
 
-        The ``model`` argument carries the profile name (e.g. ``"reasoning"``,
-        ``"fast"``); the server's ``LLMPassthroughTool`` forwards it to the
-        ``LLMSelector`` which maps it to the configured ``ModelSpec``.
+        Note:
+            ``bamboo_llm_answer`` always uses the server's configured default
+            LLM profile and does not accept a profile selector argument
+            (``additionalProperties: False`` in its input schema would reject
+            any extra key).  The ``profile`` parameter is retained in the
+            signature for documentation and future use should the tool gain
+            profile selection support, but is not forwarded in the call.
 
         Args:
             system: System prompt string.
             user: Current user message content.
             history: Prior turn messages as ``[{"role": ..., "content": ...}]``.
-            profile: LLM profile name — ``"reasoning"`` or ``"fast"``.
+            profile: Intended LLM profile (``"reasoning"`` or ``"fast"``).
+                Currently informational only — not forwarded to the tool.
             max_tokens: Token budget for this specific call.
 
         Returns:
@@ -891,7 +896,6 @@ class BambooAgent:
             {
                 "messages": messages,
                 "max_tokens": max_tokens,
-                "model": profile,
             },
         )
         text = _observation_from_result(result)
