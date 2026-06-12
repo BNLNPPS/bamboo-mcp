@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,7 @@ from askpanda_atlas.harvester_worker_impl import (
     _default_window,
     _error_evidence,
     _extract_records,
+    _parse_window_from_question,
     _resolve_dt,
     _safe_int,
     _sanitise_window,
@@ -225,12 +227,102 @@ class TestDefaultWindow:
 
     def test_format_matches_iso(self) -> None:
         """Both timestamps match the expected ISO-8601 format."""
-        from datetime import datetime
-
         from_dt, to_dt = _default_window()
         # Will raise ValueError if format is wrong.
         datetime.fromisoformat(from_dt)
         datetime.fromisoformat(to_dt)
+
+
+# ---------------------------------------------------------------------------
+# _parse_window_from_question
+# ---------------------------------------------------------------------------
+
+
+class TestParseWindowFromQuestion:
+    """Unit tests for :func:`_parse_window_from_question`."""
+
+    def _approx_now(self) -> datetime:
+        return datetime.now(tz=timezone.utc).replace(microsecond=0)
+
+    def test_last_n_hours(self) -> None:
+        """'last N hours' returns a window N hours before now."""
+        before = self._approx_now()
+        result = _parse_window_from_question("show running pilot counts for the last 6 hours")
+        after = self._approx_now()
+        assert result is not None
+        f_str, t_str = result
+        f = datetime.strptime(f_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t = datetime.strptime(t_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert before - timedelta(hours=6, seconds=2) <= f <= after - timedelta(hours=6) + timedelta(seconds=2)
+        assert before - timedelta(seconds=2) <= t <= after + timedelta(seconds=2)
+
+    def test_last_n_minutes(self) -> None:
+        """'last N minutes' returns a window N minutes before now."""
+        result = _parse_window_from_question("pilots at BNL in the last 30 minutes")
+        assert result is not None
+        f_str, t_str = result
+        f = datetime.strptime(f_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t = datetime.strptime(t_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert abs((t - f).total_seconds() - 30 * 60) < 5
+
+    def test_last_n_days(self) -> None:
+        """'last N days' returns a window N days before now."""
+        result = _parse_window_from_question("pilot counts at CERN for the last 2 days")
+        assert result is not None
+        f_str, t_str = result
+        f = datetime.strptime(f_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t = datetime.strptime(t_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert abs((t - f).total_seconds() - 2 * 86400) < 5
+
+    def test_today(self) -> None:
+        """'today' returns midnight UTC today to now."""
+        result = _parse_window_from_question("pilot counts at BNL today")
+        assert result is not None
+        f_str, _ = result
+        assert "T00:00:00" in f_str
+
+    def test_yesterday(self) -> None:
+        """'yesterday' returns midnight yesterday to now."""
+        result = _parse_window_from_question("failed pilots yesterday")
+        assert result is not None
+        f_str, _ = result
+        f = datetime.strptime(f_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        midnight_yesterday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        assert abs((f - midnight_yesterday).total_seconds()) < 5
+
+    def test_no_temporal_expression_returns_none(self) -> None:
+        """Questions with no temporal expression return None."""
+        assert _parse_window_from_question("how many pilots are running at BNL") is None
+        assert _parse_window_from_question("pilot counts at CERN") is None
+
+    def test_case_insensitive(self) -> None:
+        """Pattern matching is case-insensitive."""
+        assert _parse_window_from_question("LAST 6 HOURS at BNL") is not None
+
+    def test_window_to_dt_is_not_in_future(self) -> None:
+        """to_dt is always <= now + 2 seconds (not a future timestamp)."""
+        result = _parse_window_from_question("last 6 hours")
+        assert result is not None
+        _, t_str = result
+        t = datetime.strptime(t_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        now = datetime.now(tz=timezone.utc)
+        assert t <= now + timedelta(seconds=2)
+
+    def test_bnl_question_produces_correct_6h_window(self) -> None:
+        """The exact failing question produces a correct 6-hour window."""
+        before = self._approx_now()
+        result = _parse_window_from_question(
+            "show running pilot counts at BNL for the last 6 hours"
+        )
+        after = self._approx_now()
+        assert result is not None
+        f_str, t_str = result
+        f = datetime.strptime(f_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t = datetime.strptime(t_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert abs((t - f).total_seconds() - 6 * 3600) < 5
+        assert t <= after + timedelta(seconds=2)
+        assert before - timedelta(hours=6, seconds=2) <= f
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +346,6 @@ class TestResolveDt:
 
     def test_now_minus_hours(self) -> None:
         """``now-Nh`` resolves to approximately N hours before current UTC time."""
-        from datetime import datetime, timedelta, timezone
         before = datetime.now(tz=timezone.utc)
         result = _resolve_dt("now-6h", self._FALLBACK)
         after = datetime.now(tz=timezone.utc)
@@ -263,16 +354,16 @@ class TestResolveDt:
 
     def test_now_minus_minutes(self) -> None:
         """``now-Nm`` resolves to approximately N minutes before current UTC time."""
-        from datetime import datetime, timedelta, timezone
         before = datetime.now(tz=timezone.utc)
         result = _resolve_dt("now-30m", self._FALLBACK)
         after = datetime.now(tz=timezone.utc)
         parsed = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        assert before - timedelta(minutes=30, seconds=2) <= parsed <= after - timedelta(minutes=30) + timedelta(seconds=2)
+        lower = before - timedelta(minutes=30, seconds=2)
+        upper = after - timedelta(minutes=30) + timedelta(seconds=2)
+        assert lower <= parsed <= upper
 
     def test_now_minus_days(self) -> None:
         """``now-Nd`` resolves to approximately N days before current UTC time."""
-        from datetime import datetime, timedelta, timezone
         before = datetime.now(tz=timezone.utc)
         result = _resolve_dt("now-1d", self._FALLBACK)
         after = datetime.now(tz=timezone.utc)
@@ -286,7 +377,6 @@ class TestResolveDt:
 
     def test_now_gives_current_time(self) -> None:
         """``now`` resolves to the current UTC time (within 2 seconds)."""
-        from datetime import datetime, timedelta, timezone
         before = datetime.now(tz=timezone.utc)
         result = _resolve_dt("now", self._FALLBACK)
         after = datetime.now(tz=timezone.utc)
@@ -319,13 +409,11 @@ class TestSanitiseWindow:
 
     def _now_str(self, delta_seconds: int = 0) -> str:
         """Return a UTC ISO-8601 string offset by *delta_seconds* from now."""
-        from datetime import datetime, timedelta, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         return (now + timedelta(seconds=delta_seconds)).strftime("%Y-%m-%dT%H:%M:%S")
 
     def test_valid_past_window_unchanged(self) -> None:
         """A plausible past window is returned unchanged."""
-        from datetime import datetime, timedelta, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         from_dt = (now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
         to_dt = now.strftime("%Y-%m-%dT%H:%M:%S")
@@ -335,7 +423,6 @@ class TestSanitiseWindow:
 
     def test_future_to_dt_clamped_to_now(self) -> None:
         """A to_dt more than 60 s in the future is clamped to now."""
-        from datetime import datetime, timedelta, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         future_to = (now + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
         past_from = (now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -350,27 +437,19 @@ class TestSanitiseWindow:
         Simulates the observed failure: at 17:33 UTC, LLM produces
         from_dt=18:00, to_dt=23:59 for "last 6 hours".
         """
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
-        # Use a date in the past so from_dt/to_dt are unambiguously "future"
-        # relative to a hypothetical earlier query time.  We simulate by
-        # constructing a window where from_dt > now.
         future_from = "2099-01-01T18:00:00"
         future_to = "2099-01-01T23:59:59"
         f, t = _sanitise_window(future_from, future_to,
                                 "show running pilot counts for the last 6 hours")
-        # to_dt should be clamped to now; from_dt should be to_dt - 6h
         t_parsed = datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         f_parsed = datetime.strptime(f, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-        from datetime import timedelta
         assert t_parsed <= now + timedelta(seconds=2)
         assert abs((t_parsed - f_parsed).total_seconds() - 6 * 3600) < 5
 
     def test_from_dt_re_derived_hours(self) -> None:
         """When from_dt >= to_dt, re-derives from question using hour delta."""
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
-        # Construct from_dt == to_dt (degenerate window)
         ts = now.strftime("%Y-%m-%dT%H:%M:%S")
         f, t = _sanitise_window(ts, ts, "last 3 hours at BNL")
         f_parsed = datetime.strptime(f, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
@@ -379,7 +458,6 @@ class TestSanitiseWindow:
 
     def test_from_dt_re_derived_minutes(self) -> None:
         """When from_dt >= to_dt, re-derives from question using minute delta."""
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         ts = now.strftime("%Y-%m-%dT%H:%M:%S")
         f, t = _sanitise_window(ts, ts, "past 30 minutes")
@@ -389,7 +467,6 @@ class TestSanitiseWindow:
 
     def test_no_question_match_falls_back_to_one_hour(self) -> None:
         """When from_dt >= to_dt and no pattern in question, defaults to 1 hour."""
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         ts = now.strftime("%Y-%m-%dT%H:%M:%S")
         f, t = _sanitise_window(ts, ts, "show pilot counts at BNL")
@@ -399,7 +476,6 @@ class TestSanitiseWindow:
 
     def test_slightly_future_to_dt_within_tolerance_unchanged(self) -> None:
         """A to_dt within 60 s of now (clock skew) is not clamped."""
-        from datetime import datetime, timedelta, timezone
         now = datetime.now(tz=timezone.utc).replace(microsecond=0)
         near_future = (now + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S")
         past_from = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -834,7 +910,7 @@ class TestToolCall:
         assert "lastupdate_to=" in captured[0]
 
     def test_call_uses_explicit_timestamps(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Explicit from_dt / to_dt are forwarded to the URL verbatim."""
+        """Explicit from_dt / to_dt are forwarded when question has no temporal expression."""
         captured: list[str] = []
 
         def _capture(url: str, ttl: float = 30.0) -> tuple[int, str, str, dict[str, Any]]:
@@ -845,7 +921,7 @@ class TestToolCall:
         monkeypatch.setattr("askpanda_atlas._cache.cached_fetch_jsonish", _capture)
 
         asyncio.run(panda_harvester_workers_tool.call({
-            "question": "Pilots yesterday",
+            "question": "How many pilots are running at BNL?",
             "from_dt": "2026-03-24T00:00:00",
             "to_dt": "2026-03-25T00:00:00",
         }))

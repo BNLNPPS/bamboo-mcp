@@ -224,6 +224,67 @@ def _sanitise_window(
     return from_dt, to_dt
 
 
+def _parse_window_from_question(question: str) -> tuple[str, str] | None:
+    """Parse a time window from natural-language question text.
+
+    Extracts relative temporal expressions and converts them to absolute
+    ISO-8601 ``(from_dt, to_dt)`` strings anchored to the current UTC wall
+    clock.  This is the authoritative window source when a relative expression
+    is present — it is always preferred over planner-supplied timestamps, which
+    may be computed relative to midnight rather than to the actual query time.
+
+    Recognised patterns (case-insensitive):
+
+    - ``"last/past N hours/minutes/days"`` — e.g. "last 6 hours"
+    - ``"yesterday"`` / ``"since yesterday"`` — full previous UTC day to now
+    - ``"today"`` / ``"since today"`` — UTC midnight today to now
+
+    Returns ``None`` for questions with no temporal expression (e.g. "how many
+    pilots are running at BNL?"), allowing the caller to use planner-supplied
+    timestamps or the default 1-hour window.
+
+    Args:
+        question: Raw user question text.
+
+    Returns:
+        ``(from_dt, to_dt)`` ISO-8601 strings (UTC, ``YYYY-MM-DDTHH:MM:SS``),
+        or ``None`` when no relative temporal expression is found.
+    """
+    q = question.lower()
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%S"
+
+    # "last/past N hours/minutes/days"
+    _window = re.search(
+        r"(?:last|past|in\s+the\s+last|in\s+the\s+past)\s+(\d+)\s+"
+        r"(hour|hours|hr|hrs|minute|minutes|min|mins|day|days)",
+        q,
+    )
+    if _window:
+        n = int(_window.group(1))
+        unit = _window.group(2)
+        if unit.startswith("min"):
+            delta = timedelta(minutes=n)
+        elif unit.startswith("day"):
+            delta = timedelta(days=n)
+        else:
+            delta = timedelta(hours=n)
+        return (now - delta).strftime(fmt), now.strftime(fmt)
+
+    # "yesterday" / "since yesterday"
+    if re.search(r"\b(?:since\s+)?yesterday\b", q):
+        midnight_today = now.replace(hour=0, minute=0, second=0)
+        midnight_yesterday = midnight_today - timedelta(days=1)
+        return midnight_yesterday.strftime(fmt), now.strftime(fmt)
+
+    # "today" / "since today"
+    if re.search(r"\b(?:since\s+)?today\b", q):
+        midnight_today = now.replace(hour=0, minute=0, second=0)
+        return midnight_today.strftime(fmt), now.strftime(fmt)
+
+    return None
+
+
 def build_harvester_url(
     base_url: str,
     from_dt: str,
@@ -645,29 +706,37 @@ class PandaHarvesterWorkersTool:
         if site:
             site = site.strip() or None
 
-        # Resolve time window — default to the last hour when not provided.
+        # Resolve time window.
+        #
+        # Strategy: try to parse the window directly from the question text
+        # first.  This is authoritative — it is anchored to the actual
+        # wall-clock time at call time, so "last 6 hours" always produces a
+        # correct window regardless of what the LLM planner supplied.
+        #
+        # Only fall back to planner-supplied from_dt/to_dt when the question
+        # contains no parseable relative expression (e.g. an explicit ISO range
+        # or a bare "right now" question).  Planner-supplied values are
+        # sanitised via _resolve_dt (relative OpenSearch syntax) and
+        # _sanitise_window (future or degenerate windows) before use.
+        question_text: str = str(arguments.get("question") or "")
         from_dt_raw: str | None = arguments.get("from_dt")
         to_dt_raw: str | None = arguments.get("to_dt")
-
         default_from, default_to = _default_window()
 
-        if from_dt_raw and to_dt_raw:
+        question_window = _parse_window_from_question(question_text)
+        if question_window is not None:
+            from_dt, to_dt = question_window
+        elif from_dt_raw and to_dt_raw:
             from_dt = _resolve_dt(from_dt_raw.strip(), default_from)
             to_dt = _resolve_dt(to_dt_raw.strip(), default_to)
+            from_dt, to_dt = _sanitise_window(from_dt, to_dt, question_text)
         else:
             from_dt, to_dt = default_from, default_to
             if from_dt_raw:
                 from_dt = _resolve_dt(from_dt_raw.strip(), default_from)
             if to_dt_raw:
                 to_dt = _resolve_dt(to_dt_raw.strip(), default_to)
-
-        # Sanity-check the resolved window: the LLM sometimes computes timestamps
-        # relative to midnight rather than to the current wall-clock time (e.g.
-        # "last 6 hours" at 17:33 becomes 18:00→23:59 instead of 11:33→17:33).
-        # _sanitise_window detects a future to_dt or from_dt >= to_dt and
-        # re-derives the window from the question text.
-        question_text: str = str(arguments.get("question") or "")
-        from_dt, to_dt = _sanitise_window(from_dt, to_dt, question_text)
+            from_dt, to_dt = _sanitise_window(from_dt, to_dt, question_text)
 
         logger.debug(
             "panda_harvester_workers: site=%r from_dt=%r to_dt=%r",
@@ -690,6 +759,7 @@ panda_harvester_workers_tool = PandaHarvesterWorkersTool()
 
 __all__ = [
     "PandaHarvesterWorkersTool",
+    "_parse_window_from_question",
     "_resolve_dt",
     "_sanitise_window",
     "build_harvester_url",
