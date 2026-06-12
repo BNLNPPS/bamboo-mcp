@@ -306,10 +306,19 @@ def get_definition() -> dict[str, Any]:
     return {
         "name": "panda_harvester_timeseries",
         "description": (
-            "Fetch per-bucket Harvester pilot counts from OpenSearch for a "
-            "single status over a time window.  Used to render ASCII "
-            "time-series charts in the TUI.  Requires ASKPANDA_OPENSEARCH "
-            "to be set."
+            "Fetch per-bucket Harvester pilot counts from OpenSearch "
+            "(atlas_harvesterworkers-*) for a given status over a time window. "
+            "Use this tool when the user asks about pilot failure rates, "
+            "failure percentages, which sites had high failure counts, "
+            "or how pilot failures (or any status) trended over time. "
+            "Examples: 'which sites had pilot failures above 20% today', "
+            "'pilot failure rate at BNL this week', "
+            "'how did failed pilots trend at CERN yesterday', "
+            "'show running pilot counts for the last 6 hours'. "
+            "Pass status='failed' for failure-rate questions. "
+            "Omit site= to retrieve counts across all sites; pass site= to "
+            "scope to one computing site. "
+            "Requires ASKPANDA_OPENSEARCH to be set."
         ),
         "inputSchema": {
             "type": "object",
@@ -359,9 +368,13 @@ def get_definition() -> dict[str, Any]:
 class PandaHarvesterTimeseriesTool:
     """MCP tool fetching per-bucket Harvester pilot counts from OpenSearch.
 
-    Queries the ``atlas_harvesterworkers-*`` index for a single status
-    over a configurable time window, returning a compact bucket list
-    suitable for ASCII chart rendering in the TUI.
+    Queries the ``atlas_harvesterworkers-*`` index for a given status over a
+    configurable time window.  Returns a compact bucket list that the LLM can
+    use to reason about failure rates, trends, and cross-site comparisons, and
+    that the TUI can render as an ASCII time-series chart.
+
+    Pass ``status='failed'`` for failure-rate and high-failure-site questions.
+    Omit ``site`` to retrieve counts across all sites.
     """
 
     def __init__(self) -> None:

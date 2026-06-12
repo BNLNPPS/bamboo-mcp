@@ -21,6 +21,7 @@ import pytest
 import bamboo.tools.bamboo_executor as ex_mod
 from bamboo.tools.bamboo_executor import (
     _SYSTEM_GENERIC,
+    _SYSTEM_HARVESTER_TIMESERIES,
     _SYSTEM_JOB,
     _SYSTEM_LOG_ANALYSIS,
     _SYSTEM_RAG,
@@ -170,6 +171,17 @@ class TestPickSynthesisPrompt:
     def test_empty_list_generic(self) -> None:
         """Empty tool list falls back to the generic prompt."""
         assert _pick_synthesis_prompt([]) == _SYSTEM_GENERIC
+
+    def test_harvester_timeseries_prompt(self) -> None:
+        """atlas.harvester_timeseries selects the timeseries synthesis prompt."""
+        assert _pick_synthesis_prompt(["atlas.harvester_timeseries"]) == _SYSTEM_HARVESTER_TIMESERIES
+
+    def test_harvester_timeseries_not_overridden_by_workers(self) -> None:
+        """atlas.harvester_timeseries alone uses timeseries prompt, not workers prompt."""
+        from bamboo.tools.bamboo_executor import _SYSTEM_HARVESTER_WORKERS
+        result = _pick_synthesis_prompt(["atlas.harvester_timeseries"])
+        assert result == _SYSTEM_HARVESTER_TIMESERIES
+        assert result != _SYSTEM_HARVESTER_WORKERS
 
 
 # ---------------------------------------------------------------------------
