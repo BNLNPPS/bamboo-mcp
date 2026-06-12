@@ -6,6 +6,35 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Added
+- **ReAct AI Agent** (`interfaces/agent/agent.py`): new multi-step reasoning agent
+  that orchestrates MCP tool calls in a Reason → Act → Observe → Evaluate loop.
+  Bypasses the single-pass `bamboo_answer`/`bamboo_executor` pipeline and is
+  intended for complex, multi-hop queries.  Key types: `AgentMemory`,
+  `AgentStep`, `AgentResult`, `BambooAgent`.  Uses `reasoning` LLM profile for
+  tool selection and synthesis; `fast` profile for the per-step sufficiency
+  evaluator.  All LLM calls are routed through the `bamboo_llm_answer` MCP tool,
+  so no additional LLM initialisation is required.  Maximum steps (default 6),
+  confidence threshold (default 0.80), and synthesis token budget (default 2048)
+  are all configurable via `BAMBOO_AGENT_MAX_STEPS`, `BAMBOO_AGENT_CONFIDENCE`,
+  and `BAMBOO_AGENT_MAX_TOKENS` environment variables.
+- **Agent CLI** (`scripts/bamboo_agent.py`): standalone script wrapping
+  `BambooAgent`.  Supports single-shot (`--question`), stdin-pipe, and
+  interactive REPL (`--interactive`) modes.  Outputs formatted text (with
+  optional `--verbose` trace) or machine-readable JSON (`--output-json`).
+  Compatible with both HTTP and STDIO MCP transports.  Bearer token auth via
+  `--token` or `BAMBOO_MCP_TOKEN`.
+- **Agent tests** (`tests/test_agent.py`): full test coverage for
+  `AgentMemory`, `_ToolSelection`, `_EvalResult`, `_extract_json_block`,
+  `_truncate_observation`, `_observation_from_result`, and `BambooAgent`
+  (single-step success, two-step completion, early `should_synthesise` flag,
+  max-steps truncation, tool call failure, reasoning parse error, eval parse
+  error, field type assertions, zero-tools edge case).
+- **Agent prompt log stub**: `BambooAgent._synthesise` contains a fully
+  commented-out `log_prompt` call (`# AGENT_LOG`) targeting the future
+  `bamboomcp-agentlog-YYYY.MM.DD` index.  Uncomment once the index template
+  is provisioned in OpenSearch.
+
 ### Fixed
 - **Relative `from_dt`/`to_dt` expressions crash the Harvester API**:
   the LLM planner occasionally emits OpenSearch-style relative timestamps
