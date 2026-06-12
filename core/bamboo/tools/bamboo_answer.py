@@ -609,6 +609,58 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "finished on",
 })
 
+#: Signal phrases that unambiguously indicate a job timing / performance query
+#: against the ``atlas_panda_job_timing-*`` OpenSearch index.  These phrases
+#: reference pilot timing sub-fields or wall-clock / queue time metrics that
+#: are only present in that index, not in the live DuckDB jobs snapshot.
+#:
+#: Checked BEFORE the jobs-DB fast-path so that questions like
+#: "What is the average wall-clock time for failed jobs?" route to
+#: ``atlas.job_timing`` rather than ``panda_jobs_query``.
+_JOB_TIMING_SIGNALS: frozenset[str] = frozenset({
+    "stage-in time",
+    "stagein time",
+    "stage-out time",
+    "stageout time",
+    "stage in time",
+    "stage out time",
+    "pilottiming",
+    "pilot timing",
+    "payload execution time",
+    "payload setup time",
+    "initial setup time",
+    "getjob time",
+    "get job time",
+    "wall-clock time",
+    "wallclock time",
+    "wall clock time",
+    "queue time",
+    "queuetime",
+    "job_walltime",
+    "job_queuetime",
+})
+
+
+def _is_job_timing_question(question: str) -> bool:
+    """Return True when the question targets the job timing OpenSearch index.
+
+    Detects questions about pilot timing sub-fields (stage-in, stage-out,
+    payload execution, etc.) or wall-clock / queue time performance metrics
+    only available in atlas_panda_job_timing-*.
+
+    Checked before the jobs-DB fast-path so timing questions route to
+    atlas.job_timing rather than panda_jobs_query.
+
+    Args:
+        question: User question text (before any normalisation).
+
+    Returns:
+        True if the question should be routed to atlas.job_timing.
+    """
+    q = question.lower()
+    return any(sig in q for sig in _JOB_TIMING_SIGNALS)
+
+
 # Job-specific signals for site-health detection: a subset of _JOBS_DB_SIGNALS
 # that excludes generic counting phrases like "how many" and "count", and also
 # excludes status-at phrases like "ran at" / "failed at" that can appear in
@@ -1445,6 +1497,26 @@ def _build_deterministic_plan(  # noqa: C901
             )],
             reuse_policy=reuse,
             explain="Deterministic: CGSim plugin, no task/job ID, non-conceptual → sim_query.",
+        )
+
+    # Job timing fast-path: pilot timing sub-fields or wall-clock/queue time
+    # in the atlas_panda_job_timing-* index.  Must come BEFORE the jobs DB
+    # fast-path because signals like 'queue time' and 'wall-clock time' also
+    # loosely match _JOBS_DB_SIGNALS.
+    if plugin_id in _PANDA_PLUGINS and _is_job_timing_question(question):
+        timing_args: dict[str, str] = {"question": question}
+        site = _extract_site_from_question(question)
+        if site:
+            timing_args["site"] = site
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=0.9,
+            tool_calls=[ToolCall(
+                tool="atlas.job_timing",
+                arguments=timing_args,
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: pilot timing / wall-clock signals → atlas.job_timing.",
         )
 
     # Jobs DB fast-path: no IDs but the question is about live job stats.
@@ -2452,6 +2524,7 @@ __all__ = [
     "QUERYABLE_DATABASES",
     "_resolve_target_database",
     "_build_clarification_response",
+    "_is_job_timing_question",
     "_is_jobs_db_question",
     "_is_cric_question",
     "_is_conceptual_question",

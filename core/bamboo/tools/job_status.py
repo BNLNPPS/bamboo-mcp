@@ -1,25 +1,25 @@
 """PanDA job status tool.
 
-Fetches job metadata from BigPanDA via the ``panda`` MCP
-server and returns structured evidence suitable for LLM summarisation.
+Fetches job metadata directly from the BigPanDA REST API
+(``GET /job?pandaid=<id>&json``) and returns structured evidence suitable
+for LLM summarisation.
 
-The upstream server returns a JSON object with ``job`` and ``files`` keys.
-This tool extracts the most useful fields from ``job`` and computes a
-``files_summary`` from the ``files`` list.
+This tool has **no dependency on the upstream PanDA MCP server** — it talks
+to BigPanDA's public HTTP API the same way ``panda_log_analysis`` does.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
-from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
 from bamboo.tools.base import MCPContent, text_content
 
 logger = logging.getLogger(__name__)
 
-_SERVER = "panda"
-_TOOL = "download_bigpanda_metadata"
+#: Default BigPanDA base URL; override with ``PANDA_BASE_URL``.
+_DEFAULT_BASE_URL: str = "https://bigpanda.cern.ch"
 
 
 def get_definition() -> dict[str, Any]:
@@ -58,6 +58,20 @@ def get_definition() -> dict[str, Any]:
     }
 
 
+def _build_job_url(base_url: str, job_id: int) -> str:
+    """Return the BigPanDA REST URL for a single job's metadata.
+
+    Args:
+        base_url: BigPanDA base URL (no trailing slash).
+        job_id: PanDA job ID.
+
+    Returns:
+        Full URL string, e.g.
+        ``"https://bigpanda.cern.ch/job?pandaid=6837798305&json"``.
+    """
+    return f"{base_url.rstrip('/')}/job?pandaid={job_id}&json"
+
+
 def _files_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarise the files list from a BigPanDA job metadata response.
 
@@ -65,7 +79,7 @@ def _files_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
         files: List of file dicts from the ``files`` key of the response.
 
     Returns:
-        Dict with counts by type and status, and failed file names.
+        Dict with counts by type and status, and up to 10 failed file names.
     """
     by_type: dict[str, int] = {}
     by_status: dict[str, int] = {}
@@ -87,6 +101,110 @@ def _files_summary(files: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def fetch_job_metadata(job_id: int, base_url: str) -> dict[str, Any]:
+    """Fetch job metadata from BigPanDA and return a structured evidence dict.
+
+    Calls ``GET /job?pandaid=<job_id>&json`` using the shared
+    ``cached_fetch_jsonish`` helper (60 s TTL).  Synchronous; call via
+    ``asyncio.to_thread`` from async contexts if needed.
+
+    Args:
+        job_id: PanDA job ID.
+        base_url: BigPanDA base URL (no trailing slash).
+
+    Returns:
+        Evidence dict with job fields extracted from the API response,
+        plus ``monitor_url`` and ``error`` (``None`` on success).
+    """
+    from askpanda_atlas._cache import cached_fetch_jsonish  # type: ignore[import]
+
+    monitor_url = f"https://bigpanda.cern.ch/job?pandaid={job_id}"
+    base_evidence: dict[str, Any] = {
+        "job_id": job_id,
+        "monitor_url": monitor_url,
+        "error": None,
+    }
+
+    url = _build_job_url(base_url, job_id)
+    logger.debug("panda_job_status: fetching %s", url)
+
+    try:
+        status_code, ctype, body, payload = cached_fetch_jsonish(url, ttl=60.0)
+    except Exception as exc:  # noqa: BLE001
+        base_evidence["error"] = f"HTTP request failed: {exc}"
+        return base_evidence
+
+    if status_code < 200 or status_code >= 300:
+        base_evidence["error"] = (
+            f"BigPanDA returned HTTP {status_code} for job {job_id}."
+        )
+        return base_evidence
+
+    if payload is None:
+        base_evidence["error"] = (
+            f"Non-JSON response from BigPanDA (content-type={ctype!r}): "
+            f"{body[:200]!r}"
+        )
+        return base_evidence
+
+    # BigPanDA /job?pandaid=&json returns {"job": {...}, "files": [...]}
+    # The top-level may also be the job dict directly in some API versions.
+    if isinstance(payload, dict) and "job" in payload:
+        job: dict[str, Any] = payload.get("job") or {}
+        files: list[dict[str, Any]] = payload.get("files") or []
+    elif isinstance(payload, dict) and "pandaid" in payload:
+        # Flat response — job fields at top level, no files key
+        job = payload
+        files = []
+    else:
+        base_evidence["error"] = (
+            "Unexpected response structure from BigPanDA — "
+            "neither 'job' key nor flat job dict found."
+        )
+        base_evidence["raw"] = str(payload)[:300]
+        return base_evidence
+
+    if not job:
+        base_evidence["not_found"] = True
+        base_evidence["error"] = f"Job {job_id} was not found in BigPanDA."
+        return base_evidence
+
+    return {
+        **base_evidence,
+        "jobstatus": job.get("jobstatus"),
+        "jobsubstatus": job.get("jobsubstatus"),
+        "jobname": job.get("jobname"),
+        "produsername": job.get("produsername"),
+        "computingsite": job.get("computingsite"),
+        "cloud": job.get("cloud"),
+        "atlasrelease": job.get("atlasrelease"),
+        "transformation": job.get("transformation"),
+        "jeditaskid": job.get("jeditaskid"),
+        "attemptnr": job.get("attemptnr"),
+        "maxattempt": job.get("maxattempt"),
+        "creationtime": job.get("creationtime"),
+        "starttime": job.get("starttime"),
+        "endtime": job.get("endtime"),
+        "duration": job.get("duration"),
+        "waittime": job.get("waittime"),
+        "commandtopilot": job.get("commandtopilot"),
+        "piloterrorcode": job.get("piloterrorcode"),
+        "piloterrordiag": job.get("piloterrordiag"),
+        "exeerrorcode": job.get("exeerrorcode"),
+        "exeerrordiag": job.get("exeerrordiag"),
+        "taskbuffererrorcode": job.get("taskbuffererrorcode"),
+        "taskbuffererrordiag": job.get("taskbuffererrordiag"),
+        "ddmerrorcode": job.get("ddmerrorcode"),
+        "ddmerrordiag": job.get("ddmerrordiag"),
+        "cpuconsumptiontime": job.get("cpuconsumptiontime"),
+        "gshare": job.get("gshare"),
+        "resourcetype": job.get("resourcetype"),
+        "corecount": job.get("corecount"),
+        "file_summary_str": job.get("file_summary_str"),
+        "files_summary": _files_summary(files),
+    }
+
+
 class PandaJobStatusTool:
     """MCP tool for fetching PanDA job status and metadata from BigPanDA."""
 
@@ -105,10 +223,9 @@ class PandaJobStatusTool:
     async def call(self, arguments: dict[str, Any]) -> list[MCPContent]:
         """Fetch job metadata and return structured evidence.
 
-        The result is a one-element ``list[MCPContent]`` whose ``text`` field
-        contains the JSON-serialised evidence dict.  Callers that need the raw
-        evidence should parse ``json.loads(result[0]["text"])``.  This keeps
-        the tool compliant with the MCP narrow-waist contract.
+        Fetches directly from the BigPanDA REST API — no upstream MCP
+        server required.  Uses ``asyncio.to_thread`` to keep the event
+        loop free during the synchronous HTTP call.
 
         Args:
             arguments: Dict with required ``job_id`` and optional ``query``.
@@ -117,104 +234,45 @@ class PandaJobStatusTool:
             One-element MCP content list containing the JSON-serialised
             evidence and text summary.
         """
+        import asyncio
+
         if not isinstance(arguments, dict):
-            return text_content(json.dumps({"evidence": {"error": "arguments must be a dict", "provided": repr(arguments)}}))
+            return text_content(json.dumps({
+                "evidence": {
+                    "error": "arguments must be a dict",
+                    "provided": repr(arguments),
+                },
+            }))
 
         job_id = arguments.get("job_id")
         if job_id is None:
-            return text_content(json.dumps({"evidence": {"error": "missing job_id", "provided": arguments}}))
+            return text_content(json.dumps({
+                "evidence": {"error": "missing job_id", "provided": arguments},
+            }))
 
         try:
             job_id_int = int(job_id)
-        except Exception:  # pylint: disable=broad-exception-caught
-            return text_content(json.dumps({"evidence": {"error": "job_id must be an integer", "provided": str(arguments)}}))
-
-        monitor_url = f"https://bigpanda.cern.ch/job?pandaid={job_id_int}"
-        base_evidence: dict[str, Any] = {
-            "job_id": job_id_int,
-            "monitor_url": monitor_url,
-        }
-
-        caller = get_mcp_caller()
-        result = await caller.call(
-            server_name=_SERVER,
-            tool_name=_TOOL,
-            arguments={"panda_id": str(job_id_int)},
-        )
-
-        if result["error"]:
-            base_evidence["error"] = result["error"]
+        except Exception:  # noqa: BLE001
             return text_content(json.dumps({
-                "evidence": base_evidence,
-                "text": f"Failed to fetch metadata for job {job_id_int}: {result['error']}",
+                "evidence": {
+                    "error": "job_id must be an integer",
+                    "provided": str(arguments),
+                },
             }))
 
-        raw_text: str = result["text"] or ""
+        base_url: str = os.environ.get("PANDA_BASE_URL", _DEFAULT_BASE_URL)
 
-        # The response starts with a "Job NNN metadata:" header, then JSON
-        json_start = raw_text.find("{")
-        if json_start < 0:
-            base_evidence["error"] = "No JSON found in response"
-            base_evidence["raw"] = raw_text[:500]
+        evidence = await asyncio.to_thread(fetch_job_metadata, job_id_int, base_url)
+
+        if evidence.get("error"):
             return text_content(json.dumps({
-                "evidence": base_evidence,
-                "text": f"Unexpected response format for job {job_id_int}.",
+                "evidence": evidence,
+                "text": (
+                    f"Could not retrieve metadata for job {job_id_int}: "
+                    f"{evidence['error']}  "
+                    f"Monitor: {evidence.get('monitor_url', '')}"
+                ),
             }))
-
-        try:
-            data: dict[str, Any] = json.loads(raw_text[json_start:])
-        except json.JSONDecodeError as e:
-            base_evidence["error"] = f"JSON parse error: {e}"
-            base_evidence["raw"] = raw_text[:500]
-            return text_content(json.dumps({
-                "evidence": base_evidence,
-                "text": f"Could not parse metadata for job {job_id_int}.",
-            }))
-
-        job: dict[str, Any] = data.get("job") or {}
-        files: list[dict[str, Any]] = data.get("files") or []
-
-        if not job:
-            base_evidence["not_found"] = True
-            return text_content(json.dumps({
-                "evidence": base_evidence,
-                "text": f"Job {job_id_int} was not found in BigPanDA.",
-            }))
-
-        evidence: dict[str, Any] = {
-            **base_evidence,
-            "jobstatus": job.get("jobstatus"),
-            "jobsubstatus": job.get("jobsubstatus"),
-            "jobname": job.get("jobname"),
-            "produsername": job.get("produsername"),
-            "computingsite": job.get("computingsite"),
-            "cloud": job.get("cloud"),
-            "atlasrelease": job.get("atlasrelease"),
-            "transformation": job.get("transformation"),
-            "jeditaskid": job.get("jeditaskid"),
-            "attemptnr": job.get("attemptnr"),
-            "maxattempt": job.get("maxattempt"),
-            "creationtime": job.get("creationtime"),
-            "starttime": job.get("starttime"),
-            "endtime": job.get("endtime"),
-            "duration": job.get("duration"),
-            "waittime": job.get("waittime"),
-            "commandtopilot": job.get("commandtopilot"),
-            "piloterrorcode": job.get("piloterrorcode"),
-            "piloterrordiag": job.get("piloterrordiag"),
-            "exeerrorcode": job.get("exeerrorcode"),
-            "exeerrordiag": job.get("exeerrordiag"),
-            "taskbuffererrorcode": job.get("taskbuffererrorcode"),
-            "taskbuffererrordiag": job.get("taskbuffererrordiag"),
-            "ddmerrorcode": job.get("ddmerrorcode"),
-            "ddmerrordiag": job.get("ddmerrordiag"),
-            "cpuconsumptiontime": job.get("cpuconsumptiontime"),
-            "gshare": job.get("gshare"),
-            "resourcetype": job.get("resourcetype"),
-            "corecount": job.get("corecount"),
-            "file_summary_str": job.get("file_summary_str"),
-            "files_summary": _files_summary(files),
-        }
 
         status = evidence.get("jobstatus") or "unknown"
         summary = f"Job {job_id_int} status: {status}."
@@ -225,4 +283,4 @@ class PandaJobStatusTool:
 
 panda_job_status_tool = PandaJobStatusTool()
 
-__all__ = ["PandaJobStatusTool", "panda_job_status_tool", "get_definition"]
+__all__ = ["PandaJobStatusTool", "fetch_job_metadata", "panda_job_status_tool", "get_definition"]
