@@ -724,12 +724,17 @@ class PandaHarvesterWorkersTool:
         default_from, default_to = _default_window()
 
         question_window = _parse_window_from_question(question_text)
-        if question_window is not None:
-            from_dt, to_dt = question_window
-        elif from_dt_raw and to_dt_raw:
+
+        # Explicit planner timestamps take precedence over relative phrases
+        # found in the question text. This allows callers/tests to pass a
+        # deterministic window even when the question contains words such as
+        # "yesterday" or "last week".
+        if from_dt_raw and to_dt_raw:
             from_dt = _resolve_dt(from_dt_raw.strip(), default_from)
             to_dt = _resolve_dt(to_dt_raw.strip(), default_to)
             from_dt, to_dt = _sanitise_window(from_dt, to_dt, question_text)
+        elif question_window is not None:
+            from_dt, to_dt = question_window
         else:
             from_dt, to_dt = default_from, default_to
             if from_dt_raw:
