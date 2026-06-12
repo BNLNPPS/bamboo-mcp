@@ -156,6 +156,12 @@ def fetch_job_metadata(job_id: int, base_url: str) -> dict[str, Any]:
         # Flat response — job fields at top level, no files key
         job = payload
         files = []
+    elif isinstance(payload, dict) and not payload.get("job") and not any(
+        k not in ("files", "dsfiles", "job") for k in payload
+    ):
+        # Response contains only files/dsfiles keys — job was not found
+        job = {}
+        files = []
     else:
         base_evidence["error"] = (
             "Unexpected response structure from BigPanDA — "

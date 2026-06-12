@@ -1,7 +1,6 @@
 """Tests for panda_job_status tool."""
 import asyncio
 import json
-from unittest.mock import AsyncMock
 
 from bamboo.tools.job_status import panda_job_status_tool
 
@@ -9,17 +8,13 @@ from bamboo.tools.job_status import panda_job_status_tool
 def _unpack(result):
     """Deserialise the JSON-wrapped MCPContent returned by the tool.
 
-    Tools now return list[MCPContent] with a JSON-encoded evidence dict
-    in the text field.  This helper unwraps that for test assertions.
-
     Args:
         result: Return value of tool.call().
 
     Returns:
         Deserialised dict with ``evidence`` and ``text`` keys.
     """
-    import json as _json
-    return _json.loads(result[0]["text"])
+    return json.loads(result[0]["text"])
 
 
 SAMPLE_JOB = {
@@ -53,18 +48,26 @@ SAMPLE_FILES = [
     {"type": "log", "status": "failed", "lfn": "log.tgz"},
 ]
 
-SAMPLE_RESPONSE = f"Job 6837798305 metadata:\n\n{json.dumps({'job': SAMPLE_JOB, 'files': SAMPLE_FILES, 'dsfiles': []})}"
+# cached_fetch_jsonish returns (status_code, content_type, body_text, parsed_json)
+_SAMPLE_PAYLOAD = {"job": SAMPLE_JOB, "files": SAMPLE_FILES, "dsfiles": []}
+SAMPLE_FETCH_OK = (200, "application/json", json.dumps(_SAMPLE_PAYLOAD), _SAMPLE_PAYLOAD)
 
+SAMPLE_FETCH_HTTP_ERROR = (503, "text/plain", "Service Unavailable", None)
 
-def _make_caller(text=None, error=None):
-    mock = AsyncMock()
-    mock.call = AsyncMock(return_value={"text": text, "error": error})
-    return mock
+SAMPLE_FETCH_NOT_FOUND = (
+    200,
+    "application/json",
+    json.dumps({"files": [], "dsfiles": []}),
+    {"files": [], "dsfiles": []},
+)
 
 
 def test_job_status_success(monkeypatch):
     """Test successful job metadata fetch and evidence extraction."""
-    monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller", lambda: _make_caller(text=SAMPLE_RESPONSE))
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, **kw: SAMPLE_FETCH_OK,
+    )
     result = asyncio.run(panda_job_status_tool.call({"job_id": 6837798305}))
     res = _unpack(result)
     ev = res["evidence"]
@@ -73,12 +76,16 @@ def test_job_status_success(monkeypatch):
     assert ev["computingsite"] == "ROMANIA07_HTCondor"
     assert ev["taskbuffererrordiag"] == "reassigned by JEDI"
     assert ev["jeditaskid"] == 46703290
+    assert ev["error"] is None
     assert "reassigned by JEDI" in res["text"]
 
 
 def test_job_status_files_summary(monkeypatch):
     """Test that files_summary correctly counts types and statuses."""
-    monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller", lambda: _make_caller(text=SAMPLE_RESPONSE))
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, **kw: SAMPLE_FETCH_OK,
+    )
     result = asyncio.run(panda_job_status_tool.call({"job_id": 6837798305}))
     res = _unpack(result)
     fs = res["evidence"]["files_summary"]
@@ -89,14 +96,16 @@ def test_job_status_files_summary(monkeypatch):
     assert "output.root" in fs["failed_files"]
 
 
-def test_job_status_mcp_error(monkeypatch):
-    """Test graceful handling when MCP server returns an error."""
-    monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller",
-                        lambda: _make_caller(error="Server not connected"))
+def test_job_status_http_error(monkeypatch):
+    """Test graceful handling when BigPanDA returns a non-2xx status."""
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, **kw: SAMPLE_FETCH_HTTP_ERROR,
+    )
     result = asyncio.run(panda_job_status_tool.call({"job_id": 9999}))
     res = _unpack(result)
-    assert "error" in res["evidence"]
-    assert "Server not connected" in res["text"]
+    assert res["evidence"]["error"] is not None
+    assert "503" in res["evidence"]["error"]
 
 
 def test_job_status_missing_job_id():
@@ -112,11 +121,27 @@ def test_job_status_invalid_job_id():
 
 
 def test_job_status_not_found(monkeypatch):
-    """Test handling when job JSON has no 'job' key."""
-    empty = "Job 9999 metadata:\n\n" + json.dumps({"files": [], "dsfiles": []})
-    monkeypatch.setattr("bamboo.tools.job_status.get_mcp_caller", lambda: _make_caller(text=empty))
+    """Test handling when BigPanDA response has no 'job' key."""
+    monkeypatch.setattr(
+        "askpanda_atlas._cache.cached_fetch_jsonish",
+        lambda url, **kw: SAMPLE_FETCH_NOT_FOUND,
+    )
     result = asyncio.run(panda_job_status_tool.call({"job_id": 9999}))
-    assert _unpack(result)["evidence"].get("not_found") is True
+    ev = _unpack(result)["evidence"]
+    assert ev.get("not_found") is True
+    assert ev["error"] is not None
+
+
+def test_job_status_fetch_exception(monkeypatch):
+    """Test graceful handling when the HTTP call itself raises."""
+    def _raise(url, **kw):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("askpanda_atlas._cache.cached_fetch_jsonish", _raise)
+    result = asyncio.run(panda_job_status_tool.call({"job_id": 9999}))
+    ev = _unpack(result)["evidence"]
+    assert ev["error"] is not None
+    assert "connection refused" in ev["error"]
 
 
 def test_get_definition():
