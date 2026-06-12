@@ -7,6 +7,33 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Added
+- **`panda_job_timing` tool** (`packages/askpanda_atlas`): new OpenSearch-backed
+  MCP tool that answers natural-language questions about PanDA job timing against
+  the `atlas_panda_job_timing-*` index.  Uses a single LLM call to extract
+  structured aggregation parameters (metric, field, filters, time range) from the
+  user's question, then executes a single-value OpenSearch metric aggregation
+  (`avg`, `sum`, `min`, `max`, `value_count`) and returns a compact evidence dict
+  for Bamboo's central synthesiser.
+- **`job_timing_schema.py`**: schema registry for the confirmed batch-1 fields
+  (10 core identifier/status fields + 10 timing fields including all six parsed
+  `pilottiming_*` sub-fields), field validation helpers, and the LLM prompt
+  template for query-parameter extraction.
+- **`job_timing_impl.py`**: full tool implementation with `fetch_job_timing()`
+  (synchronous OpenSearch query, cached 120 s), `parse_llm_params()` (validates
+  LLM JSON output against schema), `_default_window()` (24-hour look-back), and
+  structured error/cannot-answer evidence constructors.
+- **`job_timing.py`**: thin entry-point wrapper with `ImportError` fallback
+  (mirrors `harvester_timeseries.py`).
+- **`tests/test_job_timing.py`**: 34 tests covering schema constants, prompt
+  builder, `parse_llm_params`, `_default_window`, error constructors,
+  `fetch_job_timing` with mocked OpenSearch, and `PandaJobTimingTool.call()`
+  end-to-end.
+- `atlas.job_timing` entry point registered in `pyproject.toml`.
+- `atlas_panda_job_timing-*` added to `_DEFAULT_ALLOWED_PATTERNS` in
+  `core/bamboo/tools/opensearch_query.py` so the generic `opensearch_query`
+  tool can also reach this index without config changes.
+
+### Added
 
 - **Blue/green ChromaDB slot routing — live re-resolution without server restart.**
   The `bamboo-mcp-services` document-monitor agent now stores vectors in two

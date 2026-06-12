@@ -19,6 +19,7 @@ dependencies = [
 "atlas.doc_search" = "askpanda_atlas.doc_rag:atlas_doc_search_tool"
 "atlas.doc_bm25" = "askpanda_atlas.doc_bm25:atlas_doc_bm25_tool"
 "atlas.harvester_timeseries" = "askpanda_atlas.harvester_timeseries:panda_harvester_timeseries_tool"
+"atlas.job_timing" = "askpanda_atlas.job_timing:panda_job_timing_tool"
 "atlas.pilot_source_analysis" = "askpanda_atlas.pilot_source_analysis:pilot_source_analysis_tool"
 
 [build-system]

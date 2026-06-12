@@ -66,7 +66,7 @@ DEFAULT_MAX_HITS: int = 10
 
 #: Default index patterns when ``BAMBOO_OPENSEARCH_ALLOWED_INDICES`` is unset.
 _DEFAULT_ALLOWED_PATTERNS: str = (
-    "atlas_harvesterworkers-*,bamboomcp-promptlog-*"
+    "atlas_harvesterworkers-*,bamboomcp-promptlog-*,atlas_panda_job_timing-*"
 )
 
 
