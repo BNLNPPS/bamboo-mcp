@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-r"""Bamboo AI Agent — standalone CLI.
+"""Bamboo AI Agent — standalone CLI.
 
 Runs the :class:`~interfaces.agent.agent.BambooAgent` ReAct loop against a
 live Bamboo MCP server and prints the synthesised answer.  Supports both
