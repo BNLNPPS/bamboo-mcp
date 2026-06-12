@@ -17,69 +17,46 @@
 
 """Tests for interfaces/agent/agent.py.
 
-The test module stubs out the ``mcp`` and ``httpx`` SDK packages (heavy optional
-deps not available in the test environment) before importing agent code.
+The mcp SDK is an optional dependency that may not be present in all test
+environments.  Rather than stubbing it at module level (which leaks into
+other tests and corrupts their sys.modules), we use a session-scoped
+autouse fixture that installs minimal stubs via monkeypatch only for the
+duration of this test session, and only for the sub-modules that are not
+already present.  This is the same approach used in test_doc_rag.py.
 
 Coverage targets
 ----------------
-* :class:`AgentMemory` — history serialisation, observation text, truncated flag.
-* :class:`AgentStep` / :class:`AgentResult` — dataclass construction.
-* :class:`_ToolSelection` / :class:`_EvalResult` — Pydantic validation.
-* :func:`_extract_json_block` — JSON extraction from fenced / plain text.
-* :func:`_truncate_observation` — truncation boundary.
+* :func:`_extract_json_block`    — JSON extraction from fenced / plain text.
+* :func:`_truncate_observation`  — truncation boundary.
 * :func:`_observation_from_result` — content block extraction.
+* :class:`_ToolSelection`        — Pydantic validation.
+* :class:`_EvalResult`           — Pydantic validation + confidence clamping.
+* :class:`AgentMemory`           — history serialisation, observation text,
+                                   truncated flag.
+* :class:`AgentStep` / :class:`AgentResult` — dataclass construction.
 * :class:`BambooAgent` — full run loop with a mocked MCP client:
   - normal completion (evaluator satisfied on first step),
   - multi-step completion (evaluator satisfied on second step),
   - early synthesis via ``should_synthesise=True``,
   - max_steps truncation,
   - tool call failure handling,
-  - parse error fallbacks for both reasoning and evaluation LLM calls,
+  - parse error fallbacks for reasoning and evaluation LLM calls,
   - zero-tools edge case,
+  - confidence-below-threshold continuation,
   - field type assertions on :class:`AgentResult`.
 """
 from __future__ import annotations
 
 import json
-import sys
-import types
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # ---------------------------------------------------------------------------
-# Stub heavy SDK dependencies before importing agent code.
-# The agent imports MCPAsyncClient from interfaces.shared.mcp_client, which
-# in turn imports httpx and the mcp SDK.  Neither is available in the test
-# environment, so we inject lightweight stubs into sys.modules first.
-# ---------------------------------------------------------------------------
-
-# --- httpx stub ---
-_httpx_stub = types.ModuleType("httpx")
-_httpx_stub.AsyncClient = MagicMock  # type: ignore[attr-defined]
-_httpx_stub.Timeout = MagicMock  # type: ignore[attr-defined]
-sys.modules.setdefault("httpx", _httpx_stub)
-
-# --- mcp stub (deep hierarchy) ---
-for _mod_name in (
-    "mcp",
-    "mcp.client",
-    "mcp.client.session",
-    "mcp.client.stdio",
-    "mcp.client.streamable_http",
-    "mcp.server",
-    "mcp.types",
-):
-    sys.modules.setdefault(_mod_name, types.ModuleType(_mod_name))
-
-# Provide the symbols mcp_client.py accesses at import time.
-sys.modules["mcp.client.session"].ClientSession = MagicMock  # type: ignore[attr-defined]
-sys.modules["mcp.client.stdio"].StdioServerParameters = MagicMock  # type: ignore[attr-defined]
-sys.modules["mcp.client.stdio"].stdio_client = MagicMock  # type: ignore[attr-defined]
-
-# ---------------------------------------------------------------------------
-# Now it is safe to import agent code.
+# Import agent code.
+# mcp stubs are injected by conftest.pytest_configure before collection.
+# The conftest also appends repo_root to sys.path so interfaces/ is importable.
 # ---------------------------------------------------------------------------
 
 from interfaces.agent.agent import (  # noqa: E402
@@ -170,7 +147,6 @@ def _make_client(
                 text = llm_resp_list[_llm_idx[0]]
                 _llm_idx[0] += 1
             else:
-                # Safe fallback: always-sufficient evaluator / empty synthesis.
                 text = '{"sufficient": true, "confidence": 0.99}'
             return _make_mcp_result(text)
         obs = tool_resp_map.get(name, f'{{"result": "from {name}"}}')
@@ -596,7 +572,6 @@ class TestBambooAgent:
         agent = BambooAgent(client, max_steps=6, verbose=False)
         result = await agent.run("Parse error test.")
 
-        # Should have synthesised immediately — no tool call step.
         assert result.answer == "Fallback answer."
         assert len(result.steps) == 1
         assert result.steps[0].tool_name is None
@@ -680,8 +655,6 @@ class TestBambooAgent:
     @pytest.mark.asyncio
     async def test_confidence_below_threshold_continues_loop(self) -> None:
         """Evaluator result with confidence below threshold does not stop the loop early."""
-        # Step 1: eval returns sufficient=True but confidence 0.5 (below threshold 0.80).
-        # Step 2: should_synthesise=True.
         responses = [
             json.dumps({
                 "tool_name": "cric_query",
@@ -689,7 +662,7 @@ class TestBambooAgent:
                 "thought": "first",
                 "should_synthesise": False,
             }),
-            json.dumps({"sufficient": True, "confidence": 0.5}),  # below threshold
+            json.dumps({"sufficient": True, "confidence": 0.5}),  # below threshold 0.80
             json.dumps({
                 "tool_name": "",
                 "tool_args": {},
@@ -706,6 +679,5 @@ class TestBambooAgent:
         agent = BambooAgent(client, max_steps=6, confidence_threshold=0.80, verbose=False)
         result = await agent.run("Low confidence test.")
 
-        # Should have taken 2 steps (eval on step 1 was insufficient confidence).
         assert len(result.steps) == 2
         assert not result.truncated

@@ -44,7 +44,53 @@ def pytest_configure() -> None:
     epic_pkg_dir = repo_root / "packages" / "askpanda_epic"
     cgsim_pkg_dir = repo_root / "packages" / "askcgsim"
 
-    for p in (repo_root, core_dir, atlas_pkg_dir, epic_pkg_dir, cgsim_pkg_dir):
+    # core/, plugin packages, and the cgsim package are inserted at the front so
+    # they take priority over any installed wheels.  repo_root is appended at the
+    # end so that interfaces/ is importable without shadowing core/bamboo/ (the
+    # repo root also contains a top-level bamboo/__init__.py that would win if
+    # placed first).
+    for p in (core_dir, atlas_pkg_dir, epic_pkg_dir, cgsim_pkg_dir):
         s = str(p)
         if s not in sys.path:
             sys.path.insert(0, s)
+
+    repo_root_s = str(repo_root)
+    if repo_root_s not in sys.path:
+        sys.path.append(repo_root_s)
+
+    # Install minimal mcp sub-module stubs so that interfaces/agent/agent.py
+    # and interfaces/shared/mcp_client.py can be imported in environments where
+    # the real mcp SDK is not installed.  setdefault is a no-op when the real
+    # package is already present, so a genuine mcp installation always wins.
+    _mcp_sub_modules = (
+        "mcp",
+        "mcp.client",
+        "mcp.client.session",
+        "mcp.client.stdio",
+        "mcp.client.streamable_http",
+        "mcp.server",
+        "mcp.types",
+    )
+    import types as _types
+    for _mod_name in _mcp_sub_modules:
+        sys.modules.setdefault(_mod_name, _types.ModuleType(_mod_name))
+
+    from unittest.mock import MagicMock as _MagicMock
+    _session_mod = sys.modules["mcp.client.session"]
+    if not hasattr(_session_mod, "ClientSession"):
+        _session_mod.ClientSession = _MagicMock  # type: ignore[attr-defined]
+    _stdio_mod = sys.modules["mcp.client.stdio"]
+    if not hasattr(_stdio_mod, "StdioServerParameters"):
+        _stdio_mod.StdioServerParameters = _MagicMock  # type: ignore[attr-defined]
+    if not hasattr(_stdio_mod, "stdio_client"):
+        _stdio_mod.stdio_client = _MagicMock  # type: ignore[attr-defined]
+    # bamboo.core imports Server from mcp.server and ListToolsResult/Tool from
+    # mcp.types; provide stubs so patch.dict("bamboo.core.TOOLS", ...) works.
+    _server_mod = sys.modules["mcp.server"]
+    if not hasattr(_server_mod, "Server"):
+        _server_mod.Server = _MagicMock  # type: ignore[attr-defined]
+    _types_mod = sys.modules["mcp.types"]
+    if not hasattr(_types_mod, "ListToolsResult"):
+        _types_mod.ListToolsResult = _MagicMock  # type: ignore[attr-defined]
+    if not hasattr(_types_mod, "Tool"):
+        _types_mod.Tool = _MagicMock  # type: ignore[attr-defined]
