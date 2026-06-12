@@ -350,6 +350,102 @@ What files did job J-001 read from disk?
 
 ---
 
+## Job timing and performance (`atlas.job_timing`)
+
+Queries against the `atlas_panda_job_timing-*` OpenSearch index.  Covers all
+job states (not only finished jobs).  Requires `ASKPANDA_OPENSEARCH` to be set.
+
+> **Expected routing:** `route=FAST_PATH`, tool = `atlas.job_timing`.
+> **Check with `/inspect`:** evidence shows `metric`, `field`, `value`,
+> `doc_count`, `site_filter`, `jobstatus_filter`, `from_dt`, `to_dt`, `error` (null = success).
+> **Note:** `value: null` with `doc_count: 0` means the filter matched no documents —
+> try broadening the time range or removing the site filter.
+
+### Wall-clock and queue time
+
+```
+What is the average wall-clock time for jobs at BNL today?
+What is the average queue time for finished jobs at CERN today?
+What is the maximum wall-clock time for jobs at IN2P3 today?
+What is the minimum queue time for failed jobs?
+What is the total wall-clock time for finished jobs at CERN today?
+How many jobs ran at BNL today?
+How many jobs ran at AGLT2 in the last 7 days?
+```
+
+### Pilot timing breakdown
+
+```
+What is the average stage-in time at BNL today?
+What is the average stage-out time at CERN today?
+What is the average payload execution time at MWT2 today?
+What is the average pilot initial setup time at IN2P3 today?
+What is the average getJob time at TRIUMF today?
+What is the average payload setup time globally today?
+What is the total stage-in time at BNL in the last 7 days?
+What is the maximum stage-out time for finished jobs at CERN today?
+What is the minimum payload execution time at AGLT2 today?
+```
+
+### Time-range variants
+
+```
+What is the average stage-in time at BNL in the last 7 days?
+What is the average wall-clock time for finished jobs at CERN in the last 7 days?
+How many jobs ran at IN2P3 in the last 7 days?
+What is the total wall-clock time for all jobs at BNL today?
+```
+
+### Job status filters
+
+```
+What is the average wall-clock time for failed jobs at BNL today?
+What is the average stage-in time for finished jobs at CERN today?
+How many failed jobs ran at IN2P3 today?
+What is the maximum queue time for failed jobs today?
+What is the average payload execution time for finished jobs globally today?
+```
+
+### Task-scoped queries
+
+```
+What is the average wall-clock time for jobs in task 50785386?
+How many jobs ran for task 50785386?
+What is the total stage-in time for jobs in task 50785386?
+```
+
+> **Tip:** task-scoped queries omit time filters — all attempts for the task
+> are included regardless of when they ran.
+
+### Edge cases worth testing
+
+```
+# No site filter — global aggregate
+What is the average stage-in time globally today?
+
+# No time filter specified — falls back to default 24-hour window
+What is the average wall-clock time at BNL?
+
+# Partial site name — wildcard matching, should resolve to e.g. BNL_ATLAS_1
+What is the average stage-in time at BNL today?
+
+# value: null result — index exists but no data matches
+What is the average stage-in time at NONEXISTENT_SITE today?
+
+# CANNOT_ANSWER — field not in schema
+What is the average CPU count per site?
+What is the average HS06 efficiency at BNL?
+```
+
+> **Note on `value: null`:** a null value with `doc_count: 0` is not an error —
+> it means no documents matched the filter combination.  The synthesiser should
+> report "no data" rather than an error message.
+> **Note on future field batches:** once Sasha adds further field batches (CPU/HS06,
+> memory, I/O, errors, task context, carbon), many more questions become answerable.
+> Update this section when each batch is confirmed in the index.
+
+
+---
 ## Documentation / RAG (`panda_doc_search` + `panda_doc_bm25`)
 
 General PanDA/ATLAS knowledge questions route to the vector + BM25 retrieval pipeline.
