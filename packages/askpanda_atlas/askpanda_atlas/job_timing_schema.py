@@ -173,6 +173,9 @@ _SYSTEM_TEMPLATE: str = """\
 You are a query-parameter extractor for an OpenSearch index that stores
 PanDA job timing data (index: atlas_panda_job_timing-*).
 
+Current UTC date and time: {current_utc_datetime}
+Today's date (UTC):        {current_utc_date}
+
 Available fields:
 {field_context}
 
@@ -195,8 +198,10 @@ these keys (all optional except none are required if you cannot answer):
                   Omit when no job status is mentioned.
   "jeditaskid"  : integer JEDI task ID filter.  Omit when not mentioned.
   "from_dt"     : ISO-8601 lower bound on @timestamp (= statechangetime).
+                  Compute from the current UTC date/time above.
                   Omit when the user does not specify a time range.
   "to_dt"       : ISO-8601 upper bound on @timestamp.
+                  Compute from the current UTC date/time above.
                   Omit when the user does not specify a time range.
 
 Rules:
@@ -208,22 +213,30 @@ Rules:
 - For "value_count" metric, "field" should be "pandaid" (count distinct jobs).
 - For site filters use the value exactly as the user states it; the
   implementation will apply a wildcard search so partial names are fine.
-- Times are in UTC.  "last 7 days" → compute relative to now.
+- IMPORTANT: all date/time values must be computed from the current UTC
+  date/time shown above.  Never invent or guess dates.
+  "today"     → from_dt: "{current_utc_date}T00:00:00", to_dt: "{current_utc_date}T23:59:59"
+  "last hour" → from_dt: subtract 1 hour from {current_utc_datetime}
+  "last 7 days" → from_dt: subtract 7 days from {current_utc_date}T00:00:00
 - Do not include null values — omit the key entirely when the value is absent.
 
-Examples:
+Examples (with today = {current_utc_date}):
+
+  "What is the average stage-in time at BNL today?"
+  → {{"metric": "avg", "field": "pilottiming_stagein", "site": "BNL",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
 
   "What is the average stage-in time at BNL over the last 7 days?"
   → {{"metric": "avg", "field": "pilottiming_stagein", "site": "BNL",
-      "from_dt": "<7-days-ago>", "to_dt": "<now>"}}
+      "from_dt": "{week_ago_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
 
   "What is the total wall-clock time for finished jobs at CERN?"
   → {{"metric": "sum", "field": "job_walltime", "site": "CERN",
       "jobstatus": "finished"}}
 
-  "How many jobs were processed at IN2P3 last week?"
+  "How many jobs ran at IN2P3 today?"
   → {{"metric": "value_count", "field": "pandaid", "site": "IN2P3",
-      "from_dt": "<last-week-start>", "to_dt": "<last-week-end>"}}
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
 
   "What is the minimum queue time for failed jobs?"
   → {{"metric": "min", "field": "job_queuetime", "jobstatus": "failed"}}
@@ -239,8 +252,9 @@ Examples:
 def build_query_prompt(question: str) -> list[dict[str, Any]]:
     """Build the LLM message list for query-parameter extraction.
 
-    The system prompt injects the full field registry and extraction rules.
-    The user message is the raw natural-language question.
+    Injects the current UTC date and time into the system prompt so the LLM
+    can compute concrete ISO-8601 timestamps for relative time expressions
+    such as "today", "last 7 days", or "last hour" without guessing the date.
 
     Args:
         question: Natural-language question from the user.
@@ -249,6 +263,13 @@ def build_query_prompt(question: str) -> list[dict[str, Any]]:
         A list of ``{"role": str, "content": str}`` dicts suitable for
         passing to any Bamboo LLM provider.
     """
+    import datetime  # deferred — only needed at prompt-build time
+
+    now_utc = datetime.datetime.now(tz=datetime.timezone.utc)
+    current_utc_datetime = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
+    current_utc_date = now_utc.strftime("%Y-%m-%d")
+    week_ago_date = (now_utc - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+
     numeric_list = ", ".join(sorted(NUMERIC_FIELDS))
     valid_metrics_list = ", ".join(sorted(VALID_METRICS))
 
@@ -256,6 +277,9 @@ def build_query_prompt(question: str) -> list[dict[str, Any]]:
         field_context=_FIELD_CONTEXT,
         numeric_fields=numeric_list,
         valid_metrics=valid_metrics_list,
+        current_utc_datetime=current_utc_datetime,
+        current_utc_date=current_utc_date,
+        week_ago_date=week_ago_date,
     )
     return [
         {"role": "system", "content": system_content},
