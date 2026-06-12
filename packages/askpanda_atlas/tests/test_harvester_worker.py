@@ -25,6 +25,7 @@ from askpanda_atlas.harvester_worker_impl import (
     _extract_records,
     _resolve_dt,
     _safe_int,
+    _sanitise_window,
     build_harvester_url,
     fetch_worker_stats,
     panda_harvester_workers_tool,
@@ -306,6 +307,105 @@ class TestResolveDt:
         import re
         result = _resolve_dt("now-3h", self._FALLBACK)
         assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", result)
+
+
+# ---------------------------------------------------------------------------
+# _sanitise_window
+# ---------------------------------------------------------------------------
+
+
+class TestSanitiseWindow:
+    """Unit tests for :func:`_sanitise_window`."""
+
+    def _now_str(self, delta_seconds: int = 0) -> str:
+        """Return a UTC ISO-8601 string offset by *delta_seconds* from now."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        return (now + timedelta(seconds=delta_seconds)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    def test_valid_past_window_unchanged(self) -> None:
+        """A plausible past window is returned unchanged."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        from_dt = (now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
+        to_dt = now.strftime("%Y-%m-%dT%H:%M:%S")
+        f, t = _sanitise_window(from_dt, to_dt, "show running pilot counts for the last 6 hours")
+        assert f == from_dt
+        assert t == to_dt
+
+    def test_future_to_dt_clamped_to_now(self) -> None:
+        """A to_dt more than 60 s in the future is clamped to now."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        future_to = (now + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
+        past_from = (now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
+        f, t = _sanitise_window(past_from, future_to, "")
+        t_parsed = datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert t_parsed <= now + timedelta(seconds=2)
+        assert f == past_from  # from_dt unchanged because it is still < to_dt
+
+    def test_llm_end_of_day_pattern_corrected(self) -> None:
+        """LLM end-of-day pattern (from_dt in future, to_dt=23:59) is corrected.
+
+        Simulates the observed failure: at 17:33 UTC, LLM produces
+        from_dt=18:00, to_dt=23:59 for "last 6 hours".
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        # Use a date in the past so from_dt/to_dt are unambiguously "future"
+        # relative to a hypothetical earlier query time.  We simulate by
+        # constructing a window where from_dt > now.
+        future_from = "2099-01-01T18:00:00"
+        future_to = "2099-01-01T23:59:59"
+        f, t = _sanitise_window(future_from, future_to,
+                                "show running pilot counts for the last 6 hours")
+        # to_dt should be clamped to now; from_dt should be to_dt - 6h
+        t_parsed = datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        f_parsed = datetime.strptime(f, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        from datetime import timedelta
+        assert t_parsed <= now + timedelta(seconds=2)
+        assert abs((t_parsed - f_parsed).total_seconds() - 6 * 3600) < 5
+
+    def test_from_dt_re_derived_hours(self) -> None:
+        """When from_dt >= to_dt, re-derives from question using hour delta."""
+        from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        # Construct from_dt == to_dt (degenerate window)
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S")
+        f, t = _sanitise_window(ts, ts, "last 3 hours at BNL")
+        f_parsed = datetime.strptime(f, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t_parsed = datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert abs((t_parsed - f_parsed).total_seconds() - 3 * 3600) < 5
+
+    def test_from_dt_re_derived_minutes(self) -> None:
+        """When from_dt >= to_dt, re-derives from question using minute delta."""
+        from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S")
+        f, t = _sanitise_window(ts, ts, "past 30 minutes")
+        f_parsed = datetime.strptime(f, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t_parsed = datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert abs((t_parsed - f_parsed).total_seconds() - 30 * 60) < 5
+
+    def test_no_question_match_falls_back_to_one_hour(self) -> None:
+        """When from_dt >= to_dt and no pattern in question, defaults to 1 hour."""
+        from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S")
+        f, t = _sanitise_window(ts, ts, "show pilot counts at BNL")
+        f_parsed = datetime.strptime(f, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        t_parsed = datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert abs((t_parsed - f_parsed).total_seconds() - 3600) < 5
+
+    def test_slightly_future_to_dt_within_tolerance_unchanged(self) -> None:
+        """A to_dt within 60 s of now (clock skew) is not clamped."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+        near_future = (now + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S")
+        past_from = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        f, t = _sanitise_window(past_from, near_future, "")
+        assert t == near_future  # within tolerance — not clamped
+        assert f == past_from
 
 
 # ---------------------------------------------------------------------------

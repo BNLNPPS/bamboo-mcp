@@ -137,6 +137,93 @@ def _resolve_dt(value: str, fallback: str) -> str:
     return fallback
 
 
+def _sanitise_window(
+    from_dt: str,
+    to_dt: str,
+    question: str,
+) -> tuple[str, str]:
+    """Detect and correct implausible LLM-generated time windows.
+
+    The LLM planner sometimes computes timestamps relative to midnight rather
+    than relative to the current wall-clock time.  For example, for a 17:33
+    query asking "last 6 hours", it may produce ``from_dt=18:00, to_dt=23:59``
+    — a window that starts in the future and ends at end-of-day.
+
+    This function applies two corrections:
+
+    1. **Future ``to_dt``**: if ``to_dt`` is more than 60 seconds in the future,
+       clamp it to now.
+    2. **Future or equal ``from_dt``**: after clamping ``to_dt``, if ``from_dt``
+       is ≥ ``to_dt``, re-derive the window from the question text using the same
+       pattern matching as ``bamboo_answer._extract_time_window_from_question``.
+       Falls back to the 1-hour default window when no pattern matches.
+
+    Absolute, non-future windows are returned unchanged.
+
+    Args:
+        from_dt: Resolved ISO-8601 lower bound (``YYYY-MM-DDTHH:MM:SS``).
+        to_dt: Resolved ISO-8601 upper bound (``YYYY-MM-DDTHH:MM:SS``).
+        question: Original user question text, used to re-derive the window
+            when the LLM-supplied values are implausible.
+
+    Returns:
+        ``(from_dt, to_dt)`` — corrected if necessary, always absolute
+        ISO-8601 strings without timezone suffix.
+    """
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+
+    def _parse(s: str) -> datetime | None:
+        try:
+            return datetime.strptime(s[:19], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    t_to = _parse(to_dt)
+    t_from = _parse(from_dt)
+
+    if t_to is None or t_from is None:
+        return from_dt, to_dt  # unparseable — leave unchanged
+
+    # Step 1: clamp a future to_dt to now.
+    if t_to > now + timedelta(seconds=60):
+        logger.warning(
+            "panda_harvester_workers: to_dt %r is in the future — clamping to now",
+            to_dt,
+        )
+        t_to = now
+        to_dt = now.strftime(fmt)
+
+    # Step 2: re-derive from_dt when it is >= the (possibly clamped) to_dt.
+    if t_from >= t_to:
+        logger.warning(
+            "panda_harvester_workers: from_dt %r >= to_dt %r — re-deriving from question",
+            from_dt, to_dt,
+        )
+        # Re-parse the question for a numeric delta (e.g. "last 6 hours").
+        _window_re = re.search(
+            r"(?:last|past|in\s+the\s+last|in\s+the\s+past)\s+(\d+)\s+"
+            r"(hour|hours|hr|hrs|minute|minutes|min|mins|day|days)",
+            question,
+            re.IGNORECASE,
+        )
+        if _window_re:
+            n = int(_window_re.group(1))
+            unit = _window_re.group(2).lower()
+            if unit.startswith("min"):
+                delta = timedelta(minutes=n)
+            elif unit.startswith("day"):
+                delta = timedelta(days=n)
+            else:
+                delta = timedelta(hours=n)
+            from_dt = (t_to - delta).strftime(fmt)
+        else:
+            # No recognisable delta — fall back to 1-hour default.
+            from_dt = (t_to - timedelta(hours=1)).strftime(fmt)
+
+    return from_dt, to_dt
+
+
 def build_harvester_url(
     base_url: str,
     from_dt: str,
@@ -574,6 +661,14 @@ class PandaHarvesterWorkersTool:
             if to_dt_raw:
                 to_dt = _resolve_dt(to_dt_raw.strip(), default_to)
 
+        # Sanity-check the resolved window: the LLM sometimes computes timestamps
+        # relative to midnight rather than to the current wall-clock time (e.g.
+        # "last 6 hours" at 17:33 becomes 18:00→23:59 instead of 11:33→17:33).
+        # _sanitise_window detects a future to_dt or from_dt >= to_dt and
+        # re-derives the window from the question text.
+        question_text: str = str(arguments.get("question") or "")
+        from_dt, to_dt = _sanitise_window(from_dt, to_dt, question_text)
+
         logger.debug(
             "panda_harvester_workers: site=%r from_dt=%r to_dt=%r",
             site, from_dt, to_dt,
@@ -596,6 +691,7 @@ panda_harvester_workers_tool = PandaHarvesterWorkersTool()
 __all__ = [
     "PandaHarvesterWorkersTool",
     "_resolve_dt",
+    "_sanitise_window",
     "build_harvester_url",
     "fetch_worker_stats",
     "get_definition",

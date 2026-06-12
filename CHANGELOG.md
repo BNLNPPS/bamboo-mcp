@@ -6,6 +6,37 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Relative `from_dt`/`to_dt` expressions crash the Harvester API**:
+  the LLM planner occasionally emits OpenSearch-style relative timestamps
+  (`"now-6h"`, `"now/d"`) instead of absolute ISO-8601 strings.  The BigPanDA
+  Harvester HTTP API does not understand these and returns an error, producing a
+  zeroed-out evidence dict and a misleading "API unavailable" response.  Fixed by
+  adding `_resolve_dt()` to `harvester_worker_impl.py`, which intercepts any
+  non-ISO argument and resolves it to an absolute UTC timestamp before the HTTP
+  call.  The planner routing prompt for `panda_harvester_workers` and
+  `atlas.harvester_timeseries` also now explicitly instructs the LLM to use
+  absolute ISO-8601 strings, not relative expressions.
+- **Pilot failure-rate routing misclassification**: questions such as "which sites
+  had pilot failures above 20% today?" were incorrectly routed to
+  `panda_harvester_workers` (the BigPanDA HTTP snapshot tool) instead of
+  `atlas.harvester_timeseries` (the OpenSearch time-series tool).  The planner
+  routing guidance now has a dedicated rule for failure-rate and
+  failure-percentage questions that explicitly selects `atlas.harvester_timeseries`
+  with `status='failed'`, while the live-count rule is tightened to snapshot
+  queries only ("how many pilots are running right now").
+- **`atlas.harvester_timeseries` tool description**: the description previously
+  read "used to render ASCII time-series charts in the TUI" — making the planner
+  LLM treat it as an internal charting helper rather than a query tool.  The
+  description now explicitly lists failure-rate and cross-site trend questions as
+  primary use cases, with concrete examples.
+- **`bamboo_executor._pick_synthesis_prompt`**: `atlas.harvester_timeseries` now
+  selects `_SYSTEM_HARVESTER_TIMESERIES` (a new specialist prompt) instead of
+  falling through to `_SYSTEM_GENERIC`.  The new prompt instructs the LLM to
+  report absolute failed-pilot counts and trends, and to explain why it cannot
+  compute a failure *percentage* without the total pilot count (cross-referencing
+  `failed` vs `total` requires two queries).
+
 ### Added
 - **`panda_job_timing` tool** (`packages/askpanda_atlas`): new OpenSearch-backed
   MCP tool that answers natural-language questions about PanDA job timing against
