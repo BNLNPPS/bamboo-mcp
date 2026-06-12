@@ -2253,6 +2253,27 @@ async def _run_fast_path_intercepts(
             if fast_plan is not None:
                 return await execute_plan(fast_plan, question, history)
 
+        # Job timing fast-path — must come BEFORE the jobs DB fast-path
+        # because timing signals like 'queue time' and 'wall-clock time'
+        # also loosely match _JOBS_DB_SIGNALS and would otherwise route
+        # to panda_jobs_query instead of atlas.job_timing.
+        if plugin_id in frozenset({"atlas", "epic"}) and _is_job_timing_question(question):
+            timing_args: dict[str, str] = {"question": question}
+            site = _extract_site_from_question(question)
+            if site:
+                timing_args["site"] = site
+            timing_plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.9,
+                tool_calls=[ToolCall(
+                    tool="atlas.job_timing",
+                    arguments=timing_args,
+                )],
+                reuse_policy=ReusePolicy(),
+                explain="Deterministic: pilot timing / wall-clock signals → atlas.job_timing.",
+            )
+            return await execute_plan(timing_plan, question, history, plugin_id=plugin_id)
+
         # Jobs DB fast-path and CRIC fast-path — handled by shared helper
         # that also performs multi-DB disambiguation.
         db_result = await _run_db_query_fast_path(question, history, plugin_id=plugin_id)
