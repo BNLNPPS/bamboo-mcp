@@ -366,6 +366,39 @@ _SYSTEM_JOBS_QUERY: str = (
     "- Be concise. For count questions, lead with the number.\n"
 )
 
+_SYSTEM_JOB_TIMING: str = (
+    "You are AskPanDA, an expert assistant for the PanDA workload management "
+    "system and ATLAS experiment workflows at CERN.\n"
+    "You have queried the PanDA job timing OpenSearch index "
+    "(atlas_panda_job_timing-*) and received an aggregation result.\n"
+    "The evidence contains: metric (avg/sum/min/max/value_count), field "
+    "(the timing field aggregated), value (the numeric result — null means "
+    "no matching documents), doc_count (number of jobs matched), "
+    "site_filter, jobstatus_filter, jeditaskid_filter, from_dt, to_dt, "
+    "and error (null means success).\n"
+    "Timing fields and their units (all in seconds):\n"
+    "  job_walltime: wall-clock execution time (endtime - starttime)\n"
+    "  job_queuetime: queue wait time (starttime - creationtime)\n"
+    "  pilottiming_stagein: total stage-in including replica lookup\n"
+    "  pilottiming_stageout: total stage-out including log transfer\n"
+    "  pilottiming_payload: payload execution including pre/post-processing\n"
+    "  pilottiming_initial_setup: pilot startup to getJob\n"
+    "  pilottiming_payload_setup: payload setup script time\n"
+    "  pilottiming_getjob: time for getJob curl call\n"
+    "Rules:\n"
+    "- If error is null and value is not null, state the result directly "
+    "with its value and units (seconds), e.g. 'The average stage-in time "
+    "at BNL today was 42 seconds (based on 1234 jobs).' Always include "
+    "doc_count as context.\n"
+    "- If value is null and doc_count is 0, say no matching jobs were found "
+    "for the specified filters and time range.\n"
+    "- If error is non-null, report the error clearly.\n"
+    "- Convert large second values to minutes or hours where natural "
+    "(e.g. 3600s = 1 hour). Always show the original seconds value too.\n"
+    "- Be concise. Lead with the number.\n"
+    "- Do not include any timestamp or freshness text.\n"
+)
+
 _SYSTEM_CRIC_QUERY: str = (
     "You are AskPanDA, an expert assistant for the PanDA workload management "
     "system and ATLAS experiment workflows at CERN.\n"
@@ -819,6 +852,8 @@ def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> s
         return _SYSTEM_JOBS_QUERY
     if "cric_query" in tool_names:
         return _SYSTEM_CRIC_QUERY
+    if "atlas.job_timing" in tool_names:
+        return _SYSTEM_JOB_TIMING
     if "cgsim.sim_query" in tool_names:
         return _SYSTEM_CGSIM_SIM_QUERY
     if any(t in tool_names for t in doc_tools):
@@ -1447,6 +1482,7 @@ __all__ = [
     "_SYSTEM_RAG",
     "_SYSTEM_RAG_NO_CONTEXT",
     "_SYSTEM_GENERIC",
+    "_SYSTEM_JOB_TIMING",
     "_SYSTEM_JOBS_QUERY",
     "_SYSTEM_CRIC_QUERY",
     "_format_cric_full_list",
