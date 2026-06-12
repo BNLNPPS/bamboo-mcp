@@ -23,6 +23,7 @@ from askpanda_atlas.harvester_worker_impl import (
     _default_window,
     _error_evidence,
     _extract_records,
+    _resolve_dt,
     _safe_int,
     build_harvester_url,
     fetch_worker_stats,
@@ -229,6 +230,82 @@ class TestDefaultWindow:
         # Will raise ValueError if format is wrong.
         datetime.fromisoformat(from_dt)
         datetime.fromisoformat(to_dt)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_dt
+# ---------------------------------------------------------------------------
+
+
+class TestResolveDt:
+    """Unit tests for :func:`_resolve_dt`."""
+
+    _FALLBACK: str = "2026-01-01T00:00:00"
+
+    def test_absolute_iso_passthrough(self) -> None:
+        """Valid ISO-8601 timestamps are returned unchanged."""
+        assert _resolve_dt("2026-06-12T09:00:00", self._FALLBACK) == "2026-06-12T09:00:00"
+
+    def test_absolute_iso_strips_trailing_z(self) -> None:
+        """Trailing timezone suffix is stripped to keep format consistent."""
+        result = _resolve_dt("2026-06-12T09:00:00Z", self._FALLBACK)
+        assert result == "2026-06-12T09:00:00"
+
+    def test_now_minus_hours(self) -> None:
+        """``now-Nh`` resolves to approximately N hours before current UTC time."""
+        from datetime import datetime, timedelta, timezone
+        before = datetime.now(tz=timezone.utc)
+        result = _resolve_dt("now-6h", self._FALLBACK)
+        after = datetime.now(tz=timezone.utc)
+        parsed = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert before - timedelta(hours=6, seconds=2) <= parsed <= after - timedelta(hours=6) + timedelta(seconds=2)
+
+    def test_now_minus_minutes(self) -> None:
+        """``now-Nm`` resolves to approximately N minutes before current UTC time."""
+        from datetime import datetime, timedelta, timezone
+        before = datetime.now(tz=timezone.utc)
+        result = _resolve_dt("now-30m", self._FALLBACK)
+        after = datetime.now(tz=timezone.utc)
+        parsed = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert before - timedelta(minutes=30, seconds=2) <= parsed <= after - timedelta(minutes=30) + timedelta(seconds=2)
+
+    def test_now_minus_days(self) -> None:
+        """``now-Nd`` resolves to approximately N days before current UTC time."""
+        from datetime import datetime, timedelta, timezone
+        before = datetime.now(tz=timezone.utc)
+        result = _resolve_dt("now-1d", self._FALLBACK)
+        after = datetime.now(tz=timezone.utc)
+        parsed = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert before - timedelta(days=1, seconds=2) <= parsed <= after - timedelta(days=1) + timedelta(seconds=2)
+
+    def test_now_slash_d_gives_midnight(self) -> None:
+        """``now/d`` resolves to midnight of the current UTC day."""
+        result = _resolve_dt("now/d", self._FALLBACK)
+        assert result.endswith("T00:00:00")
+
+    def test_now_gives_current_time(self) -> None:
+        """``now`` resolves to the current UTC time (within 2 seconds)."""
+        from datetime import datetime, timedelta, timezone
+        before = datetime.now(tz=timezone.utc)
+        result = _resolve_dt("now", self._FALLBACK)
+        after = datetime.now(tz=timezone.utc)
+        parsed = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        assert before - timedelta(seconds=2) <= parsed <= after + timedelta(seconds=2)
+
+    def test_unrecognised_returns_fallback(self) -> None:
+        """Unrecognised strings return the fallback without raising."""
+        assert _resolve_dt("6 hours ago", self._FALLBACK) == self._FALLBACK
+
+    def test_case_insensitive(self) -> None:
+        """Relative expressions are matched case-insensitively."""
+        result = _resolve_dt("NOW-2H", self._FALLBACK)
+        assert result != self._FALLBACK
+
+    def test_result_format(self) -> None:
+        """Result is always YYYY-MM-DDTHH:MM:SS with no timezone suffix."""
+        import re
+        result = _resolve_dt("now-3h", self._FALLBACK)
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", result)
 
 
 # ---------------------------------------------------------------------------

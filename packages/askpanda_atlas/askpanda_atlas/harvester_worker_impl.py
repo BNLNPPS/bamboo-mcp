@@ -38,6 +38,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -68,6 +69,72 @@ def _default_window() -> tuple[str, str]:
     now = datetime.now(tz=timezone.utc).replace(microsecond=0)
     one_hour_ago = now - timedelta(hours=1)
     return one_hour_ago.strftime("%Y-%m-%dT%H:%M:%S"), now.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+_ISO_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
+
+
+def _resolve_dt(value: str, fallback: str) -> str:
+    """Return an absolute ISO-8601 timestamp, resolving relative expressions.
+
+    The LLM planner occasionally emits OpenSearch-style relative expressions
+    (``"now-6h"``, ``"now/d"``) or human-readable phrases (``"6 hours ago"``)
+    instead of absolute ISO-8601 timestamps.  The BigPanDA Harvester API does
+    not understand these and returns an error or empty result.
+
+    Recognised relative patterns and their resolutions (all anchored to the
+    current UTC time at call time):
+
+    - ``now-Nh`` / ``now-Nm`` / ``now-Nd`` — subtract N hours/minutes/days
+    - ``now/d`` — midnight of the current UTC day (start-of-day)
+    - ``now`` — current UTC time
+    - Any string not matching ``YYYY-MM-DD[T ]HH:MM:SS`` — returns *fallback*
+
+    Args:
+        value: Raw ``from_dt`` or ``to_dt`` string from the planner.
+        fallback: Absolute ISO-8601 string to return when *value* cannot be
+            resolved (e.g. the default window boundary).
+
+    Returns:
+        Absolute ISO-8601 string formatted as ``YYYY-MM-DDTHH:MM:SS`` (UTC).
+    """
+    import re as _re
+
+    v = value.strip()
+
+    # Already a valid absolute ISO timestamp — pass through unchanged.
+    if _ISO_DT_RE.match(v):
+        return v[:19]  # strip any trailing timezone suffix
+
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+    fmt = "%Y-%m-%dT%H:%M:%S"
+
+    # now-Nh / now-Nm / now-Nd
+    _rel = _re.match(r"^now-(\d+)(h|m|d)$", v, _re.IGNORECASE)
+    if _rel:
+        n, unit = int(_rel.group(1)), _rel.group(2).lower()
+        if unit == "h":
+            delta = timedelta(hours=n)
+        elif unit == "m":
+            delta = timedelta(minutes=n)
+        else:
+            delta = timedelta(days=n)
+        return (now - delta).strftime(fmt)
+
+    # now/d — start of current UTC day
+    if _re.match(r"^now/d$", v, _re.IGNORECASE):
+        return now.replace(hour=0, minute=0, second=0).strftime(fmt)
+
+    # bare "now"
+    if _re.match(r"^now$", v, _re.IGNORECASE):
+        return now.strftime(fmt)
+
+    # Unrecognised — use the supplied fallback
+    logger.warning(
+        "panda_harvester_workers: unrecognised from_dt/to_dt %r — using fallback %r",
+        value, fallback,
+    )
+    return fallback
 
 
 def build_harvester_url(
@@ -495,15 +562,17 @@ class PandaHarvesterWorkersTool:
         from_dt_raw: str | None = arguments.get("from_dt")
         to_dt_raw: str | None = arguments.get("to_dt")
 
+        default_from, default_to = _default_window()
+
         if from_dt_raw and to_dt_raw:
-            from_dt = from_dt_raw.strip()
-            to_dt = to_dt_raw.strip()
+            from_dt = _resolve_dt(from_dt_raw.strip(), default_from)
+            to_dt = _resolve_dt(to_dt_raw.strip(), default_to)
         else:
-            from_dt, to_dt = _default_window()
+            from_dt, to_dt = default_from, default_to
             if from_dt_raw:
-                from_dt = from_dt_raw.strip()
+                from_dt = _resolve_dt(from_dt_raw.strip(), default_from)
             if to_dt_raw:
-                to_dt = to_dt_raw.strip()
+                to_dt = _resolve_dt(to_dt_raw.strip(), default_to)
 
         logger.debug(
             "panda_harvester_workers: site=%r from_dt=%r to_dt=%r",
@@ -526,6 +595,7 @@ panda_harvester_workers_tool = PandaHarvesterWorkersTool()
 
 __all__ = [
     "PandaHarvesterWorkersTool",
+    "_resolve_dt",
     "build_harvester_url",
     "fetch_worker_stats",
     "get_definition",
