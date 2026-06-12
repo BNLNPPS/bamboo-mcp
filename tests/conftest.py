@@ -43,7 +43,7 @@ def pytest_configure() -> None:
     atlas_pkg_dir = repo_root / "packages" / "askpanda_atlas"
     epic_pkg_dir = repo_root / "packages" / "askpanda_epic"
 
-    for p in (core_dir, atlas_pkg_dir, epic_pkg_dir):
+    for p in (repo_root, core_dir, atlas_pkg_dir, epic_pkg_dir):
         s = str(p)
         if s not in sys.path:
             sys.path.insert(0, s)
