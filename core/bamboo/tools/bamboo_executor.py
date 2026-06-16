@@ -231,10 +231,12 @@ _SYSTEM_RAG: str = (
     "- Do not fabricate PanDA-specific details (task IDs, queue names, error "
     "codes, algorithm descriptions) that are not in the excerpts.\n"
     "- Be concise and precise. Prefer bullet points for multi-part answers.\n"
-    "- When the user explicitly asks for a diagram AND the excerpts contain "
-    "enough information to draw one, produce a Mermaid diagram labelled as "
-    "based on documentation. If the excerpts are insufficient, do not produce "
-    "a diagram from general knowledge.\n"
+    "- When the user explicitly asks for a diagram, produce a Mermaid diagram. "
+    "If the excerpts contain enough information, label it as based on "
+    "documentation. If the excerpts are insufficient, draw from your general "
+    "knowledge of PanDA/ATLAS and label it as based on general knowledge. "
+    "Only omit the diagram entirely if the subject has no meaningful visual "
+    "structure (e.g. a simple yes/no question).\n"
     + _MERMAID_GUIDANCE
 )
 

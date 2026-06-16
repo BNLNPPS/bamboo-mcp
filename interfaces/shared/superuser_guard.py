@@ -76,37 +76,30 @@ _DEFAULT_PATTERN_STRINGS: list[str] = [
 ]
 
 #: Verbs / phrases that signal code inspection intent.
+#: Deliberately excludes generic question starters and broad action verbs
+#: ("how does", "how do", "what does", "what do", "get", "list", "show me",
+#: "describe", "explain", "check", "understand", "display") — these fire
+#: too easily on documentation questions like "how does the pilot work?" or
+#: "show me which sites have failures".  Only verbs that unambiguously
+#: imply reading or examining source code are retained.
 _CODE_INSPECTION_VERBS: frozenset[str] = frozenset({
     "look at",
     "read",
-    "explain",
     "review",
     "analyse",
     "analyze",
-    "show me",
-    "check",
     "debug",
     "inspect",
     "examine",
     "walk me through",
     "walk through",
-    "describe",
-    "understand",
-    "how does",
-    "how do",
-    "what does",
-    "what do",
     "download",
     "fetch",
-    "get",
-    "get me",
     "grab",
     "pull",
     "open",
     "load",
-    "display",
     "print",
-    "list",
 })
 
 #: Keywords that identify a source-code repository context when combined

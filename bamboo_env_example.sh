@@ -184,13 +184,33 @@ export ASKPANDA_PLUGIN="atlas"
 # Path to the ChromaDB persistent directory created by the ingestion script.
 export BAMBOO_CHROMA_PATH="./chroma_db"
 
-# Name of the ChromaDB collection to query.
-# Each plugin has its own default collection name so multiple plugins can
-# coexist in the same ChromaDB directory:
-#   atlas_docs  — ATLAS / PanDA documentation  (askpanda_atlas default)
-#   epic_docs   — ePIC / EIC documentation     (askpanda_epic default)
-#   cgsim_docs  — CGSim / SimGrid documentation (cgsim default)
-# Set this explicitly to override the plugin default.
+# Multi-collection map: JSON object mapping topic keys to logical collection
+# names.  The document-monitor agent in bamboo-mcp-services ingests each
+# source repository into a separate named collection; this map tells Bamboo
+# MCP which collection to query for each topic.
+#
+# Adding a new collection requires only updating this JSON string — no code
+# changes or new environment variables.
+#
+# Built-in topic defaults (used when a topic key is absent from the map):
+#   panda  → panda_docs     atlas  → atlas_docs    bamboo → bamboo_docs
+#   rucio  → rucio_docs     root   → root_docs      epic   → epic_docs
+#   cgsim  → cgsim_docs
+#
+# Uncomment and adjust to match your bamboo-mcp-services deployment:
+# export BAMBOO_CHROMA_COLLECTION_MAP='{
+#     "panda":  "panda_docs",
+#     "atlas":  "atlas_docs",
+#     "bamboo": "bamboo_docs",
+#     "rucio":  "rucio_docs",
+#     "root":   "root_docs",
+#     "epic":   "epic_docs",
+#     "cgsim":  "cgsim_docs"
+# }'
+
+# Scalar fallback: used for all topics when BAMBOO_CHROMA_COLLECTION_MAP is
+# absent or has no entry for the requested topic.  Also preserves backward
+# compatibility with single-collection deployments.
 export BAMBOO_CHROMA_COLLECTION="atlas_docs"
 
 ########################################

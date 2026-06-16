@@ -902,6 +902,73 @@ _PILOT_DOC_PREFIXES: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Topic classification for multi-collection RAG routing
+# ---------------------------------------------------------------------------
+
+#: Keyword signals that indicate a Rucio data-management question.
+_RUCIO_SIGNALS: frozenset[str] = frozenset({
+    "rucio", "did ", "data identifier", "replica", "replication rule",
+    "rse ", "storage element", "rucio rule",
+})
+
+#: Keyword signals that indicate a ROOT data-analysis framework question.
+_ROOT_SIGNALS: frozenset[str] = frozenset({
+    "root ", " root\n", "tfile", "ttree", "tbranch", "tleaf",
+    "rdataframe", "rdf::", "root framework", "root cern",
+})
+
+#: Keyword signals that indicate a Bamboo MCP meta-question.
+_BAMBOO_SIGNALS: frozenset[str] = frozenset({
+    "bamboo mcp", "bamboo-mcp", "bamboo config", "configure bamboo",
+    "bamboo tool", "bamboo server", "bamboo answer", "bamboo setup",
+})
+
+
+def _topic_for_question(question: str, plugin_id: str = "atlas") -> str:
+    """Infer the ChromaDB collection topic for a documentation question.
+
+    Uses lightweight keyword matching to assign a topic key that
+    :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic` maps
+    to a concrete logical collection name.  Plugin-level defaults take
+    precedence over keyword signals for plugin-specific tools (ePIC, CGSim),
+    and keyword signals for cross-cutting topics (Rucio, ROOT, Bamboo) take
+    precedence over the generic PanDA/ATLAS default.
+
+    Args:
+        question: The user question text (already lowercased by callers, but
+            this function lowercases defensively).
+        plugin_id: Active plugin identifier.  Controls the default topic when
+            no cross-cutting keyword signal is present.
+
+    Returns:
+        str: A topic key recognised by
+        :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic`,
+        e.g. ``"atlas"``, ``"rucio"``, ``"root"``, ``"bamboo"``, ``"panda"``.
+    """
+    # Plugin-specific topics always win — don't let keyword signals bleed
+    # across plugin boundaries (e.g. an ePIC question mentioning "panda").
+    if plugin_id == "cgsim":
+        return "cgsim"
+    if plugin_id == "epic":
+        return "epic"
+
+    q_lower = question.lower()
+
+    # Cross-cutting topics: Bamboo meta, ROOT, Rucio.
+    if any(sig in q_lower for sig in _BAMBOO_SIGNALS):
+        return "bamboo"
+    if any(sig in q_lower for sig in _ROOT_SIGNALS):
+        return "root"
+    if any(sig in q_lower for sig in _RUCIO_SIGNALS):
+        return "rucio"
+
+    # ATLAS plugin defaults to atlas_docs; everything else falls back to panda.
+    if plugin_id == "atlas":
+        return "atlas"
+    return "panda"
+
+
 def _is_pilot_question(question: str) -> bool:
     """Return ``True`` when the question is about Harvester pilots/workers.
 
@@ -1135,6 +1202,15 @@ def _is_code_query_question(question: str) -> bool:
       with a repository keyword (``pilot``, ``bamboo``, ``source``, ``code``,
       …) — covers phrasing like *"explain how the pilot works"*.
 
+    Note:
+        Generic question starters (``"how does"``, ``"how do"``, ``"what does"``,
+        ``"what do"``) are intentionally excluded from the verb set.  They are
+        documentation question phrases, not source-inspection signals.  A question
+        like *"how does the pilot work?"* is a documentation query and must route
+        to RAG (``panda_doc_search``), not ``code_query``.  Stronger verbs
+        (``"explain"``, ``"review"``, ``"inspect"``) are retained because they
+        carry genuine inspection intent when combined with a repo keyword.
+
     Args:
         question: User question text.
 
@@ -1150,14 +1226,19 @@ def _is_code_query_question(question: str) -> bool:
     _diagram_kws = {"diagram", "state machine", "flowchart", "mermaid", "chart", "visuali"}
     if any(d in q for d in _diagram_kws):
         return False
-    # Signal 2: inspection verb + repository/code keyword
+    # Signal 2: inspection verb + repository/code keyword.
+    # Excludes generic question starters ("how does", "how do", "what does",
+    # "what do") — those are documentation questions, not code-inspection intent.
+    # Only verbs that unambiguously signal source-code inspection intent.
+    # Broad verbs ("get", "list", "show me", "describe", "understand") are
+    # intentionally excluded because they fire too easily on documentation
+    # questions ("how do pilots get jobs?", "describe the pilot architecture").
     _verbs = {
-        "look at", "read", "explain", "review", "analyse", "analyze",
-        "show me", "check", "debug", "inspect", "examine",
-        "walk me through", "walk through", "describe",
-        "understand", "how does", "how do", "what does", "what do",
-        "download", "fetch", "get", "get me", "grab", "pull",
-        "open", "load", "display", "print", "list",
+        "look at", "read", "review", "analyse", "analyze",
+        "debug", "inspect", "examine",
+        "walk me through", "walk through",
+        "download", "fetch", "grab", "pull",
+        "open", "load", "print",
     }
     _repo_kws = {
         "pilot", "bamboo", "panda", "plugin", "module",
@@ -1558,21 +1639,22 @@ def _build_deterministic_plan(  # noqa: C901
     _doc_tools = list(_PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS))
     doc_search = _doc_tools[0] if _doc_tools else "panda_doc_search"
     doc_bm25 = _doc_tools[1] if len(_doc_tools) > 1 else "panda_doc_bm25"
+    topic = _topic_for_question(question, plugin_id)
     return Plan(
         route=PlanRoute.RETRIEVE,
         confidence=1.0,
         tool_calls=[
             ToolCall(
                 tool=doc_search,
-                arguments={"query": question, "top_k": 5},
+                arguments={"query": question, "top_k": 5, "topic": topic},
             ),
             ToolCall(
                 tool=doc_bm25,
-                arguments={"query": question, "top_k": 5},
+                arguments={"query": question, "top_k": 5, "topic": topic},
             ),
         ],
         reuse_policy=reuse,
-        explain=f"Deterministic: no task/job ID → RAG retrieval ({doc_search}, {doc_bm25}).",
+        explain=f"Deterministic: no task/job ID → RAG retrieval ({doc_search}, {doc_bm25}, topic={topic}).",
     )
 
 
@@ -2555,6 +2637,10 @@ __all__ = [
     "_is_panda_health_question",
     "_is_pilot_source_request",
     "_PILOT_SOURCE_SIGNALS",
+    "_topic_for_question",
+    "_RUCIO_SIGNALS",
+    "_ROOT_SIGNALS",
+    "_BAMBOO_SIGNALS",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_run_db_query_fast_path",

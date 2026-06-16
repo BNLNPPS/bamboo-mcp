@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from collections.abc import Sequence  # noqa: F401  (kept for type annotations in helpers)
@@ -63,10 +64,10 @@ except ValueError:
 _ANSWER_TOOL = "bamboo_answer"
 _DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
-#: Diagram rendering mode.  ``classic`` = one components.html iframe per
-#: diagram (stable).  ``single-iframe`` = all text + diagrams in one iframe
-#: (experimental, enables CSS-controlled layout).
-_DIAGRAM_MODE: str = os.getenv("BAMBOO_DIAGRAM_MODE", "classic").lower()
+#: Diagram rendering mode.  ``single-iframe`` (default) = text + diagrams
+#: in one ``st.components.v1.html`` iframe with CSS-controlled portrait/landscape layout.
+#: ``classic`` = one ``st.components.v1.html`` iframe per diagram, diagrams only (no inline text).
+_DIAGRAM_MODE: str = os.getenv("BAMBOO_DIAGRAM_MODE", "single-iframe").lower()
 
 # ---------------------------------------------------------------------------
 # Mermaid diagram support
@@ -350,9 +351,13 @@ _MERMAID_INIT_JS: str = """
     startOnLoad: false,
     theme: 'default',
     securityLevel: 'loose',
-    flowchart:   { useMaxWidth: true, htmlLabels: true,
+    flowchart:   { useMaxWidth: true, htmlLabels: false,
                    nodeSpacing: 40, rankSpacing: 50 },
-    stateDiagram:{ useMaxWidth: true, htmlLabels: false }
+    stateDiagram:{ useMaxWidth: true, htmlLabels: false },
+    themeVariables: {
+      fontSize: '14px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    }
   });
 """
 
@@ -362,54 +367,59 @@ _MERMAID_CDN: str = (
 
 
 def _mermaid_height_estimate(defn: str) -> int:
-    """Estimate a reasonable iframe height for a Mermaid diagram.
+    """Estimate a generous iframe height for a Mermaid diagram.
 
-    Uses a diagram-type-aware heuristic because Mermaid inlines absolute
-    pixel dimensions on the SVG that cannot be overridden from outside the
-    iframe.  The estimate is intentionally generous; ``scrolling=True`` acts
-    as a safety net.
+    ``st.iframe`` defaults to ``height="content"`` which measures iframe
+    content synchronously at render time.  Since Mermaid renders asynchronously
+    (async JS), the measurement fires before the SVG exists and the iframe
+    collapses to zero height.  Passing an explicit integer pixel height avoids
+    this; the estimate therefore errs significantly on the tall side —
+    whitespace below the diagram is harmless, clipping is not.
+
+    Mermaid flowcharts with subgraphs render considerably taller than a
+    naive line-count suggests because each subgraph adds its own padding,
+    border, and label row.  The multipliers below were calibrated against
+    typical LLM-generated diagrams (5-10 nodes, 0-3 subgraphs).
 
     Args:
         defn: Raw Mermaid definition string.
 
     Returns:
-        Pixel height to pass to ``components.html(height=...)``.
+        Pixel height to pass as ``st.iframe(html, height=N)``.
+        Must be an explicit integer — never rely on the default
+        ``height="content"`` for async-rendered content.
     """
     first = defn.strip().splitlines()[0].lower() if defn.strip() else ""
+
     if first.startswith("statediagram"):
-        _skip = ("%%", "statediagram", "[*]", "note", "direction")
-        state_count = sum(
-            1 for ln in defn.splitlines()
-            if ln.strip()
-            and not ln.strip().lower().startswith(_skip)
-            and "-->" not in ln
-            and ":" not in ln
-        )
-        return min(900, max(300, state_count * 80 + 150))
+        lc = sum(1 for ln in defn.splitlines() if ln.strip())
+        return min(2000, max(500, lc * 60 + 200))
+
     if first.startswith("sequencediagram"):
         lc = sum(1 for ln in defn.splitlines() if ln.strip())
-        return min(900, max(300, lc * 30 + 100))
-    lc = sum(1 for ln in defn.splitlines() if ln.strip())
-    return min(700, max(250, lc * 22 + 80))
+        return min(2000, max(500, lc * 40 + 150))
+
+    # Flowchart / graph.
+    # Count subgraph blocks — each adds substantial vertical overhead.
+    # Use a generous per-line multiplier as the baseline so that deeply
+    # nested or wide fan-out diagrams are never clipped.
+    lines = defn.splitlines()
+    lc = sum(1 for ln in lines if ln.strip())
+    subgraph_count = sum(1 for ln in lines if ln.strip().lower().startswith("subgraph"))
+    # Base: 55px per non-empty line; subgraph overhead: 200px each; floor: 700px
+    estimated = lc * 55 + subgraph_count * 200 + 150
+    return min(2000, max(700, estimated))
 
 
 def _render_mermaid_classic(diagram_defs: list[str]) -> None:
-    r"""Render Mermaid diagrams — one ``components.html`` iframe per diagram.
+    r"""Render Mermaid diagrams — one ``st.iframe`` per diagram.
 
-    Uses ``mermaid.render()`` (Promise-based API) rather than
-    ``startOnLoad`` so we know exactly when rendering completes.  After
-    render, a ``MutationObserver`` strips Mermaid's inline ``width``/
-    ``height`` SVG attributes so that ``width: 100%`` CSS takes effect.
-    On parse error, Mermaid's logo graphic is suppressed and the raw
-    definition is shown in a plain ``<pre>`` block instead.
-
+    Uses ``mermaid.render()`` (Promise-based async API).  Because Mermaid
+    renders asynchronously, ``st.iframe`` must be called with an explicit
+    integer ``height`` — the default ``height="content"`` measures the
+    iframe synchronously before the SVG exists and collapses to zero.
     Height is estimated by :func:`_mermaid_height_estimate`.
-    ``scrolling=True`` is always enabled as a safety net.
-
-    .. note::
-        ``st.iframe`` accepts a URL ``src``, not raw HTML, so
-        ``components.v1.html`` remains the correct API for inline HTML
-        blobs until Streamlit provides a direct equivalent.
+    On parse error the raw definition is shown in a plain ``<pre>`` block.
 
     Args:
         diagram_defs: Raw Mermaid definition strings (one per block).
@@ -417,13 +427,9 @@ def _render_mermaid_classic(diagram_defs: list[str]) -> None:
     if not diagram_defs:
         return
 
-    import streamlit.components.v1 as components  # deferred import
-
     for i, defn in enumerate(diagram_defs):
         if len(diagram_defs) > 1:
             st.caption(f"Diagram {i + 1}")
-
-        height_px = _mermaid_height_estimate(defn)
 
         # Quote unquoted edge labels that contain special characters
         # ( ) < > which Mermaid v11 may tokenise as separate nodes.
@@ -448,10 +454,12 @@ def _render_mermaid_classic(diagram_defs: list[str]) -> None:
 <script src="{_MERMAID_CDN}"></script>
 <style>
   body {{ margin: 0; padding: 0; background: transparent; }}
-  #container {{ width: 100%; background: white; padding: 4px 8px;
+  #container {{ width: 50%; max-width: 600px; background: white; padding: 4px 8px;
                 box-sizing: border-box; }}
   #container svg {{ width: 100% !important; max-width: 100% !important;
                     height: auto !important; }}
+  #container svg text {{ font-size: 14px !important;
+                         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important; }}
   #fallback {{ display:none; color:#c00; font-family:monospace;
                font-size:13px; padding:8px; }}
 </style>
@@ -473,23 +481,35 @@ def _render_mermaid_classic(diagram_defs: list[str]) -> None:
       s.removeAttribute("height");
       s.style.width  = "100%";
       s.style.height = "auto";
+      // Override Mermaid's internal SVG <style> by setting font directly on
+      // every text/tspan element — external CSS cannot override SVG <style>.
+      s.querySelectorAll("text, tspan").forEach(function(t) {{
+        t.style.fontSize = "13px";
+        t.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      }});
+      // Trigger iframeResizer to re-measure after SVG is in the DOM.
+      window.dispatchEvent(new Event('resize'));
     }}
   }} catch(e) {{
     document.getElementById("{uid}").style.display = "none";
     document.getElementById("fallback").style.display = "block";
   }}
+
 }})();
 </script>
 </body>
 </html>"""
-        components.html(html, height=height_px, scrolling=True)
+        # Explicit pixel height required — st.iframe's default height="content"
+        # measures content synchronously, before async Mermaid JS has rendered
+        # the SVG, resulting in a zero-height iframe.
+        st.iframe(html, height=_mermaid_height_estimate(defn))
 
 
 def _render_mermaid_single_iframe(
     diagram_defs: list[str],
     markdown_text: str,
 ) -> None:
-    r"""Render text and Mermaid diagrams together in a single iframe.
+    r"""Render text and Mermaid diagrams together in a single ``st.iframe``.
 
     Experimental renderer enabled by ``BAMBOO_DIAGRAM_MODE=single-iframe``.
     Laying text and SVG out in the same document gives full CSS control:
@@ -499,13 +519,12 @@ def _render_mermaid_single_iframe(
     - **Landscape diagram**: full width, placed after the text.
     - Multiple diagrams: all appended below the text section.
 
-    The iframe reports its total ``scrollHeight`` to Streamlit via
-    ``streamlit:setFrameHeight`` postMessage so the component auto-sizes.
-    A 500 px initial height is passed; Streamlit updates it once the
-    message arrives.
+    ``st.iframe`` must be called with an explicit integer ``height``; the
+    default ``height="content"`` measures the iframe synchronously before
+    async Mermaid JS has rendered the SVG, collapsing to zero.
+    Height is estimated by :func:`_mermaid_height_estimate`.
 
-    Falls back to :func:`_render_mermaid_classic` when ``diagram_defs``
-    is empty (nothing to lay out together).
+    Falls back to :func:`st.markdown` when ``diagram_defs`` is empty.
 
     Args:
         diagram_defs: Raw Mermaid definition strings.
@@ -516,8 +535,6 @@ def _render_mermaid_single_iframe(
     if not diagram_defs:
         st.markdown(markdown_text)
         return
-
-    import streamlit.components.v1 as components  # deferred import
 
     # Escape the markdown for injection into a JS string literal.
     # We hand it to marked.js for rendering inside the iframe.
@@ -552,12 +569,15 @@ def _render_mermaid_single_iframe(
   #prose pre  {{ background:#f3f3f3; border-radius:4px; padding:8px;
                  overflow-x:auto; }}
   .diagram-wrap {{ margin: 12px 0; }}
-  .diagram-wrap.portrait {{ float: right; width: min(38%, 340px);
+  .diagram-wrap.portrait {{ float: right; width: min(38%, 380px);
                             margin: 0 0 12px 16px; clear: right;
                             overflow-x: auto; }}
-  .diagram-wrap.landscape {{ width: 100%; clear: both; overflow-x: auto; }}
+  .diagram-wrap.landscape {{ width: 50%; max-width: 600px;
+                              clear: both; overflow-x: auto; }}
   .diagram-wrap svg {{ width: 100% !important; max-width: 100% !important;
                        height: auto !important; display: block; }}
+  .diagram-wrap svg text {{ font-size: 14px !important;
+                             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important; }}
   .diagram-error {{ color:#c00; font-family:monospace; font-size:12px;
                     padding:6px; border:1px solid #fcc; border-radius:4px; }}
   #clearfix {{ clear: both; }}
@@ -575,11 +595,12 @@ document.getElementById("prose").innerHTML = marked.parse(`{md_escaped}`);
 const defs = {diagram_js_array};
 
 (async function() {{
-  const container = document.getElementById("diagrams");
+  const prose    = document.getElementById("prose");
+  const diagrams = document.getElementById("diagrams");
   for (let i = 0; i < defs.length; i++) {{
     const wrap = document.createElement("div");
     wrap.className = "diagram-wrap";
-    container.appendChild(wrap);
+    diagrams.appendChild(wrap);
     try {{
       const id = "mermaid-si-" + i;
       const {{ svg }} = await mermaid.render(id, defs[i]);
@@ -588,51 +609,69 @@ const defs = {diagram_js_array};
       if (s) {{
         s.removeAttribute("width");
         s.removeAttribute("height");
+        // Override Mermaid internal SVG <style> — external CSS cannot win.
+        s.querySelectorAll("text, tspan").forEach(function(t) {{
+          t.style.fontSize = "13px";
+          t.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+        }});
         const vb = s.getAttribute("viewBox");
+        let isPortrait = false;
         if (vb) {{
           const parts = vb.split(" ").map(Number);
-          const nw = parts[2] || 1;
-          const nh = parts[3] || 1;
-          wrap.classList.add(nh > nw ? "portrait" : "landscape");
+          isPortrait = (parts[3] || 1) > (parts[2] || 1) * 1.3;
+        }}
+        if (isPortrait) {{
+          // Prepend portrait diagram into prose before text so float:right
+          // makes the text wrap alongside it rather than below.
+          wrap.classList.add("portrait");
+          prose.insertBefore(wrap, prose.firstChild);
         }} else {{
           wrap.classList.add("landscape");
+          // Already in diagrams — stays below prose.
         }}
       }}
     }} catch(e) {{
       wrap.innerHTML =
-        "<div class=\\"diagram-error\\">⚠ Diagram error: " +
+        "<div class=\"diagram-error\">⚠ Diagram error: " +
         e.toString().replace(/</g,"&lt;") + "</div>";
       wrap.classList.add("landscape");
     }}
   }}
-  // Report total height so Streamlit auto-sizes the iframe.
-  const h = document.body.scrollHeight + 24;
-  window.parent.postMessage({{type:"streamlit:setFrameHeight", height:h}}, "*");
+  // Trigger iframeResizer to re-measure after all SVGs are in the DOM.
+  window.dispatchEvent(new Event('resize'));
 }})();
 </script>
 </body>
 </html>"""
 
-    components.html(html, height=500, scrolling=True)
+    # Explicit pixel height required — st.iframe's default height="content"
+    # measures content synchronously, before async Mermaid JS has rendered
+    # the SVG, resulting in a zero-height iframe.
+    _h = max((_mermaid_height_estimate(d) for d in diagram_defs), default=700)
+    st.iframe(html, height=_h)
 
 
 def _render_mermaid_blocks(diagram_defs: list[str]) -> None:
     """Dispatch to the active diagram renderer (classic or single-iframe).
 
-    In ``classic`` mode (default, ``BAMBOO_DIAGRAM_MODE=classic``) each
-    diagram is rendered in its own ``components.html`` iframe via
-    :func:`_render_mermaid_classic`.
+    .. note::
+        As of the current implementation :func:`_render_chat` always calls
+        :func:`_render_mermaid_classic` directly (prose is already rendered
+        by ``st.markdown``), so this dispatcher is no longer invoked from the
+        main render path.  It is kept for potential future use.
 
-    In ``single-iframe`` mode (``BAMBOO_DIAGRAM_MODE=single-iframe``) this
-    function is a no-op — the call site in :func:`_render_chat` calls
-    :func:`_render_mermaid_single_iframe` directly, passing the markdown
-    text alongside the diagrams so they can share a single iframe.
+    In ``classic`` mode (``BAMBOO_DIAGRAM_MODE=classic``) each diagram is
+    rendered in its own ``st.iframe`` via :func:`_render_mermaid_classic`.
+
+    In ``single-iframe`` mode (default, ``BAMBOO_DIAGRAM_MODE=single-iframe``)
+    this function is a no-op — callers must invoke
+    :func:`_render_mermaid_single_iframe` directly with both prose and diagrams.
 
     Args:
         diagram_defs: Raw Mermaid definition strings extracted by
             :func:`_extract_mermaid_blocks`.
     """
-    if _DIAGRAM_MODE == "single-iframe":
+    if _DIAGRAM_MODE != "classic":
         return  # handled at call site in _render_chat
     _render_mermaid_classic(diagram_defs)
 
@@ -1630,9 +1669,16 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
                 )
                 st.markdown(_rendered)
 
-        with st.spinner("Thinking…"):
+        # Run mcp.call_tool on a background thread so the main thread can
+        # drive a phase + dot animation on the visible st.status label.
+        # st.status label updates ARE safe from the main script thread —
+        # only widget writes from *non*-main threads are blocked by Streamlit.
+        _call_result: dict = {}
+
+        def _do_call() -> None:
+            """Execute the MCP tool call and store the result."""
             try:
-                result = mcp.call_tool(
+                _call_result["result"] = mcp.call_tool(
                     _ANSWER_TOOL,
                     {
                         "question": question,
@@ -1640,9 +1686,35 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
                         "bypass_fast_path": not st.session_state.get("fast_path", True),
                     },
                 )
-                answer = _extract_text(result) or "*(No text output.)*"
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                answer = f"⚠️ Error: {exc}"
+                _call_result["error"] = exc
+
+        _call_thread = threading.Thread(target=_do_call, daemon=True)
+
+        # Phase labels and dot sequence cycled in the main thread while the
+        # MCP call runs in the background.  Each phase shows for
+        # _TICKS_PER_PHASE seconds; dots cycle every second within the phase.
+        _phases = ["Routing question", "Retrieving evidence", "Synthesising answer"]
+        _dots = [".", "..", "..."]
+        _TICKS_PER_PHASE = 4
+
+        with st.status(_phases[0] + _dots[0], expanded=False) as _status:
+            _call_thread.start()
+            _tick = 0
+            while _call_thread.is_alive():
+                _phase = _phases[(_tick // _TICKS_PER_PHASE) % len(_phases)]
+                _dot = _dots[_tick % len(_dots)]
+                _status.update(label=f"{_phase}{_dot}")
+                time.sleep(1.0)
+                _tick += 1
+            _call_thread.join()
+
+            if "error" in _call_result:
+                answer = f"⚠️ Error: {_call_result['error']}"
+                _status.update(label="Error", state="error", expanded=False)
+            else:
+                answer = _extract_text(_call_result.get("result")) or "*(No text output.)*"
+                _status.update(label="Done", state="complete", expanded=False)
 
         # Extract any Mermaid diagram blocks from the answer before storing.
         # The clean text (without fenced blocks) is stored in message history
@@ -1708,17 +1780,11 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
         _poll_promptlog_events(mcp)
 
     # Render chat history.
-    # In single-iframe mode, skip st.markdown() for the last assistant message
-    # when diagrams exist — _render_mermaid_single_iframe() will render both
-    # the text and diagrams together, preventing duplication.
+    # Always render the last assistant message via st.markdown so text is
+    # never suppressed.  Diagrams are rendered separately below the message
+    # loop using the appropriate renderer.
     _messages = st.session_state["messages"]
-    _last_idx = len(_messages) - 1
-    _skip_last_markdown = (
-        _DIAGRAM_MODE == "single-iframe"
-        and bool(st.session_state.get("last_diagrams"))
-        and _last_idx >= 0
-        and _messages[_last_idx]["role"] == "assistant"
-    )
+    _diagrams = st.session_state.get("last_diagrams") or []
     for _mi, msg in enumerate(_messages):
         with st.chat_message(msg["role"]):
             rendered = (
@@ -1726,25 +1792,17 @@ def _render_chat(mcp: MCPClientSync, transport: str) -> None:  # noqa: C901
                 if msg["role"] == "assistant"
                 else msg["content"]
             )
-            if _skip_last_markdown and _mi == _last_idx:
-                pass  # deferred to single-iframe renderer below
-            else:
-                st.markdown(rendered)
+            st.markdown(rendered)
 
-    # After the last assistant reply: render diagrams, plot, detail expanders.
+    # After the last assistant reply: render diagrams (if any), plot, expanders.
     if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "assistant":
-        # Mermaid diagrams — dispatch to the active renderer.
-        # In single-iframe mode the last st.markdown() call (inside the chat
-        # message loop above) has already rendered the clean text; the
-        # single-iframe renderer replaces it with a combined text+diagram
-        # iframe.  In classic mode _render_mermaid_blocks() is a no-op when
-        # there are no diagrams, so no extra guard is needed here.
-        _diagrams = st.session_state.get("last_diagrams") or []
-        if _DIAGRAM_MODE == "single-iframe" and _diagrams:
-            _clean = st.session_state.get("last_clean_answer", "")
-            _render_mermaid_single_iframe(_diagrams, _clean)
-        else:
-            _render_mermaid_blocks(_diagrams)
+        # Mermaid diagrams — rendered separately from the prose which is
+        # already shown via st.markdown above.  Always use the classic
+        # renderer (one st.iframe per diagram) regardless of _DIAGRAM_MODE:
+        # the single-iframe mode was designed to co-render prose+diagrams
+        # together, but since prose is handled by st.markdown, passing ""
+        # as markdown_text produces an oversized mostly-blank iframe.
+        _render_mermaid_classic(_diagrams)
 
         _render_plot_expander(
             st.session_state["last_evidence"],
@@ -2203,16 +2261,28 @@ def main() -> None:
     st.markdown(
         """
         <style>
-        /* Base font size — increase from Streamlit default (14px) */
-        html, body, [class*="css"] {
+        /* Base font size — Streamlit 1.58+ uses data-testid attributes;
+           the old [class*="css"] selector no longer matches anything. */
+        html, body {
+            font-size: 16px !important;
+        }
+        /* Main content area */
+        [data-testid="stMain"], [data-testid="stMainBlockContainer"],
+        [data-testid="stVerticalBlock"], [data-testid="stMarkdownContainer"] {
             font-size: 16px !important;
         }
         /* Chat messages */
-        [data-testid="stChatMessage"] {
+        [data-testid="stChatMessage"], [data-testid="stChatMessageContent"] {
+            font-size: 16px !important;
+        }
+        /* Prose inside chat messages */
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] td {
             font-size: 16px !important;
         }
         /* Sidebar */
-        [data-testid="stSidebar"] {
+        [data-testid="stSidebar"], [data-testid="stSidebarContent"] {
             font-size: 15px !important;
         }
         </style>

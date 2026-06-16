@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bamboo.tools.bamboo_answer import BambooAnswerTool, _build_deterministic_plan
+from bamboo.tools.bamboo_answer import BambooAnswerTool, _build_deterministic_plan, _topic_for_question
 from bamboo.tools.planner import PlanRoute
 
 
@@ -219,3 +219,96 @@ async def test_history_threaded_into_execute_plan():
     _, question_arg, history_arg = exec_mock.call_args[0]
     assert question_arg == "How do I submit a job?"
     assert any(m.get("role") == "assistant" for m in history_arg)
+
+
+# ---------------------------------------------------------------------------
+# _topic_for_question unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_topic_for_atlas_plugin_returns_atlas():
+    """atlas plugin_id returns 'atlas' for a generic question."""
+    assert _topic_for_question("What is the PanDA system?", plugin_id="atlas") == "atlas"
+
+
+def test_topic_for_panda_plugin_returns_panda():
+    """Unknown plugin_id falls back to 'panda'."""
+    assert _topic_for_question("How does pilot work?", plugin_id="panda") == "panda"
+
+
+def test_topic_for_rucio_keyword():
+    """A question containing 'rucio' maps to 'rucio' regardless of plugin."""
+    assert _topic_for_question("How does rucio handle replica rules?", plugin_id="atlas") == "rucio"
+
+
+def test_topic_for_root_keyword():
+    """A question containing 'rdataframe' maps to 'root'."""
+    assert _topic_for_question("How do I use RDataFrame to filter events?", plugin_id="atlas") == "root"
+
+
+def test_topic_for_tfile_keyword():
+    """A question containing 'tfile' maps to 'root'."""
+    assert _topic_for_question("What is the difference between TFile and TTree?", plugin_id="atlas") == "root"
+
+
+def test_topic_for_bamboo_meta_question():
+    """A Bamboo meta-question maps to 'bamboo'."""
+    assert _topic_for_question("How do I configure bamboo mcp?", plugin_id="atlas") == "bamboo"
+
+
+def test_topic_cgsim_plugin_always_returns_cgsim():
+    """cgsim plugin_id returns 'cgsim' regardless of question content."""
+    # Even if the question mentions 'rucio', plugin boundary wins.
+    assert _topic_for_question("how does rucio work in cgsim?", plugin_id="cgsim") == "cgsim"
+
+
+def test_topic_epic_plugin_always_returns_epic():
+    """epic plugin_id returns 'epic' regardless of question content."""
+    assert _topic_for_question("What is the PanDA system?", plugin_id="epic") == "epic"
+
+
+# ---------------------------------------------------------------------------
+# _build_deterministic_plan topic injection tests
+# ---------------------------------------------------------------------------
+
+def test_retrieve_plan_includes_topic_in_arguments():
+    """RETRIEVE plan injects 'topic' into both RAG tool call arguments."""
+    plan = _build_deterministic_plan("What is PanDA?", None, None, plugin_id="atlas")
+    assert plan is not None
+    for tc in plan.tool_calls:
+        assert "topic" in tc.arguments, f"tool {tc.tool!r} missing 'topic' in arguments"
+
+
+def test_retrieve_plan_topic_is_atlas_for_atlas_plugin():
+    """Atlas plugin RETRIEVE plan uses topic='atlas'."""
+    plan = _build_deterministic_plan("What is PanDA?", None, None, plugin_id="atlas")
+    assert plan is not None
+    for tc in plan.tool_calls:
+        assert tc.arguments["topic"] == "atlas"
+
+
+def test_retrieve_plan_topic_is_rucio_for_rucio_question():
+    """A Rucio question in the atlas plugin yields topic='rucio'."""
+    plan = _build_deterministic_plan(
+        "How does rucio manage data replicas?", None, None, plugin_id="atlas"
+    )
+    assert plan is not None
+    for tc in plan.tool_calls:
+        assert tc.arguments["topic"] == "rucio"
+
+
+def test_retrieve_plan_topic_is_root_for_root_question():
+    """A ROOT framework question yields topic='root'."""
+    plan = _build_deterministic_plan(
+        "What is the TFile class in ROOT for data storage?", None, None, plugin_id="atlas"
+    )
+    assert plan is not None
+    for tc in plan.tool_calls:
+        assert tc.arguments["topic"] == "root"
+
+
+def test_retrieve_plan_explain_includes_topic():
+    """The plan explain string includes the resolved topic for debuggability."""
+    plan = _build_deterministic_plan("What is PanDA?", None, None, plugin_id="atlas")
+    assert plan is not None
+    assert "topic=" in plan.explain

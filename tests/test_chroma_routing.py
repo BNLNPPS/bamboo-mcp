@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bamboo.tools._chroma_routing import resolve_collection, ROUTING_SIDECAR
+from bamboo.tools._chroma_routing import resolve_collection, ROUTING_SIDECAR, resolve_collection_for_topic
 from bamboo.tools.doc_rag import PandaDocSearchTool
 
 
@@ -260,9 +260,110 @@ class TestPandaDocSearchToolReResolution:
 
         tool = PandaDocSearchTool()
         with patch.dict(sys.modules, {"chromadb": chroma_mod}):
-            tool._ensure_collection()
+            tool._ensure_collection("panda")
 
         tool._reset()
         assert tool._client is None
         assert tool._collection is None
         assert tool._resolved_physical is None
+
+
+# ===========================================================================
+# resolve_collection_for_topic
+# ===========================================================================
+
+
+class TestResolveCollectionForTopic:
+    """Unit tests for the resolve_collection_for_topic helper."""
+
+    def test_topic_resolved_via_map_env(self, tmp_path, monkeypatch):
+        """When BAMBOO_CHROMA_COLLECTION_MAP is set, the topic is looked up there."""
+        monkeypatch.setenv(
+            "BAMBOO_CHROMA_COLLECTION_MAP",
+            '{"rucio": "rucio_docs", "atlas": "atlas_docs"}',
+        )
+        # No sidecar — logical name returned unchanged.
+        result = resolve_collection_for_topic(str(tmp_path), "rucio")
+        assert result == "rucio_docs"
+
+    def test_blue_green_slot_resolved_through_sidecar(self, tmp_path, monkeypatch):
+        """resolve_collection_for_topic traverses the blue/green sidecar."""
+        from bamboo.tools._chroma_routing import ROUTING_SIDECAR
+        import json as _json
+
+        sidecar = tmp_path / ROUTING_SIDECAR
+        sidecar.write_text(
+            _json.dumps({"rucio_docs": "rucio_docs__b"}), encoding="utf-8"
+        )
+        monkeypatch.setenv(
+            "BAMBOO_CHROMA_COLLECTION_MAP",
+            '{"rucio": "rucio_docs"}',
+        )
+        result = resolve_collection_for_topic(str(tmp_path), "rucio")
+        assert result == "rucio_docs__b"
+
+    def test_falls_back_to_scalar_env_when_map_absent(self, tmp_path, monkeypatch):
+        """When BAMBOO_CHROMA_COLLECTION_MAP is absent, the scalar env var is used."""
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION_MAP", raising=False)
+        monkeypatch.setenv("BAMBOO_CHROMA_COLLECTION", "my_custom_collection")
+        result = resolve_collection_for_topic(str(tmp_path), "atlas")
+        assert result == "my_custom_collection"
+
+    def test_falls_back_to_scalar_env_when_topic_missing_from_map(
+        self, tmp_path, monkeypatch
+    ):
+        """When the map exists but has no entry for the topic, scalar env is used."""
+        monkeypatch.setenv(
+            "BAMBOO_CHROMA_COLLECTION_MAP",
+            '{"panda": "panda_docs"}',
+        )
+        monkeypatch.setenv("BAMBOO_CHROMA_COLLECTION", "fallback_collection")
+        # "rucio" is not in the map.
+        result = resolve_collection_for_topic(str(tmp_path), "rucio")
+        assert result == "fallback_collection"
+
+    def test_builtin_default_used_when_no_env_set(self, tmp_path, monkeypatch):
+        """When neither map nor scalar env is set, the built-in default is used."""
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION_MAP", raising=False)
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION", raising=False)
+        assert resolve_collection_for_topic(str(tmp_path), "panda") == "panda_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "atlas") == "atlas_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "rucio") == "rucio_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "root") == "root_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "bamboo") == "bamboo_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "epic") == "epic_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "cgsim") == "cgsim_docs"
+
+    def test_unknown_topic_falls_back_to_panda_docs(self, tmp_path, monkeypatch):
+        """An unrecognised topic key falls back to panda_docs (safe default)."""
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION_MAP", raising=False)
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION", raising=False)
+        result = resolve_collection_for_topic(str(tmp_path), "nonexistent_topic")
+        assert result == "panda_docs"
+
+    def test_topic_matching_is_case_insensitive(self, tmp_path, monkeypatch):
+        """Topic keys are normalised to lowercase before lookup."""
+        monkeypatch.setenv(
+            "BAMBOO_CHROMA_COLLECTION_MAP",
+            '{"rucio": "rucio_docs"}',
+        )
+        # All three casings should resolve the same way.
+        assert resolve_collection_for_topic(str(tmp_path), "RUCIO") == "rucio_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "Rucio") == "rucio_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "rucio") == "rucio_docs"
+
+    def test_corrupt_map_env_falls_back_gracefully(self, tmp_path, monkeypatch):
+        """A malformed JSON map does not raise; scalar env fallback is used."""
+        monkeypatch.setenv("BAMBOO_CHROMA_COLLECTION_MAP", "{ not valid json !!")
+        monkeypatch.setenv("BAMBOO_CHROMA_COLLECTION", "fallback_collection")
+        result = resolve_collection_for_topic(str(tmp_path), "atlas")
+        assert result == "fallback_collection"
+
+    def test_new_topic_added_via_map_without_code_change(self, tmp_path, monkeypatch):
+        """A brand-new topic added only in the env var is resolved correctly."""
+        monkeypatch.setenv(
+            "BAMBOO_CHROMA_COLLECTION_MAP",
+            '{"geant4": "geant4_docs"}',
+        )
+        result = resolve_collection_for_topic(str(tmp_path), "geant4")
+        assert result == "geant4_docs"

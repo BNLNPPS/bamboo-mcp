@@ -7,7 +7,59 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Added
-- **ReAct AI Agent** (`interfaces/agent/agent.py`): new multi-step reasoning agent
+- **Multi-collection RAG support**: `doc_rag.py` and `doc_bm25.py` now accept
+  an optional `topic` parameter (e.g. `"panda"`, `"atlas"`, `"rucio"`,
+  `"root"`, `"bamboo"`, `"epic"`, `"cgsim"`) that selects which ChromaDB
+  collection to query, enabling the five separate collections produced by
+  `bamboo-mcp-services` to be queried correctly per question domain.
+- **`BAMBOO_CHROMA_COLLECTION_MAP`** env var: JSON object mapping topic keys
+  to logical collection names (e.g.
+  `'{"panda":"panda_docs","atlas":"atlas_docs","rucio":"rucio_docs"}'`).
+  Adding a new collection requires only updating this string — no code
+  changes needed.  Falls back to the existing `BAMBOO_CHROMA_COLLECTION`
+  scalar, then to built-in per-topic defaults (`panda_docs`, `atlas_docs`,
+  `bamboo_docs`, `rucio_docs`, `root_docs`, `epic_docs`, `cgsim_docs`).
+- **`resolve_collection_for_topic()`** (`_chroma_routing.py`): new helper that
+  maps a topic string → logical collection name (via
+  `BAMBOO_CHROMA_COLLECTION_MAP`) → physical blue/green slot (via the
+  existing `resolve_collection()`).  All RAG tools now route through this
+  single function.
+- **`_topic_for_question()`** (`bamboo_answer.py`): lightweight keyword
+  classifier that infers the correct topic from the user question and active
+  plugin (Rucio signals → `"rucio"`, ROOT signals → `"root"`, Bamboo meta
+  → `"bamboo"`, atlas plugin → `"atlas"`, etc.).  Result is injected into
+  both `panda_doc_search` and `panda_doc_bm25` plan tool call arguments by
+  `_build_deterministic_plan()`.
+
+### Changed
+- **Subclass simplification**: `AtlasDocSearchTool`, `AtlasDocBM25Tool`,
+  `EpicDocSearchTool`, `EpicDocBM25Tool`, `CgsimDocSearchTool`,
+  `CgsimDocBM25Tool` — the full copy-paste `_ensure_collection()` /
+  `_ensure_index()` overrides have been removed from all six package
+  subclasses.  Each subclass now only overrides `get_definition()` and sets a
+  `_default_topic` class attribute (`"atlas"`, `"epic"`, `"cgsim"`).  All
+  collection resolution logic lives exclusively in the base class.
+- **Reranking workaround removed**: the `_is_bamboo_internal()` source-priority
+  reranking in `doc_rag.py` and `doc_bm25.py` (which deprioritised
+  `PalNilsson/*` chunks) has been removed now that Bamboo-internal
+  documentation lives in its own dedicated `bamboo_docs` collection.
+- **`bamboo_env_example.sh`**: RAG section updated to document
+  `BAMBOO_CHROMA_COLLECTION_MAP`; the old per-plugin collection comment block
+  replaced with JSON map format.
+
+### Tests
+- `tests/test_chroma_routing.py`: `TestResolveCollectionForTopic` (9 tests)
+  covering map lookup, blue/green sidecar traversal, scalar fallback,
+  built-in defaults, unknown topics, case-insensitivity, corrupt map,
+  and adding new collections via env only.
+- `tests/test_doc_rag.py`: 4 new tests for `topic` argument passthrough,
+  `_default_topic` class attribute, and `get_definition` schema shape.
+- `tests/test_doc_bm25.py`: 4 new tests for `topic` argument passthrough,
+  cache invalidation on topic change, and `get_definition` schema shape.
+- `tests/test_bamboo_answer_rag.py`: 13 new tests for `_topic_for_question()`
+  and `_build_deterministic_plan()` topic injection.
+
+
   that orchestrates MCP tool calls in a Reason → Act → Observe → Evaluate loop.
   Bypasses the single-pass `bamboo_answer`/`bamboo_executor` pipeline and is
   intended for complex, multi-hop queries.  Key types: `AgentMemory`,

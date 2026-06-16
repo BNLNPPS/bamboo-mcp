@@ -15,11 +15,46 @@ recorded in a JSON sidecar file:
 The sidecar is written by the agent using ``os.replace`` (POSIX atomic rename)
 so it is never partially written from a reader's perspective.
 
-This module provides :func:`resolve_collection`, a **read-only** helper that
-translates a logical collection name (e.g. ``"atlas_docs"``) to the currently
-live physical name (e.g. ``"atlas_docs__a"``).  It is intentionally standalone
-— it does not import from ``bamboo_mcp_services`` — so Bamboo MCP remains
-independent of the services package.
+This module provides two **read-only** helpers:
+
+:func:`resolve_collection`
+    Translates a logical collection name (e.g. ``"atlas_docs"``) to the
+    currently live physical slot name (e.g. ``"atlas_docs__a"``).  This is the
+    single point of blue/green slot resolution and must always be called before
+    opening a ChromaDB collection.
+
+:func:`resolve_collection_for_topic`
+    Translates an abstract *topic* string (e.g. ``"rucio"``) to a logical
+    collection name, then delegates to :func:`resolve_collection` for slot
+    resolution.  Topic-to-logical-name mapping is driven by the
+    ``BAMBOO_CHROMA_COLLECTION_MAP`` environment variable (a JSON object), with
+    ``BAMBOO_CHROMA_COLLECTION`` as the ultimate scalar fallback.
+
+Both helpers are intentionally standalone — they do not import from
+``bamboo_mcp_services`` — so Bamboo MCP remains independent of the services
+package.
+
+Multi-collection configuration
+-------------------------------
+Set ``BAMBOO_CHROMA_COLLECTION_MAP`` to a JSON object mapping topic keys to
+logical collection names::
+
+    export BAMBOO_CHROMA_COLLECTION_MAP='{
+        "panda":  "panda_docs",
+        "atlas":  "atlas_docs",
+        "bamboo": "bamboo_docs",
+        "rucio":  "rucio_docs",
+        "root":   "root_docs",
+        "epic":   "epic_docs",
+        "cgsim":  "cgsim_docs"
+    }'
+
+Adding a new collection requires only updating the JSON string — no code
+changes and no new environment variables.
+
+Deployments that do not set ``BAMBOO_CHROMA_COLLECTION_MAP`` fall back to the
+scalar ``BAMBOO_CHROMA_COLLECTION`` for all topics (pre-multi-collection
+behaviour is fully preserved).
 
 Fallback behaviour
 ------------------
@@ -55,6 +90,34 @@ LOG = logging.getLogger(__name__)
 
 #: Name of the routing sidecar file, relative to the ChromaDB directory.
 ROUTING_SIDECAR = "collection_routing.json"
+
+#: Environment variable that holds the topic → logical-collection-name map as
+#: a JSON object.  Example value (single line for shell export)::
+#:
+#:     '{"panda":"panda_docs","atlas":"atlas_docs","bamboo":"bamboo_docs",
+#:       "rucio":"rucio_docs","root":"root_docs","epic":"epic_docs",
+#:       "cgsim":"cgsim_docs"}'
+#:
+#: If the variable is absent or unparseable, :func:`resolve_collection_for_topic`
+#: falls back to :data:`COLLECTION_DEFAULT_ENV`.
+COLLECTION_MAP_ENV = "BAMBOO_CHROMA_COLLECTION_MAP"
+
+#: Scalar fallback env var used when ``BAMBOO_CHROMA_COLLECTION_MAP`` is not
+#: set or does not contain an entry for the requested topic.
+COLLECTION_DEFAULT_ENV = "BAMBOO_CHROMA_COLLECTION"
+
+#: Built-in default logical collection names keyed by topic string.  These are
+#: used when neither ``BAMBOO_CHROMA_COLLECTION_MAP`` nor
+#: ``BAMBOO_CHROMA_COLLECTION`` is set.
+_BUILTIN_DEFAULTS: dict[str, str] = {
+    "panda": "panda_docs",
+    "atlas": "atlas_docs",
+    "bamboo": "bamboo_docs",
+    "rucio": "rucio_docs",
+    "root": "root_docs",
+    "epic": "epic_docs",
+    "cgsim": "cgsim_docs",
+}
 
 
 def resolve_collection(chroma_path: str, logical_name: str) -> str:
@@ -107,3 +170,66 @@ def resolve_collection(chroma_path: str, logical_name: str) -> str:
             logical_name, physical,
         )
     return physical
+
+
+def resolve_collection_for_topic(chroma_path: str, topic: str) -> str:
+    """Resolve a topic string to the current live physical ChromaDB slot name.
+
+    Performs a two-step lookup:
+
+    1. **Topic → logical name** via ``BAMBOO_CHROMA_COLLECTION_MAP`` (a JSON
+       object mapping topic keys to logical collection names).  Falls back to
+       ``BAMBOO_CHROMA_COLLECTION`` when the map is absent or has no entry for
+       *topic*, and finally to the built-in default for the topic (e.g.
+       ``"panda_docs"`` for topic ``"panda"``).
+
+    2. **Logical name → physical slot** via :func:`resolve_collection`, which
+       reads the blue/green sidecar written by ``bamboo-mcp-services``.
+
+    This function is the recommended entry point for all RAG tools.  Callers
+    should pass the topic string supplied in the tool's ``arguments`` dict
+    (e.g. ``"atlas"``, ``"rucio"``).  An unknown or empty topic falls back
+    silently to ``"panda_docs"`` (or whatever ``BAMBOO_CHROMA_COLLECTION`` is
+    set to).
+
+    Adding support for a new collection requires only updating
+    ``BAMBOO_CHROMA_COLLECTION_MAP`` — no code changes are needed.
+
+    Args:
+        chroma_path: Path to the ChromaDB persistent directory (same as
+            ``BAMBOO_CHROMA_PATH``).
+        topic: Abstract topic key, e.g. ``"panda"``, ``"atlas"``, ``"rucio"``,
+            ``"root"``, ``"bamboo"``, ``"epic"``, ``"cgsim"``.  Case-insensitive.
+
+    Returns:
+        Physical ChromaDB collection name to open (e.g. ``"panda_docs__b"``).
+    """
+    topic_key = (topic or "").strip().lower()
+
+    # Step 1a — try BAMBOO_CHROMA_COLLECTION_MAP
+    map_raw = os.getenv(COLLECTION_MAP_ENV, "").strip()
+    logical_name: str = ""
+    if map_raw:
+        try:
+            collection_map: dict[str, str] = json.loads(map_raw)
+            logical_name = str(collection_map.get(topic_key) or "")
+        except Exception:  # pylint: disable=broad-exception-caught
+            LOG.warning(
+                "_chroma_routing: failed to parse %s; falling back to %s",
+                COLLECTION_MAP_ENV, COLLECTION_DEFAULT_ENV,
+            )
+
+    # Step 1b — fall back to scalar BAMBOO_CHROMA_COLLECTION
+    if not logical_name:
+        logical_name = os.getenv(COLLECTION_DEFAULT_ENV, "").strip()
+
+    # Step 1c — built-in per-topic default
+    if not logical_name:
+        logical_name = _BUILTIN_DEFAULTS.get(topic_key, "panda_docs")
+
+    LOG.debug(
+        "_chroma_routing: topic '%s' → logical '%s'", topic_key, logical_name
+    )
+
+    # Step 2 — blue/green slot resolution
+    return resolve_collection(chroma_path, logical_name)

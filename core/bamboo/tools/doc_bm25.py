@@ -7,18 +7,26 @@ as "list all error codes" or "what is BADALLOC?".
 The tool loads all documents from the same ChromaDB collection used by the
 vector search tool, builds a BM25 index in memory on first call, and caches
 it for subsequent calls.  The cache is invalidated whenever the collection
-document count changes (e.g. after re-ingestion).
+document count changes (e.g. after re-ingestion) or when a different topic
+is requested.
 
 Configuration (same env vars as ``doc_rag.py``):
 
-    BAMBOO_CHROMA_PATH       Path to the ChromaDB persistent directory.
-                             Default: ``./chroma_db``
-    BAMBOO_CHROMA_COLLECTION Name of the ChromaDB collection to query.
-                             Default: ``bamboo_docs``
+    BAMBOO_CHROMA_PATH
+        Path to the ChromaDB persistent directory.
+        Default: ``./chroma_db``
+
+    BAMBOO_CHROMA_COLLECTION_MAP
+        JSON object mapping topic keys to logical collection names.
+        See :mod:`bamboo.tools._chroma_routing` for details.
+
+    BAMBOO_CHROMA_COLLECTION
+        Scalar fallback collection name.
+        Default: ``panda_docs``
 
 Dependencies:
-    chromadb   — to load the corpus (already required by doc_rag)
-    rank_bm25  — lightweight BM25 implementation (add to requirements-rag.txt)
+    chromadb   -- to load the corpus (already required by doc_rag)
+    rank_bm25  -- lightweight BM25 implementation (add to requirements-rag.txt)
 """
 from __future__ import annotations
 
@@ -27,11 +35,10 @@ import re
 from typing import Any, cast
 
 from bamboo.tools._sqlite_compat import ensure_sqlite_compat
-from bamboo.tools._chroma_routing import resolve_collection
+from bamboo.tools._chroma_routing import resolve_collection_for_topic
 from bamboo.tools.base import text_content
 
 _DEFAULT_CHROMA_PATH = "./chroma_db"
-_DEFAULT_CHROMA_COLLECTION = "bamboo_docs"
 _SNIPPET_MAX_CHARS = 500
 
 
@@ -52,15 +59,25 @@ class PandaDocBM25Tool:
 
     Loads all documents from the ChromaDB collection on first call, builds a
     BM25 index, and caches both.  The cache is refreshed automatically when
-    the collection document count changes.
+    the collection document count changes or a different topic is requested.
+
+    Subclasses may override :attr:`_default_topic` to change which collection
+    is queried when the caller does not supply an explicit ``topic`` argument.
 
     Attributes:
+        _default_topic: Topic key used when ``arguments["topic"]`` is absent.
+            Resolved to a logical collection name via
+            :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic`.
         _docs: Cached list of document text strings.
         _ids: Cached list of document IDs corresponding to ``_docs``.
         _metadatas: Cached list of metadata dicts corresponding to ``_docs``.
         _bm25: Cached ``BM25Okapi`` index, or ``None`` if not yet built.
         _cached_count: Document count at the time the cache was last built.
+        _resolved_physical: Physical collection name the current index was
+            built from.
     """
+
+    _default_topic: str = "panda"
 
     def __init__(self) -> None:
         """Initialise the tool with an empty cache."""
@@ -69,7 +86,6 @@ class PandaDocBM25Tool:
         self._metadatas: list[dict[str, Any]] = []
         self._bm25: Any = None
         self._cached_count: int = -1
-        #: Physical collection name the current index was built from.
         self._resolved_physical: str | None = None
 
     # ------------------------------------------------------------------
@@ -104,6 +120,17 @@ class PandaDocBM25Tool:
                         "description": "Number of results to return (default: 10).",
                         "default": 10,
                     },
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "Documentation collection to search.  One of: "
+                            '"panda" (default), "atlas", "bamboo", '
+                            '"rucio", "root", "epic", "cgsim".  '
+                            "Controls which ChromaDB collection is queried via "
+                            "BAMBOO_CHROMA_COLLECTION_MAP."
+                        ),
+                        "default": "panda",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -119,6 +146,8 @@ class PandaDocBM25Tool:
                 - ``query`` (*str*, required): Keyword search query.
                 - ``top_k`` (*int*, optional): Number of results; default 10,
                   clamped to [1, 50].
+                - ``topic`` (*str*, optional): Collection topic key; defaults
+                  to :attr:`_default_topic`.
 
         Returns:
             List[Dict[str, Any]]: A one-element MCP text content list with
@@ -130,8 +159,9 @@ class PandaDocBM25Tool:
             return text_content("Error: 'query' argument is required and must not be empty.")
 
         top_k: int = max(1, min(int(arguments.get("top_k", 10)), 50))
+        topic: str = str(arguments.get("topic") or self._default_topic).strip().lower()
 
-        init_error = self._ensure_index()
+        init_error = self._ensure_index(topic)
         if init_error:
             return text_content(init_error)
 
@@ -142,13 +172,11 @@ class PandaDocBM25Tool:
             )
 
         try:
-            #from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]  # optional dep
             tokens = _tokenize(query)
             scores: list[float] = self._bm25.get_scores(tokens).tolist()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return text_content(f"BM25 search failed: {exc}")
 
-        # Rank by score descending, filter zero-score results.
         ranked = sorted(
             ((i, s) for i, s in enumerate(scores) if s > 0.0),
             key=lambda x: x[1],
@@ -167,16 +195,20 @@ class PandaDocBM25Tool:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_index(self) -> str | None:
+    def _ensure_index(self, topic: str) -> str | None:
         """Load corpus from ChromaDB and build (or refresh) the BM25 index.
 
-        Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` at call
-        time so environment changes take effect without restarting the process.
+        Resolves *topic* to a physical collection name via
+        :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic`.
+        Rebuilds the index only when the physical collection name or document
+        count has changed since the last build.
+
+        Args:
+            topic: Abstract topic key (e.g. ``"atlas"``, ``"rucio"``).
 
         Returns:
             ``None`` on success, or a human-readable error string on failure.
         """
-        # --- import guards ---------------------------------------------------
         if not ensure_sqlite_compat():
             return (
                 "System SQLite is too old for ChromaDB (need >= 3.35.0) and "
@@ -200,9 +232,6 @@ class PandaDocBM25Tool:
             )
 
         chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-        logical_name: str = os.getenv(
-            "BAMBOO_CHROMA_COLLECTION", _DEFAULT_CHROMA_COLLECTION
-        )
 
         if not os.path.exists(chroma_path):
             return (
@@ -210,9 +239,8 @@ class PandaDocBM25Tool:
                 "Set BAMBOO_CHROMA_PATH to the directory created by the ingestion script."
             )
 
-        physical_name = resolve_collection(chroma_path, logical_name)
+        physical_name = resolve_collection_for_topic(chroma_path, topic)
 
-        # Invalidate the cached index if the active slot has changed.
         if self._bm25 is not None and physical_name != self._resolved_physical:
             self._bm25 = None
             self._cached_count = -1
@@ -225,7 +253,6 @@ class PandaDocBM25Tool:
         except Exception as exc:  # pylint: disable=broad-exception-caught
             return f"Failed to connect to ChromaDB collection '{physical_name}': {exc}"
 
-        # Rebuild cache only when collection has changed.
         if self._bm25 is not None and current_count == self._cached_count:
             return None
 
@@ -238,7 +265,6 @@ class PandaDocBM25Tool:
             return None
 
         try:
-            # Fetch all documents in batches to avoid memory spikes.
             batch_size = 500
             all_docs: list[str] = []
             all_ids: list[str] = []
@@ -252,14 +278,18 @@ class PandaDocBM25Tool:
                 )
                 all_docs.extend(batch["documents"] or [])
                 all_ids.extend(batch["ids"] or [])
-                all_metas.extend(cast(list[dict[str, Any]], batch["metadatas"] or [{}] * len(batch["ids"])))
+                all_metas.extend(
+                    cast(
+                        list[dict[str, Any]],
+                        batch["metadatas"] or [{}] * len(batch["ids"]),
+                    )
+                )
                 offset += batch_size
 
             self._docs = all_docs
             self._ids = all_ids
             self._metadatas = all_metas
-            tokenized = [_tokenize(d) for d in all_docs]
-            self._bm25 = BM25Okapi(tokenized)
+            self._bm25 = BM25Okapi([_tokenize(d) for d in all_docs])
             self._cached_count = current_count
             self._resolved_physical = physical_name
         except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -284,7 +314,7 @@ class PandaDocBM25Tool:
             str: Formatted multi-line string for the MCP text payload.
         """
         lines: list[str] = [
-            f"PanDA Doc BM25 Search — top {len(ranked)} result(s) for: '{query}'\n"
+            f"PanDA Doc BM25 Search -- top {len(ranked)} result(s) for: '{query}'\n"
         ]
         for rank, (idx, score) in enumerate(ranked, start=1):
             doc = self._docs[idx]
@@ -292,11 +322,13 @@ class PandaDocBM25Tool:
 
             snippet = doc[:_SNIPPET_MAX_CHARS]
             if len(doc) > _SNIPPET_MAX_CHARS:
-                snippet += " …"
+                snippet += " ..."
 
             source: str = ""
             if meta:
-                source_val = meta.get("source_file") or meta.get("source") or meta.get("file") or ""
+                source_val = (
+                    meta.get("source_file") or meta.get("source") or meta.get("file") or ""
+                )
                 if source_val:
                     source = f"  source : {source_val}\n"
 

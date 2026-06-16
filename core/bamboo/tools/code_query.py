@@ -305,8 +305,8 @@ def get_definition() -> dict[str, Any]:
         "description": (
             "SUPERUSER / DEVELOPER TOOL. "
             f"Fetches a source file from the configured GitHub repository ({repo}, branch: {branch}). "
-            "Use when the user asks about source code, wants to understand how an algorithm works, "
-            "or suspects a bug in a specific file. "
+            "Use ONLY when the user explicitly names a specific source file (e.g. 'pilot/util/processes.py') or a specific function in a file. "
+            "Do NOT use for general conceptual questions like 'how does X work' or 'what is X' — those belong to panda_doc_search. "
             "Optionally extracts a single named function from the file. "
             "The LLM will explain the code and may generate a Mermaid diagram "
             "for algorithmic or flow-based questions. "

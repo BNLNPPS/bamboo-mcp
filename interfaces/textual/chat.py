@@ -1987,12 +1987,27 @@ class BambooTui(App):
         except Exception:  # pylint: disable=broad-exception-caught
             pass  # Never let observability polling affect the main response path.
 
+    #: Phase labels shown in sequence while the server is working.
+    #: Each phase is shown for ``_THINKING_TICKS_PER_PHASE`` ticks before
+    #: advancing to the next one (then cycling).  Dot count cycles every tick
+    #: independently so the animation always appears live within each phase.
+    _THINKING_PHASES: tuple[str, ...] = (
+        "Routing question",
+        "Retrieving evidence",
+        "Synthesising answer",
+    )
+    #: Number of 1-second ticks to display each phase before advancing.
+    _THINKING_TICKS_PER_PHASE: int = 4
+
     def _write_thinking(self) -> bool:
         """Start the animated thinking indicator below the transcript.
 
-        Uses :meth:`set_interval` (Textual's own timer mechanism) to cycle
-        through ``Thinking.`` → ``Thinking..`` → ``Thinking...`` once per
-        second, with the current wall-clock time updated on each frame.
+        Uses :meth:`set_interval` (Textual's own timer mechanism) to update
+        the indicator every second.  Each tick advances the dot sequence
+        (``·`` → ``··`` → ``···``) to confirm liveness.  The phase label
+        (Routing / Retrieving / Synthesising) advances every
+        :attr:`_THINKING_TICKS_PER_PHASE` ticks so the user sees a meaningful
+        description of the current stage throughout the wait.
 
         :meth:`set_interval` integrates with Textual's event loop directly,
         avoiding the timing issues that ``asyncio.ensure_future`` + ``asyncio.sleep``
@@ -2005,15 +2020,20 @@ class BambooTui(App):
             return False
         self.thinking_widget.add_class("active")
 
-        frames = ["Thinking.", "Thinking..", "Thinking..."]
+        dots = [".", "..", "..."]
         counter = [0]  # mutable cell so the closure can increment it
 
         def _tick() -> None:
             import datetime as _dt
             now = _dt.datetime.now().strftime("%H:%M:%S")
+            tick = counter[0]
+            phase = self._THINKING_PHASES[
+                (tick // self._THINKING_TICKS_PER_PHASE) % len(self._THINKING_PHASES)
+            ]
+            dot = dots[tick % len(dots)]
             if self.thinking_widget:
                 self.thinking_widget.update(
-                    Text(f"{now}  {frames[counter[0] % len(frames)]}", style="dim italic"),
+                    Text(f"{now}  {phase}{dot}", style="dim italic"),
                     layout=False,
                 )
             counter[0] += 1
