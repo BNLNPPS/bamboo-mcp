@@ -896,6 +896,28 @@ All notable changes to Bamboo are documented here.
   title, and both error-fallback display names in `_load_banner`. Plugin-specific
   banners (e.g. AskCGSim) still override the fallback once `ui_manifest` loads.
 
+- **Agent live progress callback** (`interfaces/agent/agent.py`,
+  `scripts/bamboo_agent.py`): `BambooAgent` now accepts an optional
+  `progress_callback: Callable[[str], None]` parameter.  The callback is
+  invoked at each key moment in the ReAct loop — tool discovery, step start,
+  tool call, observation size, eval result, and synthesis — so callers can
+  display live status without coupling the agent to any output channel.
+  `AgentResult` gains a new `llm_calls: int` field counting every
+  `bamboo_llm_answer` MCP call made during the run (reason + evaluate +
+  synthesise combined).  Step progress display changed from `Step X/Y` to
+  `Step X (max Y)` to clarify that `max_steps` is a ceiling, not a target.
+  A `✔  Done — N step(s), M LLM call(s), confidence=F` line is emitted after
+  synthesis completes.
+- **Agent CLI progress display and `--quiet` flag** (`scripts/bamboo_agent.py`):
+  live progress is now shown on stderr by default using `\r` overwrite (single
+  tidy line, no scrolling).  Line width is capped to the terminal width via
+  `shutil.get_terminal_size()`.  The `--quiet` flag suppresses all progress
+  output, useful when piping stdout or capturing JSON output.  `llm_calls=N`
+  is included in both the printed footer line and `--output-json` output.
+  The module docstring now contains a full annotated table of the MCP HTTP
+  message sequence (POST/GET/DELETE) so operators understand what each server
+  log line represents.
+
 ---
 
 ## 2026-05-12  Security — four independent read-only layers:
