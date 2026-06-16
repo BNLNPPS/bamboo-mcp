@@ -78,10 +78,13 @@ _DEFAULT_PATTERN_STRINGS: list[str] = [
 #: Verbs / phrases that signal code inspection intent.
 #: Deliberately excludes generic question starters and broad action verbs
 #: ("how does", "how do", "what does", "what do", "get", "list", "show me",
-#: "describe", "explain", "check", "understand", "display") — these fire
+#: "describe", "check", "understand", "display") — these fire
 #: too easily on documentation questions like "how does the pilot work?" or
 #: "show me which sites have failures".  Only verbs that unambiguously
 #: imply reading or examining source code are retained.
+#: "explain" is included only as a compound phrase paired with a code noun
+#: ("explain the code", "explain the source", "explain this module") so that
+#: plain "explain how the pilot works" does not trigger the guard.
 _CODE_INSPECTION_VERBS: frozenset[str] = frozenset({
     "look at",
     "read",
@@ -100,6 +103,16 @@ _CODE_INSPECTION_VERBS: frozenset[str] = frozenset({
     "open",
     "load",
     "print",
+    # Compound "explain" phrases — specific enough not to match
+    # documentation questions that start with "explain how …".
+    "explain the code",
+    "explain this code",
+    "explain the source",
+    "explain this source",
+    "explain the module",
+    "explain this module",
+    "explain the script",
+    "explain this script",
 })
 
 #: Keywords that identify a source-code repository context when combined
