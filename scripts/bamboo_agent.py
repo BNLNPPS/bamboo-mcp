@@ -27,6 +27,27 @@ Transport options mirror the existing TUI and Streamlit interfaces:
 * **HTTP** (default, production): ``--transport http --http-url <url>``
 * **STDIO** (development): ``--transport stdio``
 
+MCP HTTP message anatomy
+------------------------
+Each HTTP MCP session produces a burst of POST (and one GET/DELETE) requests
+visible in the server logs.  The typical sequence for a single-question run:
+
+1. ``POST /mcp``   — session initialise (JSON-RPC ``initialize``)
+2. ``GET  /mcp``   — open SSE event stream for server→client notifications
+3. ``POST /mcp``   — ``tools/list``  (discover available tools)
+4. ``POST /mcp``   — ``tools/call bamboo_llm_answer``  (reason: pick next tool)
+5. ``POST /mcp``   — ``tools/call <chosen_tool>``      (act: run the tool)
+6. ``POST /mcp``   — ``tools/call bamboo_llm_answer``  (evaluate sufficiency)
+   … steps 4-6 repeat for each additional reasoning iteration …
+7. ``POST /mcp``   — ``tools/call bamboo_llm_answer``  (synthesise final answer)
+8. ``DELETE /mcp`` — session teardown
+
+A simple 2-step question therefore produces ~8 POST/GET/DELETE messages.
+Each extra reasoning step adds roughly 3 POSTs (reason + act + evaluate).
+
+Use ``--progress`` (default: on) to see a live description of each stage on
+stderr instead of the raw server log lines.
+
 Usage examples::
 
     # Single question via HTTP transport
@@ -47,6 +68,9 @@ Usage examples::
     python scripts/bamboo_agent.py \\
         --question "What is the average job stagein time at SLAC this week?" \\
         --output-json
+
+    # Suppress progress output (useful when piping stdout)
+    python scripts/bamboo_agent.py --question "What is PanDA?" --quiet
 
 Environment variables
 ---------------------
@@ -70,9 +94,10 @@ import dataclasses
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Path bootstrap — makes repo-root packages importable when this script is
@@ -94,6 +119,57 @@ from interfaces.shared.mcp_client import MCPAsyncClient, MCPServerConfig  # noqa
 _DEFAULT_HTTP_URL: str = os.getenv("BAMBOO_MCP_HTTP_URL", "http://localhost:8000/mcp")
 _REPL_PROMPT: str = "agent> "
 _REPL_QUIT_CMDS: frozenset[str] = frozenset({"exit", "quit", "/exit", "/quit", "q"})
+
+
+# ---------------------------------------------------------------------------
+# Progress display
+# ---------------------------------------------------------------------------
+
+
+def _make_progress_printer(quiet: bool) -> "Callable[[str], None] | None":
+    """Return a progress callback that writes live status lines to stderr.
+
+    Each call overwrites the previous progress line using a carriage return so
+    the terminal stays tidy while the agent is running.  A final newline is
+    written when the synthesised answer is about to be printed (detected by the
+    "Synthesising" prefix), so the answer itself starts on a clean line.
+
+    Args:
+        quiet: When ``True``, returns ``None`` (no progress output).
+
+    Returns:
+        A ``Callable[[str], None]`` for use as ``BambooAgent.progress_callback``,
+        or ``None`` when ``quiet`` is ``True``.
+    """
+    if quiet:
+        return None
+
+    # Track whether we need to clear the current progress line before the
+    # final answer is printed.
+    _state: dict[str, int] = {"last_len": 0}
+
+    def _print_progress(message: str) -> None:
+        """Write one progress line to stderr, overwriting the previous.
+
+        Args:
+            message: Human-readable progress string from the agent.
+        """
+        # Truncate to terminal width to avoid wrapping (fallback 120 cols).
+        cols = min(shutil.get_terminal_size(fallback=(120, 24)).columns - 2, 120)
+        display = message[:cols]
+        # Pad to erase any leftover characters from a longer previous line.
+        padded = display.ljust(_state["last_len"])
+        sys.stderr.write(f"\r{padded}")
+        sys.stderr.flush()
+        _state["last_len"] = len(display)
+
+        # When synthesis starts, drop to a new line so the answer header is clean.
+        if "Synthesising" in message or "synthesis" in message.lower():
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+            _state["last_len"] = 0
+
+    return _print_progress
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +219,7 @@ def _format_result_text(result: AgentResult, *, verbose: bool) -> str:
 
     meta_parts = [
         f"steps={len(result.steps)}",
+        f"llm_calls={result.llm_calls}",
         f"confidence={result.confidence:.2f}",
     ]
     if result.tool_names_used:
@@ -167,6 +244,7 @@ def _result_to_dict(result: AgentResult) -> dict[str, Any]:
         "answer": result.answer,
         "confidence": result.confidence,
         "truncated": result.truncated,
+        "llm_calls": result.llm_calls,
         "tool_names_used": result.tool_names_used,
         "steps": [dataclasses.asdict(s) for s in result.steps],
     }
@@ -186,6 +264,7 @@ async def _run_question(
     max_tokens: int,
     verbose: bool,
     output_json: bool,
+    quiet: bool,
 ) -> int:
     """Connect to the MCP server, run the agent on ``question``, and print output.
 
@@ -197,10 +276,12 @@ async def _run_question(
         max_tokens: Token budget for the synthesis call.
         verbose: Print full step trace.
         output_json: Emit JSON output instead of formatted text.
+        quiet: Suppress live progress output on stderr.
 
     Returns:
         Process exit code (0 = success, 2 = runtime error).
     """
+    progress = _make_progress_printer(quiet)
     client = MCPAsyncClient(cfg)
     try:
         await client.connect()
@@ -210,6 +291,7 @@ async def _run_question(
             confidence_threshold=confidence,
             max_tokens=max_tokens,
             verbose=verbose,
+            progress_callback=progress,
         )
         result = await agent.run(question)
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -234,6 +316,7 @@ async def _run_interactive(
     max_tokens: int,
     verbose: bool,
     output_json: bool,
+    quiet: bool,
 ) -> int:
     """Run an interactive REPL loop.
 
@@ -247,6 +330,7 @@ async def _run_interactive(
         max_tokens: Token budget for the synthesis call.
         verbose: Print full step trace for each answer.
         output_json: Emit JSON output for each answer.
+        quiet: Suppress live progress output on stderr.
 
     Returns:
         Process exit code (0 = normal exit, 1 = connection error).
@@ -258,12 +342,14 @@ async def _run_interactive(
         print(f"[ERROR] Could not connect to MCP server: {exc}", file=sys.stderr)
         return 1
 
+    progress = _make_progress_printer(quiet)
     agent = BambooAgent(
         client,
         max_steps=max_steps,
         confidence_threshold=confidence,
         max_tokens=max_tokens,
         verbose=verbose,
+        progress_callback=progress,
     )
 
     print("Bamboo AI Agent  (interactive mode)  — type 'exit' or Ctrl+D to quit")
@@ -392,6 +478,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Emit AgentResult as JSON (useful for scripting).",
     )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help=(
+            "Suppress live progress output on stderr. "
+            "Useful when piping stdout or capturing output. "
+            "Progress is shown by default so you can see what each MCP POST does."
+        ),
+    )
 
     # Logging
     p.add_argument(
@@ -447,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_tokens=args.max_tokens,
                 verbose=args.verbose,
                 output_json=args.output_json,
+                quiet=args.quiet,
             )
         )
 
@@ -473,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=args.max_tokens,
             verbose=args.verbose,
             output_json=args.output_json,
+            quiet=args.quiet,
         )
     )
 

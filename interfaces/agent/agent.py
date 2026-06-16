@@ -82,7 +82,7 @@ import os
 import re
 import textwrap
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -143,6 +143,8 @@ class AgentResult:
             evaluator was satisfied.
         tool_names_used: Deduplicated list of MCP tool names that were
             successfully called, in first-call order.
+        llm_calls: Total number of ``bamboo_llm_answer`` MCP tool calls made
+            during the run (reason + evaluate + synthesise calls combined).
     """
 
     answer: str
@@ -150,6 +152,7 @@ class AgentResult:
     confidence: float
     truncated: bool
     tool_names_used: list[str]
+    llm_calls: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +520,12 @@ class BambooAgent:
             to :envvar:`BAMBOO_AGENT_MAX_TOKENS` (2048).
         verbose: When ``True``, step-by-step progress is logged at INFO level
             and printed to stdout (useful for the CLI ``--verbose`` flag).
+        progress_callback: Optional callable invoked with a human-readable
+            progress string at each key moment in the reasoning loop (tool
+            discovery, each step's thought/action/observation/eval, and
+            synthesis).  Intended for CLI progress display on stderr without
+            polluting stdout or JSON output.  Receives a single ``str``
+            argument; return value is ignored.
 
     Example::
 
@@ -533,6 +542,7 @@ class BambooAgent:
         confidence_threshold: float = _DEFAULT_CONFIDENCE,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         verbose: bool = False,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Initialise the agent.
 
@@ -542,13 +552,19 @@ class BambooAgent:
             confidence_threshold: Sufficiency confidence threshold in [0, 1].
             max_tokens: Max tokens for final synthesis LLM call.
             verbose: Log and print step-by-step progress.
+            progress_callback: Optional callable invoked with a human-readable
+                progress string at each key moment (tool discovery, step
+                thought/action/observation/eval, synthesis).  Called on the
+                event-loop thread; must not block.
         """
         self._client = mcp_client
         self._max_steps = max_steps
         self._confidence_threshold = confidence_threshold
         self._max_tokens = max_tokens
         self._verbose = verbose
+        self._progress_callback = progress_callback
         self._available_tools: list[dict[str, Any]] = []
+        self._llm_call_count: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -577,15 +593,20 @@ class BambooAgent:
             truncation flag, and deduplicated tool list.
         """
         self._log(f"Agent starting — question: {question!r}")
+        self._llm_call_count = 0
 
         await self._refresh_tool_list()
+        self._progress(
+            f"🔍  Discovered {len(self._available_tools)} tools — starting reasoning loop"
+        )
 
         memory = AgentMemory(question)
         last_eval_confidence: float = 0.0
         truncated: bool = False
 
         for step_idx in range(1, self._max_steps + 1):
-            self._log(f"─── Step {step_idx}/{self._max_steps} ───")
+            self._log(f"─── Step {step_idx} (max {self._max_steps}) ───")
+            self._progress(f"⟳  Step {step_idx} (max {self._max_steps}) — reasoning …")
 
             # ── Reason ────────────────────────────────────────────────────
             selection = await self._reason(memory)
@@ -594,6 +615,7 @@ class BambooAgent:
             # The reasoning LLM may signal early synthesis.
             if selection.should_synthesise:
                 self._log("  LLM signalled early synthesis — skipping tool call.")
+                self._progress("✓  Evidence sufficient — skipping to synthesis")
                 memory.add_step(AgentStep(
                     step_index=step_idx,
                     thought=selection.thought,
@@ -607,10 +629,12 @@ class BambooAgent:
                 break
 
             self._log(f"  Action: {selection.tool_name}({json.dumps(selection.tool_args)})")
+            self._progress(f"  ⚙  Calling tool: {selection.tool_name}")
 
             # ── Act ───────────────────────────────────────────────────────
             observation = await self._act(selection.tool_name, selection.tool_args)
             self._log(f"  Observation: {len(observation)} chars")
+            self._progress(f"  ↩  Got {len(observation):,} chars — evaluating sufficiency …")
 
             # ── Evaluate ──────────────────────────────────────────────────
             eval_result = await self._evaluate(memory, question, observation, step_idx)
@@ -618,6 +642,13 @@ class BambooAgent:
                 f"  Eval: sufficient={eval_result.sufficient} "
                 f"confidence={eval_result.confidence:.2f}"
                 + (f"  missing={eval_result.missing!r}" if eval_result.missing else "")
+            )
+            _eval_suffix = (
+                f" (missing: {eval_result.missing})" if eval_result.missing else ""
+            )
+            self._progress(
+                f"  ✦  Eval: sufficient={eval_result.sufficient} "
+                f"confidence={eval_result.confidence:.2f}{_eval_suffix}"
             )
 
             memory.add_step(AgentStep(
@@ -633,6 +664,7 @@ class BambooAgent:
 
             if eval_result.sufficient and eval_result.confidence >= self._confidence_threshold:
                 self._log("  Evaluator satisfied — proceeding to synthesis.")
+                self._progress("✓  Evaluator satisfied — proceeding to synthesis")
                 break
 
         else:
@@ -643,8 +675,12 @@ class BambooAgent:
                 f"  Max steps ({self._max_steps}) reached — "
                 "synthesising with available evidence."
             )
+            self._progress(
+                f"⚠  Max steps ({self._max_steps}) reached — synthesising with available evidence"
+            )
 
         # ── Synthesise ────────────────────────────────────────────────────
+        self._progress("✍  Synthesising final answer …")
         answer = await self._synthesise(question, memory)
 
         result = AgentResult(
@@ -653,9 +689,15 @@ class BambooAgent:
             confidence=last_eval_confidence,
             truncated=truncated,
             tool_names_used=memory.tool_names_used(),
+            llm_calls=self._llm_call_count,
+        )
+        self._progress(
+            f"✔  Done — {len(memory.steps)} step(s), {self._llm_call_count} LLM call(s), "
+            f"confidence={result.confidence:.2f}"
         )
         self._log(
             f"Agent complete — {len(memory.steps)} step(s), "
+            f"{self._llm_call_count} LLM call(s), "
             f"confidence={result.confidence:.2f}, truncated={result.truncated}"
         )
         return result
@@ -671,6 +713,7 @@ class BambooAgent:
         choose from real, server-side tool names and descriptions.
         """
         try:
+            self._progress("🔗  Connecting to MCP server — listing tools …")
             result = await self._client.list_tools()
             tools = getattr(result, "tools", result) or []
             self._available_tools = [
@@ -891,6 +934,7 @@ class BambooAgent:
         messages.extend(history)
         messages.append({"role": "user", "content": user})
 
+        self._llm_call_count += 1
         result = await self._client.call_tool(
             "bamboo_llm_answer",
             {
@@ -967,3 +1011,17 @@ class BambooAgent:
         logger.info(message)
         if self._verbose:
             print(message)
+
+    def _progress(self, message: str) -> None:
+        """Invoke the progress callback if one is registered.
+
+        Calls :attr:`_progress_callback` with ``message`` when set.  Also
+        delegates to :meth:`_log` so the message appears in verbose/logger
+        output even when no callback is registered.
+
+        Args:
+            message: Human-readable progress string.
+        """
+        logger.debug("progress: %s", message)
+        if self._progress_callback is not None:
+            self._progress_callback(message)

@@ -309,10 +309,28 @@ override with `BAMBOO_MCP_CLIENT_TIMEOUT`.
 
 ---
 
+# 3. AI Agent (CLI)
+
+The agent runs a multi-step Reason → Act → Observe → Evaluate loop, calling
+MCP tools iteratively until the evidence is sufficient to synthesise an answer.
+Intended for complex, multi-hop queries.
+
+See [`docs/agent.md`](agent.md) for full documentation and testing instructions.
+
+```bash
+python scripts/bamboo_agent.py \
+    --transport http \
+    --http-url http://localhost:8000/mcp \
+    --question "Your question here" \
+    --verbose
+```
+
+---
+
 # Architecture Overview
 
 ```
-User Interface (Streamlit / Textual)
+User Interface (Streamlit / Textual / Agent CLI)
         ↓
 Shared MCP Client
         ↓

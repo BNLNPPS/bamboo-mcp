@@ -7,7 +7,8 @@ experiment operations, and CGSim distributed computing simulation.
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (May 2026):** core infrastructure is stable. Recent additions include
+> **Status (June 2026):** core infrastructure is stable. Recent additions include
+> a multi-step AI Agent (`scripts/bamboo_agent.py`) for complex multi-hop queries,
 > full OpenSearch self-observability — Bamboo logs every prompt/response turn and
 > can query its own logs for FAQ analysis, session replay, tool-usage analytics,
 > and per-model token cost breakdowns. Users can rate responses (1–5 stars) from
@@ -164,6 +165,18 @@ python interfaces/textual/chat.py --transport http
 See [`docs/http-server.md`](docs/http-server.md) for auth, firewall, and
 persistent-mode configuration.
 
+**AI Agent (multi-step reasoning, requires HTTP server):**
+
+```bash
+python scripts/bamboo_agent.py \
+    --transport http \
+    --http-url http://localhost:8000/mcp \
+    --question "Which sites had the highest pilot failure rate today?" \
+    --verbose
+```
+
+See [`docs/agent.md`](docs/agent.md) for options, tuning, and testing instructions.
+
 **Running in AskCGSim mode:**
 
 ```bash
@@ -306,6 +319,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
 | [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — prompt logging, read queries, self-observability, rating, GDPR pseudonymisation |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
+| [`docs/agent.md`](docs/agent.md) | AI Agent — multi-step reasoning loop, CLI options, testing, tuning |
 | [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions, including code review question patterns and `code_query` examples |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
 | [`docs/tools/code_query.md`](docs/tools/code_query.md) | `code_query` tool reference — evidence pipeline, routing, LLM quality guidance, example sessions |
