@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bamboo.tools.bamboo_answer import BambooAnswerTool, _build_deterministic_plan, _topic_for_question
+from bamboo.tools.bamboo_answer import (
+    BambooAnswerTool,
+    _build_deterministic_plan,
+    _topic_for_question,
+    _BAMBOO_SIGNALS,
+)
 from bamboo.tools.planner import PlanRoute
 
 
@@ -252,8 +257,58 @@ def test_topic_for_tfile_keyword():
 
 
 def test_topic_for_bamboo_meta_question():
-    """A Bamboo meta-question maps to 'bamboo'."""
-    assert _topic_for_question("How do I configure bamboo mcp?", plugin_id="atlas") == "bamboo"
+    """A Bamboo MCP core question maps to 'bamboo_mcp'."""
+    assert _topic_for_question("How do I configure bamboo mcp?", plugin_id="atlas") == "bamboo_mcp"
+
+
+def test_topic_for_bamboo_install_routes_to_bamboo_mcp():
+    """'install bamboo mcp' routes to 'bamboo_mcp', not 'atlas'."""
+    assert _topic_for_question("How do I install Bamboo MCP?", plugin_id="atlas") == "bamboo_mcp"
+
+
+def test_topic_for_bamboo_tui_routes_to_bamboo_mcp():
+    """'bamboo tui' maps to 'bamboo_mcp'."""
+    assert _topic_for_question("How do I use the bamboo tui?", plugin_id="atlas") == "bamboo_mcp"
+
+
+def test_topic_for_bamboo_services_question():
+    """A Bamboo MCP Services question maps to 'bamboo_services'."""
+    assert _topic_for_question(
+        "How do I install Bamboo MCP Services?", plugin_id="atlas"
+    ) == "bamboo_services"
+
+
+def test_topic_for_bamboo_services_agent_question():
+    """References to the supervisor agent map to 'bamboo_services'."""
+    assert _topic_for_question(
+        "How does the supervisor agent work?", plugin_id="atlas"
+    ) == "bamboo_services"
+
+
+def test_topic_for_bamboo_services_beats_bamboo_mcp():
+    """'bamboo mcp services' contains 'bamboo mcp' but the more specific signal wins."""
+    # The phrase "bamboo mcp services" is in _BAMBOO_SERVICES_SIGNALS and
+    # "bamboo mcp" is in _BAMBOO_SIGNALS.  Services check runs first, so the
+    # more specific match must prevail.
+    assert _topic_for_question(
+        "What is Bamboo MCP Services?", plugin_id="atlas"
+    ) == "bamboo_services"
+
+
+def test_topic_for_ingestion_agent_routes_to_bamboo_services():
+    """'ingestion agent' maps to 'bamboo_services'."""
+    assert _topic_for_question(
+        "How does the ingestion agent ingest documents?", plugin_id="atlas"
+    ) == "bamboo_services"
+
+
+def test_bamboo_signals_does_not_contain_services_phrase():
+    """_BAMBOO_SIGNALS must not contain 'bamboo services' (that belongs to _BAMBOO_SERVICES_SIGNALS)."""
+    for sig in _BAMBOO_SIGNALS:
+        assert "services" not in sig, (
+            f"Signal {sig!r} found in _BAMBOO_SIGNALS but it contains 'services'; "
+            "move it to _BAMBOO_SERVICES_SIGNALS."
+        )
 
 
 def test_topic_cgsim_plugin_always_returns_cgsim():

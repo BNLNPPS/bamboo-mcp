@@ -40,14 +40,23 @@ Set ``BAMBOO_CHROMA_COLLECTION_MAP`` to a JSON object mapping topic keys to
 logical collection names::
 
     export BAMBOO_CHROMA_COLLECTION_MAP='{
-        "panda":  "panda_docs",
-        "atlas":  "atlas_docs",
-        "bamboo": "bamboo_docs",
-        "rucio":  "rucio_docs",
-        "root":   "root_docs",
-        "epic":   "epic_docs",
-        "cgsim":  "cgsim_docs"
+        "panda":           "panda_docs",
+        "atlas":           "atlas_docs",
+        "bamboo":          "bamboo_docs",
+        "bamboo_mcp":      "bamboo_mcp_docs",
+        "bamboo_services": "bamboo_services_docs",
+        "rucio":           "rucio_docs",
+        "root":            "root_docs",
+        "epic":            "epic_docs",
+        "cgsim":           "cgsim_docs"
     }'
+
+The ``bamboo`` key is a legacy alias for single-collection deployments that
+store all Bamboo documentation together.  Deployments that have split the
+collection into ``bamboo_mcp_docs`` (bamboo-mcp repository) and
+``bamboo_services_docs`` (bamboo-mcp-services repository) should add
+``bamboo_mcp`` and ``bamboo_services`` entries — this prevents install and
+setup documentation for one component polluting answers about the other.
 
 Adding a new collection requires only updating the JSON string — no code
 changes and no new environment variables.
@@ -94,7 +103,9 @@ ROUTING_SIDECAR = "collection_routing.json"
 #: Environment variable that holds the topic → logical-collection-name map as
 #: a JSON object.  Example value (single line for shell export)::
 #:
-#:     '{"panda":"panda_docs","atlas":"atlas_docs","bamboo":"bamboo_docs",
+#:     '{"panda":"panda_docs","atlas":"atlas_docs",
+#:       "bamboo":"bamboo_docs",
+#:       "bamboo_mcp":"bamboo_mcp_docs","bamboo_services":"bamboo_services_docs",
 #:       "rucio":"rucio_docs","root":"root_docs","epic":"epic_docs",
 #:       "cgsim":"cgsim_docs"}'
 #:
@@ -109,10 +120,17 @@ COLLECTION_DEFAULT_ENV = "BAMBOO_CHROMA_COLLECTION"
 #: Built-in default logical collection names keyed by topic string.  These are
 #: used when neither ``BAMBOO_CHROMA_COLLECTION_MAP`` nor
 #: ``BAMBOO_CHROMA_COLLECTION`` is set.
+#:
+#: The ``"bamboo"`` key is a legacy alias retained for backward compatibility
+#: with single-collection deployments that have not yet split ``bamboo_docs``
+#: into ``bamboo_mcp_docs`` and ``bamboo_services_docs``.  New deployments
+#: should use ``"bamboo_mcp"`` and ``"bamboo_services"`` explicitly.
 _BUILTIN_DEFAULTS: dict[str, str] = {
     "panda": "panda_docs",
     "atlas": "atlas_docs",
-    "bamboo": "bamboo_docs",
+    "bamboo": "bamboo_docs",       # legacy alias — kept for backward compat
+    "bamboo_mcp": "bamboo_mcp_docs",
+    "bamboo_services": "bamboo_services_docs",
     "rucio": "rucio_docs",
     "root": "root_docs",
     "epic": "epic_docs",

@@ -7,6 +7,31 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Added
+- **`bamboo_mcp` and `bamboo_services` topic keys**: two new built-in topic
+  keys in `_chroma_routing.py` that map to dedicated logical collection names
+  (`bamboo_mcp_docs` and `bamboo_services_docs` respectively).  Deployments
+  that split the Bamboo documentation into two separate ChromaDB collections
+  — one for the `bamboo-mcp` repository and one for `bamboo-mcp-services` —
+  now get correctly isolated retrieval: questions about installing or
+  configuring the MCP core never return Services agent documentation, and
+  vice versa.  The legacy `"bamboo"` → `"bamboo_docs"` entry is retained for
+  backward compatibility with single-collection deployments.
+- **`_BAMBOO_SERVICES_SIGNALS`** frozenset (`bamboo_answer.py`): keyword
+  phrases that unambiguously refer to the `bamboo-mcp-services` component
+  (`"bamboo mcp services"`, `"bamboo-mcp-services"`, `"bamboo services"`,
+  `"supervisor agent"`, `"ingestion agent"`, `"cric agent"`,
+  `"document monitor"`, etc.).  Checked *before* `_BAMBOO_SIGNALS` so that
+  the more specific match wins when both would match.
+- **Expanded `_BAMBOO_SIGNALS`** (`bamboo_answer.py`): added
+  `"bamboo install"`, `"install bamboo"`, `"bamboo plugin"`,
+  `"bamboo interface"`, `"bamboo ui"`, `"bamboo tui"`, `"bamboo cli"`,
+  `"bamboo streamlit"` — previously these fell through to `topic="atlas"`,
+  causing the wrong collection to be queried.
+- **`bamboo_env_example.sh` updated**: RAG collection map example now shows
+  both the recommended two-collection layout (`bamboo_mcp` / `bamboo_services`)
+  and the legacy single-collection layout as an alternative comment block.
+
+### Added
 - **Multi-collection RAG support**: `doc_rag.py` and `doc_bm25.py` now accept
   an optional `topic` parameter (e.g. `"panda"`, `"atlas"`, `"rucio"`,
   `"root"`, `"bamboo"`, `"epic"`, `"cgsim"`) that selects which ChromaDB

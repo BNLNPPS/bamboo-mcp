@@ -918,10 +918,33 @@ _ROOT_SIGNALS: frozenset[str] = frozenset({
     "rdataframe", "rdf::", "root framework", "root cern",
 })
 
-#: Keyword signals that indicate a Bamboo MCP meta-question.
+#: Keyword signals that indicate a Bamboo MCP core question (bamboo-mcp repo).
+#:
+#: Matched *after* :data:`_BAMBOO_SERVICES_SIGNALS` so that a question
+#: containing both "bamboo mcp" and "services" is routed to
+#: ``bamboo_services`` rather than ``bamboo_mcp``.
 _BAMBOO_SIGNALS: frozenset[str] = frozenset({
     "bamboo mcp", "bamboo-mcp", "bamboo config", "configure bamboo",
     "bamboo tool", "bamboo server", "bamboo answer", "bamboo setup",
+    "bamboo install", "install bamboo", "bamboo plugin",
+    "bamboo interface", "bamboo ui", "bamboo tui", "bamboo cli",
+    "bamboo streamlit",
+})
+
+#: Keyword signals that indicate a Bamboo MCP Services question
+#: (bamboo-mcp-services repo — ingestion agents, CRIC agent, etc.).
+#:
+#: Checked *before* :data:`_BAMBOO_SIGNALS` because these phrases are more
+#: specific: a question about "bamboo mcp services" contains "bamboo mcp" but
+#: the more precise match must win.
+_BAMBOO_SERVICES_SIGNALS: frozenset[str] = frozenset({
+    "bamboo mcp services", "bamboo-mcp-services", "bamboo services",
+    "mcp services agent", "mcp services config",
+    "supervisor agent", "ingestion agent", "cric agent",
+    "document monitor agent", "document monitor",
+    "bamboo-mcp-services install", "install bamboo services",
+    "bamboo services install", "bamboo services setup",
+    "bamboo services config",
 })
 
 
@@ -935,6 +958,19 @@ def _topic_for_question(question: str, plugin_id: str = "atlas") -> str:
     and keyword signals for cross-cutting topics (Rucio, ROOT, Bamboo) take
     precedence over the generic PanDA/ATLAS default.
 
+    Bamboo signal matching uses two ordered sets to handle the ambiguity
+    between the two Bamboo components:
+
+    1. :data:`_BAMBOO_SERVICES_SIGNALS` is checked first (more specific) →
+       returns ``"bamboo_services"``, which maps to ``bamboo_services_docs``.
+    2. :data:`_BAMBOO_SIGNALS` is checked second → returns ``"bamboo_mcp"``,
+       which maps to ``bamboo_mcp_docs``.
+
+    Deployments that have not yet split ``bamboo_docs`` into two separate
+    collections can keep ``"bamboo_mcp": "bamboo_docs"`` and
+    ``"bamboo_services": "bamboo_docs"`` in ``BAMBOO_CHROMA_COLLECTION_MAP``
+    to fall back to the single collection transparently.
+
     Args:
         question: The user question text (already lowercased by callers, but
             this function lowercases defensively).
@@ -944,7 +980,8 @@ def _topic_for_question(question: str, plugin_id: str = "atlas") -> str:
     Returns:
         str: A topic key recognised by
         :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic`,
-        e.g. ``"atlas"``, ``"rucio"``, ``"root"``, ``"bamboo"``, ``"panda"``.
+        e.g. ``"atlas"``, ``"rucio"``, ``"root"``, ``"bamboo_mcp"``,
+        ``"bamboo_services"``, ``"panda"``.
     """
     # Plugin-specific topics always win — don't let keyword signals bleed
     # across plugin boundaries (e.g. an ePIC question mentioning "panda").
@@ -955,9 +992,15 @@ def _topic_for_question(question: str, plugin_id: str = "atlas") -> str:
 
     q_lower = question.lower()
 
-    # Cross-cutting topics: Bamboo meta, ROOT, Rucio.
+    # Bamboo Services signals checked before core Bamboo signals — more
+    # specific phrases (e.g. "bamboo mcp services") must win over the shorter
+    # "bamboo mcp" substring they contain.
+    if any(sig in q_lower for sig in _BAMBOO_SERVICES_SIGNALS):
+        return "bamboo_services"
     if any(sig in q_lower for sig in _BAMBOO_SIGNALS):
-        return "bamboo"
+        return "bamboo_mcp"
+
+    # Cross-cutting topics: ROOT, Rucio.
     if any(sig in q_lower for sig in _ROOT_SIGNALS):
         return "root"
     if any(sig in q_lower for sig in _RUCIO_SIGNALS):
@@ -2641,6 +2684,7 @@ __all__ = [
     "_RUCIO_SIGNALS",
     "_ROOT_SIGNALS",
     "_BAMBOO_SIGNALS",
+    "_BAMBOO_SERVICES_SIGNALS",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_run_db_query_fast_path",

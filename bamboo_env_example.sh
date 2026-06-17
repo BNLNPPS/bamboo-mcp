@@ -193,11 +193,31 @@ export BAMBOO_CHROMA_PATH="./chroma_db"
 # changes or new environment variables.
 #
 # Built-in topic defaults (used when a topic key is absent from the map):
-#   panda  → panda_docs     atlas  → atlas_docs    bamboo → bamboo_docs
-#   rucio  → rucio_docs     root   → root_docs      epic   → epic_docs
-#   cgsim  → cgsim_docs
+#   panda          → panda_docs          atlas    → atlas_docs
+#   bamboo         → bamboo_docs (legacy alias; see note below)
+#   bamboo_mcp     → bamboo_mcp_docs     bamboo_services → bamboo_services_docs
+#   rucio          → rucio_docs          root     → root_docs
+#   epic           → epic_docs           cgsim    → cgsim_docs
+#
+# The "bamboo" key is a legacy alias retained for single-collection
+# deployments.  Deployments that have split Bamboo documentation into two
+# separate collections (bamboo-mcp repo docs vs bamboo-mcp-services repo docs)
+# should add "bamboo_mcp" and "bamboo_services" entries explicitly to avoid
+# install/setup docs from one component polluting answers about the other.
 #
 # Uncomment and adjust to match your bamboo-mcp-services deployment:
+# export BAMBOO_CHROMA_COLLECTION_MAP='{
+#     "panda":           "panda_docs",
+#     "atlas":           "atlas_docs",
+#     "bamboo_mcp":      "bamboo_mcp_docs",
+#     "bamboo_services": "bamboo_services_docs",
+#     "rucio":           "rucio_docs",
+#     "root":            "root_docs",
+#     "epic":            "epic_docs",
+#     "cgsim":           "cgsim_docs"
+# }'
+#
+# Legacy single-collection layout (bamboo-mcp + bamboo-mcp-services docs mixed):
 # export BAMBOO_CHROMA_COLLECTION_MAP='{
 #     "panda":  "panda_docs",
 #     "atlas":  "atlas_docs",

@@ -331,6 +331,8 @@ class TestResolveCollectionForTopic:
         assert resolve_collection_for_topic(str(tmp_path), "rucio") == "rucio_docs"
         assert resolve_collection_for_topic(str(tmp_path), "root") == "root_docs"
         assert resolve_collection_for_topic(str(tmp_path), "bamboo") == "bamboo_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "bamboo_mcp") == "bamboo_mcp_docs"
+        assert resolve_collection_for_topic(str(tmp_path), "bamboo_services") == "bamboo_services_docs"
         assert resolve_collection_for_topic(str(tmp_path), "epic") == "epic_docs"
         assert resolve_collection_for_topic(str(tmp_path), "cgsim") == "cgsim_docs"
 
@@ -367,3 +369,19 @@ class TestResolveCollectionForTopic:
         )
         result = resolve_collection_for_topic(str(tmp_path), "geant4")
         assert result == "geant4_docs"
+
+    def test_bamboo_mcp_and_services_resolved_via_sidecar(self, tmp_path, monkeypatch):
+        """bamboo_mcp and bamboo_services topics traverse the blue/green sidecar."""
+        sidecar = tmp_path / ROUTING_SIDECAR
+        import json as _json
+        sidecar.write_text(
+            _json.dumps({
+                "bamboo_mcp_docs": "bamboo_mcp_docs__a",
+                "bamboo_services_docs": "bamboo_services_docs__b",
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION_MAP", raising=False)
+        monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION", raising=False)
+        assert resolve_collection_for_topic(str(tmp_path), "bamboo_mcp") == "bamboo_mcp_docs__a"
+        assert resolve_collection_for_topic(str(tmp_path), "bamboo_services") == "bamboo_services_docs__b"
