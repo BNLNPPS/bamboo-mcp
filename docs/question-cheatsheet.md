@@ -832,3 +832,90 @@ repeat the file path explicitly:
 ```
 Look at pilot.py again — is 'Any' actually used?
 ```
+
+---
+
+## Self-introspection & analytics (`panda_prompt_log`)
+
+Questions about Bamboo's own prompt logs — ratings, tool usage, sessions, costs,
+and model breakdowns.  Routes to the `panda_prompt_log` OpenSearch index
+(`bamboomcp-promptlog-*`).  Requires `ASKPANDA_OPENSEARCH` to be set.
+
+> **Expected routing:** `route=FAST_PATH`, tool = `panda_prompt_log`.
+> **Check with `/inspect`:** evidence shows the OpenSearch aggregation or hit list
+> used to answer the question.
+> **Note:** log entries are written after every response; the current session's
+> last exchange may not yet be indexed when you ask.
+
+### Quality & ratings
+
+```
+Show me all responses rated 1 from today.
+Show me all responses rated 2 or below this week.
+What is the average rating per model/provider today?
+Which questions received the lowest ratings last month?
+Show me the rating distribution for the past 7 days.
+```
+
+> **Rating scale:** 1 (worst) – 5 (best), stored as `user_rating` in the log entry.
+> **Tip:** follow up with `/inspect` to see the raw log entries and the questions
+> that triggered poor ratings — useful for identifying systematic failure modes.
+
+### Tool usage
+
+```
+Which tool was called most often yesterday?
+Show me all queries that used more than 3 tools.
+What is the average number of tool calls per session?
+Which tools are never used together in the same query?
+```
+
+> **Evidence field:** `tools_used` is a list of tool names in each log entry.
+> Aggregation questions use a `terms` aggregation over this field.
+
+### FAQ / query patterns
+
+```
+What are the 10 most frequently asked questions this week?
+Which topics come up most in failed or low-rated responses?
+Show me all queries that mentioned "CERN-PROD" this month.
+Are there recurring questions that have no good answer?
+```
+
+> **Tip:** "most frequently asked" uses a `terms` aggregation over a keyword
+> representation of the question text.  Exact phrasing varies, so treat the
+> result as a cluster overview rather than a precise count.
+
+### Session replay & debugging
+
+```
+Show me the full session from user X at 14:00 today.
+Replay the last query that triggered the ReAct agent.
+Show me all queries where the LLM changed its answer after a gap was detected.
+```
+
+> **Session grouping:** log entries share a `session_id` field.  The tool
+> retrieves all entries for the session ordered by timestamp.
+
+### Performance & cost
+
+```
+What is the average response latency per provider this week?
+Which queries had the highest estimated token cost today?
+Show me queries where the LLM was called more than twice.
+```
+
+> **Cost field:** `estimated_cost_usd` is stored per log entry.  Latency is
+> derived from `response_time_ms`.
+
+### Model / provider breakdowns
+
+```
+Which model has the highest average rating this month?
+How many queries used Gemini vs Mistral vs Claude today?
+Show me responses where the provider fallback was triggered.
+```
+
+> **Provider field:** `llm_provider` and `llm_model` are stored per entry.
+> Fallback events are flagged with `provider_fallback: true`.
+>
