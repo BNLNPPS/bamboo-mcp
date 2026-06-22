@@ -609,15 +609,21 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "finished on",
 })
 
-#: Signal phrases that unambiguously indicate a job timing / performance query
-#: against the ``atlas_panda_job_timing-*`` OpenSearch index.  These phrases
-#: reference pilot timing sub-fields or wall-clock / queue time metrics that
-#: are only present in that index, not in the live DuckDB jobs snapshot.
+#: Signal phrases that unambiguously indicate a job stats / performance query
+#: against the ``atlas_panda_job_stats-*`` OpenSearch index.  These phrases
+#: reference pilot timing sub-fields, wall-clock / queue time metrics, memory
+#: usage, CPU efficiency, HS06 accounting, I/O throughput, or carbon footprint
+#: fields that are only present in that index, not in the live DuckDB snapshot.
 #:
 #: Checked BEFORE the jobs-DB fast-path so that questions like
 #: "What is the average wall-clock time for failed jobs?" route to
-#: ``atlas.job_timing`` rather than ``panda_jobs_query``.
-_JOB_TIMING_SIGNALS: frozenset[str] = frozenset({
+#: ``atlas.job_stats`` rather than ``panda_jobs_query``.
+#:
+#: Deliberately excludes ambiguous phrases like "failed jobs" or "error rate"
+#: that overlap with ``_JOBS_DB_SIGNALS``; those are handled by the LLM planner
+#: when ``BAMBOO_FAST_PATH=0``.
+_JOB_STATS_SIGNALS: frozenset[str] = frozenset({
+    # Pilot timing sub-fields
     "stage-in time",
     "stagein time",
     "stage-out time",
@@ -631,6 +637,7 @@ _JOB_TIMING_SIGNALS: frozenset[str] = frozenset({
     "initial setup time",
     "getjob time",
     "get job time",
+    # Wall-clock and queue time
     "wall-clock time",
     "wallclock time",
     "wall clock time",
@@ -638,27 +645,73 @@ _JOB_TIMING_SIGNALS: frozenset[str] = frozenset({
     "queuetime",
     "job_walltime",
     "job_queuetime",
+    # Memory (unambiguous — not in DuckDB jobs snapshot)
+    "memory usage",
+    "rss memory",
+    "avgrss",
+    "maxrss",
+    "avgpss",
+    "maxpss",
+    "avgvmem",
+    "maxvmem",
+    "avgswap",
+    "maxswap",
+    "resident set",
+    "virtual memory",
+    "swap usage",
+    # CPU and HS06 (unambiguous)
+    "cpu efficiency",
+    "cpu_eff",
+    "hs06",
+    "hs06sec",
+    "cpuconsumptiontime",
+    # I/O throughput (unambiguous)
+    "write throughput",
+    "read throughput",
+    "ratewbytes",
+    "raterbytes",
+    "inputfilebytes",
+    "outputfilebytes",
+    "totrbytes",
+    "totwbytes",
+    "input data volume",
+    "output data volume",
+    # Carbon footprint (unambiguous)
+    "carbon",
+    "co2",
+    "gco2",
+    "carbon footprint",
+    # Pilot and DDM errors (unambiguous — not in DuckDB)
+    "pilot error",
+    "piloterrorcode",
+    "piloterrordiag",
+    "ddm error",
+    "ddmerrorcode",
+    "exe error",
+    "exeerrorcode",
 })
 
 
-def _is_job_timing_question(question: str) -> bool:
-    """Return True when the question targets the job timing OpenSearch index.
+def _is_job_stats_question(question: str) -> bool:
+    """Return True when the question targets the job stats OpenSearch index.
 
     Detects questions about pilot timing sub-fields (stage-in, stage-out,
-    payload execution, etc.) or wall-clock / queue time performance metrics
-    only available in atlas_panda_job_timing-*.
+    payload execution, etc.), wall-clock / queue time, memory usage, CPU
+    efficiency, HS06 accounting, I/O throughput, carbon footprint, or pilot /
+    DDM / execution error codes — all of which are only available in
+    atlas_panda_job_stats-*.
 
-    Checked before the jobs-DB fast-path so timing questions route to
-    atlas.job_timing rather than panda_jobs_query.
+    Checked before the jobs-DB fast-path so job stats questions route to
+    atlas.job_stats rather than panda_jobs_query.
 
     Args:
         question: User question text (before any normalisation).
 
     Returns:
-        True if the question should be routed to atlas.job_timing.
+        True if the question should be routed to atlas.job_stats.
     """
     q = question.lower()
-    return any(sig in q for sig in _JOB_TIMING_SIGNALS)
+    return any(sig in q for sig in _JOB_STATS_SIGNALS)
 
 
 # Job-specific signals for site-health detection: a subset of _JOBS_DB_SIGNALS
@@ -1623,24 +1676,25 @@ def _build_deterministic_plan(  # noqa: C901
             explain="Deterministic: CGSim plugin, no task/job ID, non-conceptual → sim_query.",
         )
 
-    # Job timing fast-path: pilot timing sub-fields or wall-clock/queue time
-    # in the atlas_panda_job_timing-* index.  Must come BEFORE the jobs DB
+    # Job stats fast-path: pilot timing sub-fields, wall-clock/queue time,
+    # memory, CPU efficiency, HS06, I/O throughput, carbon, or error codes
+    # in the atlas_panda_job_stats-* index.  Must come BEFORE the jobs DB
     # fast-path because signals like 'queue time' and 'wall-clock time' also
     # loosely match _JOBS_DB_SIGNALS.
-    if plugin_id in _PANDA_PLUGINS and _is_job_timing_question(question):
-        timing_args: dict[str, str] = {"question": question}
+    if plugin_id in _PANDA_PLUGINS and _is_job_stats_question(question):
+        stats_args: dict[str, str] = {"question": question}
         site = _extract_site_from_question(question)
         if site:
-            timing_args["site"] = site
+            stats_args["site"] = site
         return Plan(
             route=PlanRoute.FAST_PATH,
             confidence=0.9,
             tool_calls=[ToolCall(
-                tool="atlas.job_timing",
-                arguments=timing_args,
+                tool="atlas.job_stats",
+                arguments=stats_args,
             )],
             reuse_policy=reuse,
-            explain="Deterministic: pilot timing / wall-clock signals → atlas.job_timing.",
+            explain="Deterministic: job stats signals → atlas.job_stats.",
         )
 
     # Jobs DB fast-path: no IDs but the question is about live job stats.
@@ -2378,26 +2432,26 @@ async def _run_fast_path_intercepts(
             if fast_plan is not None:
                 return await execute_plan(fast_plan, question, history)
 
-        # Job timing fast-path — must come BEFORE the jobs DB fast-path
-        # because timing signals like 'queue time' and 'wall-clock time'
+        # Job stats fast-path — must come BEFORE the jobs DB fast-path
+        # because stats signals like 'queue time' and 'wall-clock time'
         # also loosely match _JOBS_DB_SIGNALS and would otherwise route
-        # to panda_jobs_query instead of atlas.job_timing.
-        if plugin_id in frozenset({"atlas", "epic"}) and _is_job_timing_question(question):
-            timing_args: dict[str, str] = {"question": question}
+        # to panda_jobs_query instead of atlas.job_stats.
+        if plugin_id in frozenset({"atlas", "epic"}) and _is_job_stats_question(question):
+            stats_args: dict[str, str] = {"question": question}
             site = _extract_site_from_question(question)
             if site:
-                timing_args["site"] = site
-            timing_plan = Plan(
+                stats_args["site"] = site
+            stats_plan = Plan(
                 route=PlanRoute.FAST_PATH,
                 confidence=0.9,
                 tool_calls=[ToolCall(
-                    tool="atlas.job_timing",
-                    arguments=timing_args,
+                    tool="atlas.job_stats",
+                    arguments=stats_args,
                 )],
                 reuse_policy=ReusePolicy(),
-                explain="Deterministic: pilot timing / wall-clock signals → atlas.job_timing.",
+                explain="Deterministic: job stats signals → atlas.job_stats.",
             )
-            return await execute_plan(timing_plan, question, history, plugin_id=plugin_id)
+            return await execute_plan(stats_plan, question, history, plugin_id=plugin_id)
 
         # Jobs DB fast-path and CRIC fast-path — handled by shared helper
         # that also performs multi-DB disambiguation.
@@ -2670,7 +2724,7 @@ __all__ = [
     "QUERYABLE_DATABASES",
     "_resolve_target_database",
     "_build_clarification_response",
-    "_is_job_timing_question",
+    "_is_job_stats_question",
     "_is_jobs_db_question",
     "_is_cric_question",
     "_is_conceptual_question",

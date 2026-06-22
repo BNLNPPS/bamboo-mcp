@@ -7,7 +7,54 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Added
-- **`bamboo_mcp` and `bamboo_services` topic keys**: two new built-in topic
+- **`atlas.job_stats` tool** (`packages/askpanda_atlas`): new OpenSearch-backed
+  tool replacing `atlas.job_timing`, targeting the richer
+  `atlas_panda_job_stats-*` index.  Field coverage expands from 18 to 73
+  confirmed fields across seven groups: timing (batch 1), I/O and data
+  transfer, errors, task/campaign context, software environment, CPU/HS06
+  accounting, memory, carbon footprint, and infrastructure traceability.
+  New numeric aggregation targets include `avgrss`, `maxrss`, `avgpss`,
+  `maxpss`, `avgvmem`, `maxvmem`, `avgswap`, `maxswap`, `minramcount`,
+  `cpuconsumptiontime`, `cpu_eff`, `hs06`, `hs06sec`, `corecount`,
+  `actualcorecount`, `inputfilebytes`, `outputfilebytes`, `totrbytes`,
+  `totwbytes`, `raterbytes`, `ratewbytes`, `ninputdatafiles`,
+  `noutputdatafiles`, `gco2global`, `gco2regional`, `piloterrorcode`,
+  `exeerrorcode`, `ddmerrorcode`, `transexitcode`, `task_nattempts`, and more.
+- **`_JOB_STATS_SIGNALS`** frozenset (`bamboo_answer.py`): replaces the
+  former `_JOB_TIMING_SIGNALS`.  Expanded to cover memory (`"memory usage"`,
+  `"rss memory"`, `"avgrss"`, `"maxrss"`, `"resident set"`, …), CPU/HS06
+  (`"cpu efficiency"`, `"cpu_eff"`, `"hs06"`, `"hs06sec"`, …), I/O
+  throughput (`"write throughput"`, `"ratewbytes"`, `"inputfilebytes"`, …),
+  carbon footprint (`"carbon"`, `"co2"`, `"gco2"`, …), and error codes
+  (`"pilot error"`, `"ddm error"`, `"exe error"`, …).  Ambiguous signals
+  that overlap with `_JOBS_DB_SIGNALS` (e.g. `"failed jobs"`, `"error rate"`)
+  are intentionally excluded and handled by the LLM planner.
+- **`_SYSTEM_JOB_STATS`** synthesis prompt (`bamboo_executor.py`): replaces
+  `_SYSTEM_JOB_STATS`.  Describes all new field groups with their units
+  (kB for memory, bytes/s for throughput, HS06·s for HS06-normalised CPU)
+  and includes guidance on null values for `hs06sec` and carbon fields on
+  non-terminal jobs.
+- **`atlas_panda_job_stats-*`** added to `_DEFAULT_ALLOWED_PATTERNS` in
+  `opensearch_query.py`; `atlas_panda_job_timing-*` removed.
+- **`test_job_stats.py`** (110 tests): full test coverage for the new tool,
+  including `TestNewNumericFields` (32 field-presence assertions) and
+  `TestParseLlmParamsNewFields` (12 round-trip tests for batch-2 fields).
+
+### Changed
+- **`atlas.job_timing` entry point removed** from `pyproject.toml`;
+  replaced by `atlas.job_stats = askpanda_atlas.job_stats:panda_job_stats_tool`.
+  The old `job_timing_*.py` source files are retained in the repository for
+  reference but are no longer registered.
+- **Planner routing hint updated** (`planner.py`): `atlas.job_timing` →
+  `atlas.job_stats`; description expanded to cover memory, CPU/HS06, I/O,
+  error codes, and carbon queries.
+- **Fast-path intercepts updated** (`bamboo_answer.py`): both intercept
+  sites now call `_is_job_stats_question()` and route to `atlas.job_stats`.
+- **`docs/question-cheatsheet.md`**: `atlas.job_timing` section replaced by
+  `atlas.job_stats` section with new question groups for memory, CPU/HS06,
+  I/O, errors, task/campaign context, and carbon footprint.
+
+
   keys in `_chroma_routing.py` that map to dedicated logical collection names
   (`bamboo_mcp_docs` and `bamboo_services_docs` respectively).  Deployments
   that split the Bamboo documentation into two separate ChromaDB collections

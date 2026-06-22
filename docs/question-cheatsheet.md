@@ -350,16 +350,20 @@ What files did job J-001 read from disk?
 
 ---
 
-## Job timing and performance (`atlas.job_timing`)
+## Job statistics and performance (`atlas.job_stats`)
 
-Queries against the `atlas_panda_job_timing-*` OpenSearch index.  Covers all
-job states (not only finished jobs).  Requires `ASKPANDA_OPENSEARCH` to be set.
+Queries against the `atlas_panda_job_stats-*` OpenSearch index.  Covers all
+job states (not only finished jobs) and a rich field set including timing,
+memory, CPU/HS06, I/O, errors, task/campaign context, and carbon footprint.
+Requires `ASKPANDA_OPENSEARCH` to be set.
 
-> **Expected routing:** `route=FAST_PATH`, tool = `atlas.job_timing`.
+> **Expected routing:** `route=FAST_PATH`, tool = `atlas.job_stats`.
 > **Check with `/inspect`:** evidence shows `metric`, `field`, `value`,
 > `doc_count`, `site_filter`, `jobstatus_filter`, `from_dt`, `to_dt`, `error` (null = success).
 > **Note:** `value: null` with `doc_count: 0` means the filter matched no documents —
 > try broadening the time range or removing the site filter.
+> **Note:** `hs06sec`, `gco2global`, and `gco2regional` may be null for
+> non-terminal jobs (running/transferring) even when `doc_count > 0`.
 
 ### Wall-clock and queue time
 
@@ -387,13 +391,73 @@ What is the maximum stage-out time for finished jobs at CERN today?
 What is the minimum payload execution time at AGLT2 today?
 ```
 
+### Memory usage
+
+```
+What is the average RSS memory usage at CERN today?
+What is the peak RSS memory usage at BNL today?
+Which site has the highest peak memory usage today?
+What is the maximum virtual memory for finished jobs at BNL today?
+What is the average PSS memory for production jobs today?
+What is the average swap usage at CERN today?
+```
+
+### CPU and HS06 accounting
+
+```
+What is the average CPU efficiency at IN2P3 today?
+What is the total HS06-seconds consumed at TRIUMF today?
+What is the average CPU consumption time at CERN today?
+What is the average HS06 factor at MWT2 today?
+What is the total CPU consumption time for finished jobs at BNL today?
+```
+
+### I/O and data transfer
+
+```
+What is the average input data volume per job at BNL today?
+What is the average write throughput at CERN today?
+What is the average read throughput at IN2P3 today?
+How many input files did jobs process on average at CERN today?
+What is the total output data volume at TRIUMF today?
+```
+
+### Errors and diagnostics
+
+```
+What is the average pilot error code for failed jobs at CERN today?
+What is the average DDM error code for failed jobs at BNL today?
+What is the average execution error code for failed jobs at IN2P3 today?
+What is the average transformation exit code for failed jobs at CERN today?
+```
+
+### Task and campaign context
+
+```
+How many jobs ran for campaign MC16:MC16e today?
+What is the average wall-clock time for production jobs today?
+How many managed jobs ran at CERN today?
+What is the average stage-in time for jobs in task 50785386?
+How many jobs ran for task 50785386?
+```
+
+### Carbon footprint
+
+```
+What is the average CO2 footprint per job at CERN today?
+What is the total CO2 footprint at BNL today?
+```
+
+> **Note:** CO2 fields (`gco2global`, `gco2regional`) may be null for many
+> jobs — query a larger time range if `value: null` is returned.
+
 ### Time-range variants
 
 ```
 What is the average stage-in time at BNL in the last 7 days?
 What is the average wall-clock time for finished jobs at CERN in the last 7 days?
 How many jobs ran at IN2P3 in the last 7 days?
-What is the total wall-clock time for all jobs at BNL today?
+What is the average RSS memory at BNL in the last 7 days?
 ```
 
 ### Job status filters
@@ -403,19 +467,8 @@ What is the average wall-clock time for failed jobs at BNL today?
 What is the average stage-in time for finished jobs at CERN today?
 How many failed jobs ran at IN2P3 today?
 What is the maximum queue time for failed jobs today?
-What is the average payload execution time for finished jobs globally today?
+What is the average CPU efficiency for finished jobs globally today?
 ```
-
-### Task-scoped queries
-
-```
-What is the average wall-clock time for jobs in task 50785386?
-How many jobs ran for task 50785386?
-What is the total stage-in time for jobs in task 50785386?
-```
-
-> **Tip:** task-scoped queries omit time filters — all attempts for the task
-> are included regardless of when they ran.
 
 ### Edge cases worth testing
 
@@ -427,22 +480,22 @@ What is the average stage-in time globally today?
 What is the average wall-clock time at BNL?
 
 # Partial site name — wildcard matching, should resolve to e.g. BNL_ATLAS_1
-What is the average stage-in time at BNL today?
+What is the average RSS memory at BNL today?
 
 # value: null result — index exists but no data matches
 What is the average stage-in time at NONEXISTENT_SITE today?
 
-# CANNOT_ANSWER — field not in schema
-What is the average CPU count per site?
-What is the average HS06 efficiency at BNL?
+# hs06sec may be null for non-terminal jobs
+What is the total HS06-seconds at CERN today?
+
+# CANNOT_ANSWER — not a numeric aggregation field
+What is the most common pilot error message at BNL today?
+What is the task campaign for job 7188614776?
 ```
 
 > **Note on `value: null`:** a null value with `doc_count: 0` is not an error —
 > it means no documents matched the filter combination.  The synthesiser should
 > report "no data" rather than an error message.
-> **Note on future field batches:** once Sasha adds further field batches (CPU/HS06,
-> memory, I/O, errors, task context, carbon), many more questions become answerable.
-> Update this section when each batch is confirmed in the index.
 
 
 ---
@@ -918,4 +971,5 @@ Show me responses where the provider fallback was triggered.
 
 > **Provider field:** `llm_provider` and `llm_model` are stored per entry.
 > Fallback events are flagged with `provider_fallback: true`.
+>
 >
