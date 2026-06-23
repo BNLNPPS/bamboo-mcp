@@ -1,13 +1,15 @@
-"""Tests for ``job_timing_schema`` and ``job_timing_impl``.
+"""Tests for ``job_stats_schema`` and ``job_stats_impl``.
 
 Covers:
 
-* Schema constants and field registry sanity checks.
+* Schema constants and field registry sanity checks (batch 1 + batch 2 fields).
+* New batch-2 numeric fields present in ``NUMERIC_FIELDS``.
 * :func:`parse_llm_params` — valid JSON, sentinel, refusals, bad fields.
+* New :func:`parse_llm_params` examples for memory, CPU, I/O, error fields.
 * :func:`_default_window` — window length and ordering.
 * :func:`_error_evidence` and :func:`_cannot_answer_evidence` structure.
-* :func:`fetch_job_timing` with OpenSearch mocked.
-* :class:`PandaJobTimingTool.call` end-to-end with LLM and OpenSearch mocked.
+* :func:`fetch_job_stats` with OpenSearch mocked.
+* :class:`PandaJobStatsTool.call` end-to-end with LLM and OpenSearch mocked.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from askpanda_atlas.job_timing_schema import (
+from askpanda_atlas.job_stats_schema import (
     ALL_FIELD_NAMES,
     CACHE_PREFIX,
     CANNOT_ANSWER_SENTINEL,
@@ -29,18 +31,18 @@ from askpanda_atlas.job_timing_schema import (
     DEFAULT_METRIC,
     DEFAULT_WINDOW_HOURS,
     INDEX_PATTERN,
+    JOB_STATS_FIELDS,
     NUMERIC_FIELDS,
-    TIMING_FIELDS,
     VALID_METRICS,
     build_query_prompt,
 )
-from askpanda_atlas.job_timing_impl import (
-    PandaJobTimingTool,
+from askpanda_atlas.job_stats_impl import (
+    PandaJobStatsTool,
     _cannot_answer_evidence,
     _default_window,
     _error_evidence,
-    fetch_job_timing,
-    panda_job_timing_tool,
+    fetch_job_stats,
+    panda_job_stats_tool,
     parse_llm_params,
 )
 
@@ -54,7 +56,7 @@ def _unpack(result: list[Any]) -> dict[str, Any]:
     """Deserialise the JSON-wrapped MCP content returned by the tool.
 
     Args:
-        result: Return value of ``PandaJobTimingTool.call()``.
+        result: Return value of ``PandaJobStatsTool.call()``.
 
     Returns:
         Deserialised dict with an ``"evidence"`` key.
@@ -79,7 +81,7 @@ def _mock_os_response(value: float | None, doc_count: int = 100) -> MagicMock:
 
 
 def _patch_os(response: MagicMock):
-    """Return a context-manager stack that mocks OpenSearch for fetch_job_timing.
+    """Return a context-manager stack that mocks OpenSearch for fetch_job_stats.
 
     Args:
         response: Mock response object to return from ``Search.execute()``.
@@ -105,17 +107,21 @@ def _patch_os(response: MagicMock):
 class TestSchemaConstants:
     """Sanity checks on the schema module constants."""
 
+    def test_index_pattern_targets_job_stats(self) -> None:
+        """INDEX_PATTERN targets atlas_panda_job_stats-*."""
+        assert INDEX_PATTERN == "atlas_panda_job_stats-*"
+
     def test_index_pattern_has_wildcard(self) -> None:
         """INDEX_PATTERN ends with '*' for multi-index coverage."""
         assert INDEX_PATTERN.endswith("-*")
 
-    def test_timing_fields_non_empty(self) -> None:
-        """TIMING_FIELDS contains at least the confirmed batch-1 fields."""
-        assert len(TIMING_FIELDS) >= 18  # 8 core + 10 timing
+    def test_job_stats_fields_covers_all_batches(self) -> None:
+        """JOB_STATS_FIELDS contains batch 1 + batch 2 fields (>= 73)."""
+        assert len(JOB_STATS_FIELDS) >= 73
 
-    def test_all_field_names_match_timing_fields(self) -> None:
-        """ALL_FIELD_NAMES equals the set of names in TIMING_FIELDS."""
-        expected = {name for name, *_ in TIMING_FIELDS}
+    def test_all_field_names_match_job_stats_fields(self) -> None:
+        """ALL_FIELD_NAMES equals the set of names in JOB_STATS_FIELDS."""
+        expected = {name for name, *_ in JOB_STATS_FIELDS}
         assert ALL_FIELD_NAMES == expected
 
     def test_numeric_fields_subset_of_all(self) -> None:
@@ -135,7 +141,7 @@ class TestSchemaConstants:
         assert VALID_METRICS == {"avg", "sum", "min", "max", "value_count"}
 
     def test_pilottiming_subfields_present(self) -> None:
-        """All six parsed pilottiming sub-fields are in TIMING_FIELDS."""
+        """All six parsed pilottiming sub-fields are in JOB_STATS_FIELDS."""
         subfields = {
             "pilottiming_getjob",
             "pilottiming_stagein",
@@ -158,9 +164,10 @@ class TestSchemaConstants:
         }
         assert subfields <= NUMERIC_FIELDS
 
-    def test_cache_prefix_is_unique(self) -> None:
-        """CACHE_PREFIX does not collide with known other prefixes."""
-        assert CACHE_PREFIX == "job_timing:"
+    def test_cache_prefix_is_job_stats(self) -> None:
+        """CACHE_PREFIX is 'job_stats:' (not 'job_timing:')."""
+        assert CACHE_PREFIX == "job_stats:"
+        assert CACHE_PREFIX != "job_timing:"
         assert CACHE_PREFIX != "harvester_timeseries:"
 
     def test_build_query_prompt_returns_two_messages(self) -> None:
@@ -176,12 +183,179 @@ class TestSchemaConstants:
         msgs = build_query_prompt(q)
         assert msgs[1]["content"] == q
 
-    def test_build_query_prompt_embeds_field_names(self) -> None:
-        """System message references key field names."""
+    def test_build_query_prompt_embeds_timing_field_names(self) -> None:
+        """System message references core timing field names."""
         msgs = build_query_prompt("test")
         system = msgs[0]["content"]
         assert "pilottiming_stagein" in system
         assert "job_walltime" in system
+
+    def test_build_query_prompt_embeds_memory_field_names(self) -> None:
+        """System message references batch-2 memory field names."""
+        msgs = build_query_prompt("test")
+        system = msgs[0]["content"]
+        assert "avgrss" in system
+        assert "maxrss" in system
+        assert "cpuconsumptiontime" in system
+
+    def test_build_query_prompt_embeds_cpu_field_names(self) -> None:
+        """System message references CPU/HS06 field names."""
+        msgs = build_query_prompt("test")
+        system = msgs[0]["content"]
+        assert "cpu_eff" in system
+        assert "hs06sec" in system
+
+
+# ---------------------------------------------------------------------------
+# New batch-2 numeric fields
+# ---------------------------------------------------------------------------
+
+
+class TestNewNumericFields:
+    """Verify that all batch-2 numeric fields appear in NUMERIC_FIELDS."""
+
+    # Memory fields (kB)
+    def test_avgrss_is_numeric(self) -> None:
+        """avgrss (average RSS) is a numeric aggregation target."""
+        assert "avgrss" in NUMERIC_FIELDS
+
+    def test_maxrss_is_numeric(self) -> None:
+        """maxrss (peak RSS) is a numeric aggregation target."""
+        assert "maxrss" in NUMERIC_FIELDS
+
+    def test_avgpss_is_numeric(self) -> None:
+        """avgpss is a numeric aggregation target."""
+        assert "avgpss" in NUMERIC_FIELDS
+
+    def test_maxpss_is_numeric(self) -> None:
+        """maxpss is a numeric aggregation target."""
+        assert "maxpss" in NUMERIC_FIELDS
+
+    def test_avgvmem_is_numeric(self) -> None:
+        """avgvmem is a numeric aggregation target."""
+        assert "avgvmem" in NUMERIC_FIELDS
+
+    def test_maxvmem_is_numeric(self) -> None:
+        """maxvmem is a numeric aggregation target."""
+        assert "maxvmem" in NUMERIC_FIELDS
+
+    def test_avgswap_is_numeric(self) -> None:
+        """avgswap is a numeric aggregation target."""
+        assert "avgswap" in NUMERIC_FIELDS
+
+    def test_maxswap_is_numeric(self) -> None:
+        """maxswap is a numeric aggregation target."""
+        assert "maxswap" in NUMERIC_FIELDS
+
+    def test_minramcount_is_numeric(self) -> None:
+        """minramcount (MB) is a numeric aggregation target."""
+        assert "minramcount" in NUMERIC_FIELDS
+
+    # CPU and HS06 fields
+    def test_cpuconsumptiontime_is_numeric(self) -> None:
+        """cpuconsumptiontime (seconds) is a numeric aggregation target."""
+        assert "cpuconsumptiontime" in NUMERIC_FIELDS
+
+    def test_hs06sec_is_numeric(self) -> None:
+        """hs06sec is a numeric aggregation target."""
+        assert "hs06sec" in NUMERIC_FIELDS
+
+    def test_hs06_is_numeric(self) -> None:
+        """hs06 benchmark factor is a numeric aggregation target."""
+        assert "hs06" in NUMERIC_FIELDS
+
+    def test_corecount_is_numeric(self) -> None:
+        """corecount is a numeric aggregation target."""
+        assert "corecount" in NUMERIC_FIELDS
+
+    def test_actualcorecount_is_numeric(self) -> None:
+        """actualcorecount (may be fractional) is a numeric aggregation target."""
+        assert "actualcorecount" in NUMERIC_FIELDS
+
+    def test_cpu_eff_is_numeric(self) -> None:
+        """cpu_eff (percentage) is a numeric aggregation target."""
+        assert "cpu_eff" in NUMERIC_FIELDS
+
+    # I/O fields
+    def test_ninputdatafiles_is_numeric(self) -> None:
+        """ninputdatafiles is a numeric aggregation target."""
+        assert "ninputdatafiles" in NUMERIC_FIELDS
+
+    def test_inputfilebytes_is_numeric(self) -> None:
+        """inputfilebytes is a numeric aggregation target."""
+        assert "inputfilebytes" in NUMERIC_FIELDS
+
+    def test_noutputdatafiles_is_numeric(self) -> None:
+        """noutputdatafiles is a numeric aggregation target."""
+        assert "noutputdatafiles" in NUMERIC_FIELDS
+
+    def test_outputfilebytes_is_numeric(self) -> None:
+        """outputfilebytes is a numeric aggregation target."""
+        assert "outputfilebytes" in NUMERIC_FIELDS
+
+    def test_totrbytes_is_numeric(self) -> None:
+        """totrbytes (total bytes read) is a numeric aggregation target."""
+        assert "totrbytes" in NUMERIC_FIELDS
+
+    def test_totwbytes_is_numeric(self) -> None:
+        """totwbytes (total bytes written) is a numeric aggregation target."""
+        assert "totwbytes" in NUMERIC_FIELDS
+
+    def test_raterbytes_is_numeric(self) -> None:
+        """raterbytes (read throughput) is a numeric aggregation target."""
+        assert "raterbytes" in NUMERIC_FIELDS
+
+    def test_ratewbytes_is_numeric(self) -> None:
+        """ratewbytes (write throughput) is a numeric aggregation target."""
+        assert "ratewbytes" in NUMERIC_FIELDS
+
+    # Carbon footprint
+    def test_gco2global_is_numeric(self) -> None:
+        """gco2global (g CO2) is a numeric aggregation target."""
+        assert "gco2global" in NUMERIC_FIELDS
+
+    def test_gco2regional_is_numeric(self) -> None:
+        """gco2regional (g CO2) is a numeric aggregation target."""
+        assert "gco2regional" in NUMERIC_FIELDS
+
+    # Error codes
+    def test_piloterrorcode_is_numeric(self) -> None:
+        """piloterrorcode is a numeric aggregation target."""
+        assert "piloterrorcode" in NUMERIC_FIELDS
+
+    def test_exeerrorcode_is_numeric(self) -> None:
+        """exeerrorcode is a numeric aggregation target."""
+        assert "exeerrorcode" in NUMERIC_FIELDS
+
+    def test_ddmerrorcode_is_numeric(self) -> None:
+        """ddmerrorcode is a numeric aggregation target."""
+        assert "ddmerrorcode" in NUMERIC_FIELDS
+
+    def test_transexitcode_is_numeric(self) -> None:
+        """transexitcode is a numeric aggregation target."""
+        assert "transexitcode" in NUMERIC_FIELDS
+
+    # Task context
+    def test_task_nattempts_is_numeric(self) -> None:
+        """task_nattempts is a numeric aggregation target."""
+        assert "task_nattempts" in NUMERIC_FIELDS
+
+    # Keyword/date fields must NOT be numeric
+    def test_batchid_not_numeric(self) -> None:
+        """batchid (keyword) is not in NUMERIC_FIELDS."""
+        assert "batchid" not in NUMERIC_FIELDS
+
+    def test_computingsite_not_numeric(self) -> None:
+        """computingsite (keyword) is not in NUMERIC_FIELDS."""
+        assert "computingsite" not in NUMERIC_FIELDS
+
+    def test_task_campaign_not_numeric(self) -> None:
+        """task_campaign (keyword) is not in NUMERIC_FIELDS."""
+        assert "task_campaign" not in NUMERIC_FIELDS
+
+    def test_inputfiletype_not_numeric(self) -> None:
+        """inputfiletype (keyword) is not in NUMERIC_FIELDS."""
+        assert "inputfiletype" not in NUMERIC_FIELDS
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +389,7 @@ class TestDefaultWindow:
 
 
 # ---------------------------------------------------------------------------
-# parse_llm_params
+# parse_llm_params — batch 1 cases
 # ---------------------------------------------------------------------------
 
 
@@ -322,6 +496,102 @@ class TestParseLlmParams:
 
 
 # ---------------------------------------------------------------------------
+# parse_llm_params — batch-2 field examples
+# ---------------------------------------------------------------------------
+
+
+class TestParseLlmParamsNewFields:
+    """Round-trip tests for batch-2 fields via :func:`parse_llm_params`."""
+
+    def test_memory_avgrss(self) -> None:
+        """avgrss parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "avgrss", "site": "CERN"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "avgrss"
+        assert result["metric"] == "avg"
+
+    def test_memory_maxrss(self) -> None:
+        """maxrss parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "maxrss", "site": "BNL"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "maxrss"
+
+    def test_cpu_efficiency(self) -> None:
+        """cpu_eff parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "cpu_eff", "site": "IN2P3"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "cpu_eff"
+
+    def test_hs06sec(self) -> None:
+        """hs06sec parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "sum", "field": "hs06sec", "site": "TRIUMF"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "hs06sec"
+        assert result["metric"] == "sum"
+
+    def test_cpuconsumptiontime(self) -> None:
+        """cpuconsumptiontime (seconds) parses as a valid numeric field."""
+        raw = json.dumps({"metric": "sum", "field": "cpuconsumptiontime"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "cpuconsumptiontime"
+
+    def test_inputfilebytes(self) -> None:
+        """inputfilebytes (bytes) parses as a valid numeric field."""
+        raw = json.dumps({"metric": "avg", "field": "inputfilebytes", "site": "BNL"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "inputfilebytes"
+
+    def test_ratewbytes(self) -> None:
+        """ratewbytes (write throughput) parses as a valid numeric field."""
+        raw = json.dumps({"metric": "avg", "field": "ratewbytes", "site": "CERN"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "ratewbytes"
+
+    def test_gco2global(self) -> None:
+        """gco2global (g CO2) parses as a valid numeric field."""
+        raw = json.dumps({"metric": "avg", "field": "gco2global"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "gco2global"
+
+    def test_piloterrorcode(self) -> None:
+        """piloterrorcode parses as a valid numeric field."""
+        raw = json.dumps({"metric": "avg", "field": "piloterrorcode", "jobstatus": "failed"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "piloterrorcode"
+        assert result["jobstatus"] == "failed"
+
+    def test_ninputdatafiles(self) -> None:
+        """ninputdatafiles (count) parses as a valid numeric field."""
+        raw = json.dumps({"metric": "avg", "field": "ninputdatafiles", "site": "BNL"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "ninputdatafiles"
+
+    def test_keyword_field_rejected(self) -> None:
+        """task_campaign (keyword) is rejected and replaced with DEFAULT_FIELD."""
+        raw = json.dumps({"metric": "avg", "field": "task_campaign"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == DEFAULT_FIELD
+
+    def test_batchid_rejected(self) -> None:
+        """batchid (keyword) is rejected and replaced with DEFAULT_FIELD."""
+        raw = json.dumps({"metric": "avg", "field": "batchid"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == DEFAULT_FIELD
+
+
+# ---------------------------------------------------------------------------
 # _error_evidence and _cannot_answer_evidence
 # ---------------------------------------------------------------------------
 
@@ -359,16 +629,25 @@ class TestErrorEvidence:
         assert ev["error"] is not None
         assert ev["value"] is None
         assert ev["question"] == "What is the CPU count per site?"
-        assert "timing" in ev["error"].lower()
+
+    def test_cannot_answer_evidence_endpoint(self) -> None:
+        """_cannot_answer_evidence endpoint matches INDEX_PATTERN."""
+        ev = _cannot_answer_evidence("irrelevant")
+        assert ev["endpoint"] == INDEX_PATTERN
+
+    def test_error_evidence_endpoint(self) -> None:
+        """_error_evidence endpoint matches INDEX_PATTERN."""
+        ev = _error_evidence("avg", "avgrss", None, None, None, None, None, detail="x")
+        assert ev["endpoint"] == INDEX_PATTERN
 
 
 # ---------------------------------------------------------------------------
-# fetch_job_timing (OpenSearch mocked)
+# fetch_job_stats (OpenSearch mocked)
 # ---------------------------------------------------------------------------
 
 
-class TestFetchJobTiming:
-    """Unit tests for :func:`fetch_job_timing` with OpenSearch mocked."""
+class TestFetchJobStats:
+    """Unit tests for :func:`fetch_job_stats` with OpenSearch mocked."""
 
     def _run(
         self,
@@ -382,7 +661,7 @@ class TestFetchJobTiming:
         from_dt: str | None = "2026-06-01T00:00:00",
         to_dt: str | None = "2026-06-08T00:00:00",
     ) -> dict[str, Any]:
-        """Execute fetch_job_timing with patched OpenSearch.
+        """Execute fetch_job_stats with patched OpenSearch.
 
         Args:
             value: Aggregation value to return from the mock.
@@ -396,13 +675,13 @@ class TestFetchJobTiming:
             to_dt: Upper time bound.
 
         Returns:
-            Evidence dict from fetch_job_timing.
+            Evidence dict from fetch_job_stats.
         """
         mock_response = _mock_os_response(value, doc_count)
 
         with (
             patch(
-                "askpanda_atlas.job_timing_impl._create_os_client",
+                "askpanda_atlas.job_stats_impl._create_os_client",
                 return_value=MagicMock(),
             ),
             patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
@@ -410,12 +689,12 @@ class TestFetchJobTiming:
         ):
             from askpanda_atlas._cache import invalidate
             cache_key = (
-                f"job_timing:{metric}|{field}|{site or ''}|"
+                f"job_stats:{metric}|{field}|{site or ''}|"
                 f"{jobstatus or ''}|{jeditaskid or ''}|"
                 f"{from_dt or ''}|{to_dt or ''}"
             )
             invalidate(cache_key)
-            return fetch_job_timing(
+            return fetch_job_stats(
                 metric, field, site, jobstatus, jeditaskid, from_dt, to_dt
             )
 
@@ -462,6 +741,25 @@ class TestFetchJobTiming:
         result = self._run(value=1.0)
         assert result["endpoint"] == INDEX_PATTERN
 
+    def test_memory_field_avg(self) -> None:
+        """avg aggregation on avgrss returns value and correct field."""
+        result = self._run(value=512000.0, field="avgrss", metric="avg")
+        assert result["field"] == "avgrss"
+        assert result["value"] == 512000.0
+        assert result["error"] is None
+
+    def test_cpu_eff_field(self) -> None:
+        """avg aggregation on cpu_eff returns value and correct field."""
+        result = self._run(value=78.5, field="cpu_eff", metric="avg")
+        assert result["field"] == "cpu_eff"
+        assert result["value"] == 78.5
+
+    def test_hs06sec_field(self) -> None:
+        """sum aggregation on hs06sec returns value and correct field."""
+        result = self._run(value=9999999, field="hs06sec", metric="sum")
+        assert result["field"] == "hs06sec"
+        assert result["metric"] == "sum"
+
     def test_missing_password_raises(self) -> None:
         """RuntimeError is raised when ASKPANDA_OPENSEARCH is not set."""
         from askpanda_atlas._cache import clear as _clear
@@ -472,16 +770,16 @@ class TestFetchJobTiming:
         ):
             os.environ.pop("ASKPANDA_OPENSEARCH", None)
             with pytest.raises(RuntimeError, match="ASKPANDA_OPENSEARCH"):
-                fetch_job_timing("avg", "job_walltime")
+                fetch_job_stats("avg", "job_walltime")
 
 
 # ---------------------------------------------------------------------------
-# PandaJobTimingTool.call()
+# PandaJobStatsTool.call()
 # ---------------------------------------------------------------------------
 
 
-class TestPandaJobTimingTool:
-    """Integration tests for :class:`PandaJobTimingTool`."""
+class TestPandaJobStatsTool:
+    """Integration tests for :class:`PandaJobStatsTool`."""
 
     def _call(
         self,
@@ -506,11 +804,11 @@ class TestPandaJobTimingTool:
 
         with (
             patch(
-                "askpanda_atlas.job_timing_impl._call_llm_for_params",
+                "askpanda_atlas.job_stats_impl._call_llm_for_params",
                 new=AsyncMock(return_value=llm_reply),
             ),
             patch(
-                "askpanda_atlas.job_timing_impl._create_os_client",
+                "askpanda_atlas.job_stats_impl._create_os_client",
                 return_value=MagicMock(),
             ),
             patch(
@@ -522,7 +820,7 @@ class TestPandaJobTimingTool:
         ):
             from askpanda_atlas._cache import clear as _clear
             _clear()
-            tool = PandaJobTimingTool()
+            tool = PandaJobStatsTool()
             return _unpack(asyncio.run(tool.call(arguments)))
 
     def test_successful_call_returns_value(self) -> None:
@@ -533,6 +831,36 @@ class TestPandaJobTimingTool:
         assert ev["error"] is None
         assert ev["value"] == 42.0
         assert ev["field"] == "pilottiming_stagein"
+
+    def test_memory_query_returns_value(self) -> None:
+        """Memory field query returns correct field in evidence."""
+        llm_reply = json.dumps({"metric": "avg", "field": "avgrss", "site": "CERN"})
+        result = self._call({"question": "What is the average RSS at CERN?"}, llm_reply)
+        ev = result["evidence"]
+        assert ev["error"] is None
+        assert ev["field"] == "avgrss"
+
+    def test_cpu_eff_query_returns_value(self) -> None:
+        """CPU efficiency query returns correct field in evidence."""
+        llm_reply = json.dumps({"metric": "avg", "field": "cpu_eff", "site": "IN2P3"})
+        result = self._call({"question": "What is the CPU efficiency at IN2P3?"}, llm_reply)
+        ev = result["evidence"]
+        assert ev["field"] == "cpu_eff"
+
+    def test_hs06sec_query_returns_value(self) -> None:
+        """HS06-seconds query returns correct field in evidence."""
+        llm_reply = json.dumps({"metric": "sum", "field": "hs06sec", "site": "TRIUMF"})
+        result = self._call({"question": "Total HS06-seconds at TRIUMF today?"}, llm_reply)
+        ev = result["evidence"]
+        assert ev["field"] == "hs06sec"
+        assert ev["metric"] == "sum"
+
+    def test_io_query_returns_value(self) -> None:
+        """I/O bytes field query returns correct field in evidence."""
+        llm_reply = json.dumps({"metric": "avg", "field": "inputfilebytes", "site": "BNL"})
+        result = self._call({"question": "Average input file size at BNL?"}, llm_reply)
+        ev = result["evidence"]
+        assert ev["field"] == "inputfilebytes"
 
     def test_cannot_answer_returns_error_evidence(self) -> None:
         """CANNOT_ANSWER from LLM returns error evidence, does not raise."""
@@ -551,7 +879,6 @@ class TestPandaJobTimingTool:
             {"question": "avg wall time?", "site": "BNL"},
             llm_reply,
         )
-        # site should have been overridden to BNL
         ev = result["evidence"]
         assert ev["site_filter"] == "BNL"
 
@@ -567,7 +894,7 @@ class TestPandaJobTimingTool:
         """Empty question returns an error without calling the LLM."""
         mock_tc = lambda s: [{"type": "text", "text": s}]  # noqa: E731
         with patch("bamboo.tools.base.text_content", side_effect=mock_tc):
-            tool = PandaJobTimingTool()
+            tool = PandaJobStatsTool()
             result = _unpack(asyncio.run(tool.call({"question": "  "})))
         assert result["evidence"]["error"] is not None
 
@@ -576,26 +903,38 @@ class TestPandaJobTimingTool:
         mock_tc = lambda s: [{"type": "text", "text": s}]  # noqa: E731
         with (
             patch(
-                "askpanda_atlas.job_timing_impl._call_llm_for_params",
+                "askpanda_atlas.job_stats_impl._call_llm_for_params",
                 new=AsyncMock(side_effect=RuntimeError("LLM down")),
             ),
             patch("bamboo.tools.base.text_content", side_effect=mock_tc),
         ):
-            tool = PandaJobTimingTool()
+            tool = PandaJobStatsTool()
             result = _unpack(asyncio.run(tool.call({"question": "avg stagein?"})))
         assert result["evidence"]["error"] is not None
 
     def test_singleton_instance(self) -> None:
-        """Module-level singleton is a PandaJobTimingTool."""
-        assert isinstance(panda_job_timing_tool, PandaJobTimingTool)
+        """Module-level singleton is a PandaJobStatsTool."""
+        assert isinstance(panda_job_stats_tool, PandaJobStatsTool)
 
     def test_get_definition_name(self) -> None:
-        """Tool definition name is 'panda_job_timing'."""
-        tool = PandaJobTimingTool()
-        assert tool.get_definition()["name"] == "panda_job_timing"
+        """Tool definition name is 'panda_job_stats'."""
+        tool = PandaJobStatsTool()
+        assert tool.get_definition()["name"] == "panda_job_stats"
 
     def test_get_definition_has_required_question(self) -> None:
         """Tool definition marks question as required."""
-        tool = PandaJobTimingTool()
+        tool = PandaJobStatsTool()
         schema = tool.get_definition()["inputSchema"]
         assert "question" in schema["required"]
+
+    def test_get_definition_mentions_memory(self) -> None:
+        """Tool description mentions memory fields."""
+        tool = PandaJobStatsTool()
+        desc = tool.get_definition()["description"].lower()
+        assert "memory" in desc
+
+    def test_get_definition_mentions_cpu(self) -> None:
+        """Tool description mentions CPU efficiency."""
+        tool = PandaJobStatsTool()
+        desc = tool.get_definition()["description"].lower()
+        assert "cpu" in desc
