@@ -1,8 +1,8 @@
-"""Implementation of ``panda_job_timing`` — NL queries against job timing data.
+"""Implementation of ``panda_job_stats`` — NL queries against job stats data.
 
 Translates a natural-language question into OpenSearch aggregation parameters,
 executes a single-value metric aggregation against the
-``atlas_panda_job_timing-*`` index, and returns a compact evidence dict
+``atlas_panda_job_stats-*`` index, and returns a compact evidence dict
 structured for LLM synthesis by the Bamboo executor.
 
 Pipeline
@@ -31,9 +31,9 @@ ASKPANDA_OPENSEARCH_VERIFY_CERTS
 Public surface
 --------------
 - ``get_definition()``           — MCP tool definition dict
-- ``PandaJobTimingTool``         — MCP tool class
-- ``panda_job_timing_tool``      — module-level singleton
-- ``fetch_job_timing(...)``      — synchronous OpenSearch query
+- ``PandaJobStatsTool``          — MCP tool class
+- ``panda_job_stats_tool``       — module-level singleton
+- ``fetch_job_stats(...)``       — synchronous OpenSearch query
 - ``parse_llm_params(...)``      — validate/normalise LLM-extracted params
 """
 from __future__ import annotations
@@ -72,7 +72,7 @@ def _create_os_client() -> Any:
     if not password:
         raise RuntimeError(
             "Environment variable ASKPANDA_OPENSEARCH is not set. "
-            "Set it to your OpenSearch password to enable job timing queries."
+            "Set it to your OpenSearch password to enable job stats queries."
         )
     return _shared(password)
 
@@ -85,12 +85,12 @@ def _create_os_client() -> Any:
 def _default_window() -> tuple[str, str]:
     """Return ISO-8601 strings for the default look-back window ending now.
 
-    The window length is :data:`~job_timing_schema.DEFAULT_WINDOW_HOURS` hours.
+    The window length is :data:`~job_stats_schema.DEFAULT_WINDOW_HOURS` hours.
 
     Returns:
         ``(from_dt_iso, to_dt_iso)`` formatted as ``YYYY-MM-DDTHH:MM:SS``.
     """
-    from askpanda_atlas.job_timing_schema import DEFAULT_WINDOW_HOURS  # deferred
+    from askpanda_atlas.job_stats_schema import DEFAULT_WINDOW_HOURS  # deferred
 
     now = datetime.now(tz=timezone.utc).replace(microsecond=0)
     start = now - timedelta(hours=DEFAULT_WINDOW_HOURS)
@@ -123,7 +123,7 @@ async def _call_llm_for_params(question: str) -> str:
     """
     from bamboo.llm.runtime import get_llm_manager, get_llm_selector  # deferred
     from bamboo.llm.types import GenerateParams, Message  # deferred
-    from askpanda_atlas.job_timing_schema import build_query_prompt  # deferred
+    from askpanda_atlas.job_stats_schema import build_query_prompt  # deferred
 
     selector = get_llm_selector()
     manager = get_llm_manager()
@@ -178,7 +178,7 @@ def _is_cannot_answer(text: str) -> bool:
         ``True`` if the reply matches the cannot-answer sentinel or a
         natural-language refusal phrase.
     """
-    from askpanda_atlas.job_timing_schema import CANNOT_ANSWER_SENTINEL  # deferred
+    from askpanda_atlas.job_stats_schema import CANNOT_ANSWER_SENTINEL  # deferred
 
     if text.upper() == CANNOT_ANSWER_SENTINEL:
         return True
@@ -232,7 +232,7 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
     Strips markdown code fences, detects ``CANNOT_ANSWER`` replies, then
     parses the JSON object and validates all keys against the schema.
     Unknown keys are silently dropped; missing optional keys are filled with
-    defaults from :mod:`job_timing_schema`.
+    defaults from :mod:`job_stats_schema`.
 
     Args:
         raw: Raw reply string from the LLM (may contain JSON or a sentinel).
@@ -242,7 +242,7 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
         ``site``, ``jobstatus``, ``jeditaskid``, ``from_dt``, ``to_dt``,
         or ``None`` when the LLM signalled it cannot answer.
     """
-    from askpanda_atlas.job_timing_schema import (  # deferred
+    from askpanda_atlas.job_stats_schema import (  # deferred
         DEFAULT_FIELD,
         DEFAULT_METRIC,
         NUMERIC_FIELDS,
@@ -257,7 +257,7 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        logger.debug("panda_job_timing: LLM reply is not valid JSON: %r", text[:200])
+        logger.debug("panda_job_stats: LLM reply is not valid JSON: %r", text[:200])
         return None
 
     if not isinstance(parsed, dict):
@@ -266,13 +266,13 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
     # Validate and normalise metric.
     metric = str(parsed.get("metric") or DEFAULT_METRIC).strip().lower()
     if metric not in VALID_METRICS:
-        logger.debug("panda_job_timing: unknown metric %r, using default", metric)
+        logger.debug("panda_job_stats: unknown metric %r, using default", metric)
         metric = DEFAULT_METRIC
 
     # Validate and normalise field.
     field = str(parsed.get("field") or DEFAULT_FIELD).strip()
     if field not in NUMERIC_FIELDS:
-        logger.debug("panda_job_timing: non-numeric field %r, using default", field)
+        logger.debug("panda_job_stats: non-numeric field %r, using default", field)
         field = DEFAULT_FIELD
 
     return {
@@ -291,7 +291,7 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_job_timing(
+def fetch_job_stats(
     metric: str,
     field: str,
     site: str | None = None,
@@ -300,11 +300,11 @@ def fetch_job_timing(
     from_dt: str | None = None,
     to_dt: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a single-value metric aggregation against the job timing index.
+    """Execute a single-value metric aggregation against the job stats index.
 
     Creates a fresh OpenSearch client per call.  Checks the module-level
     cache first; on a miss executes the query and caches the result for
-    :data:`~job_timing_schema.CACHE_TTL_SECS` seconds.
+    :data:`~job_stats_schema.CACHE_TTL_SECS` seconds.
 
     The query applies optional ``term`` filters for ``computingsite``,
     ``jobstatus``, and ``jeditaskid``, an optional ``range`` filter on
@@ -336,7 +336,7 @@ def fetch_job_timing(
             installed.
     """
     from askpanda_atlas._cache import _MISS, _get, _set  # deferred
-    from askpanda_atlas.job_timing_schema import CACHE_PREFIX, CACHE_TTL_SECS, INDEX_PATTERN  # deferred
+    from askpanda_atlas.job_stats_schema import CACHE_PREFIX, CACHE_TTL_SECS, INDEX_PATTERN  # deferred
 
     cache_key = (
         f"{CACHE_PREFIX}{metric}|{field}|{site or ''}|"
@@ -345,7 +345,7 @@ def fetch_job_timing(
     )
     cached = _get(cache_key)
     if cached is not _MISS:
-        logger.debug("panda_job_timing: cache hit for %s", cache_key)
+        logger.debug("panda_job_stats: cache hit for %s", cache_key)
         return cached  # type: ignore[return-value]
 
     client = _create_os_client()
@@ -374,7 +374,7 @@ def fetch_job_timing(
         s = s.filter("wildcard", **{"computingsite.keyword": f"*{site}*"})
 
     # Metric aggregation.
-    agg_name = "timing_value"
+    agg_name = "stats_value"
     s.aggs.metric(agg_name, metric, field=field)
 
     response = s.execute()
@@ -399,7 +399,7 @@ def fetch_job_timing(
 
     _set(cache_key, evidence, CACHE_TTL_SECS)
     logger.debug(
-        "panda_job_timing: %s(%s) = %s  doc_count=%d  site=%r  status=%r",
+        "panda_job_stats: %s(%s) = %s  doc_count=%d  site=%r  status=%r",
         metric, field, value, doc_count, site, jobstatus,
     )
     return evidence
@@ -438,9 +438,9 @@ def _error_evidence(
     Returns:
         Evidence dict with ``error`` populated and ``value`` set to ``None``.
     """
-    from askpanda_atlas.job_timing_schema import INDEX_PATTERN  # deferred
+    from askpanda_atlas.job_stats_schema import INDEX_PATTERN  # deferred
 
-    logger.debug("panda_job_timing error: %s", detail)
+    logger.debug("panda_job_stats error: %s", detail)
     return {
         "metric": metric,
         "field": field,
@@ -453,7 +453,7 @@ def _error_evidence(
         "to_dt": to_dt,
         "endpoint": INDEX_PATTERN,
         "error": (
-            "Could not retrieve job timing data. "
+            "Could not retrieve job stats data. "
             "Check that ASKPANDA_OPENSEARCH is set and the OpenSearch "
             "cluster is reachable."
         ),
@@ -469,7 +469,7 @@ def _cannot_answer_evidence(question: str) -> dict[str, Any]:
     Returns:
         Evidence dict with a user-safe error message.
     """
-    from askpanda_atlas.job_timing_schema import INDEX_PATTERN  # deferred
+    from askpanda_atlas.job_stats_schema import INDEX_PATTERN  # deferred
 
     return {
         "metric": None,
@@ -483,11 +483,12 @@ def _cannot_answer_evidence(question: str) -> dict[str, Any]:
         "to_dt": None,
         "endpoint": INDEX_PATTERN,
         "error": (
-            "I wasn't able to translate that question into a job timing query. "
-            "Try asking about a specific timing field — for example: "
+            "I wasn't able to translate that question into a job stats query. "
+            "Try asking about a specific field — for example: "
             "'What is the average stage-in time at BNL?', "
-            "'What is the total wall-clock time for finished jobs at CERN?', "
-            "or 'How many jobs ran at IN2P3 last week?'."
+            "'What is the average RSS memory usage at CERN?', "
+            "'What is the CPU efficiency at IN2P3 today?', "
+            "or 'How many jobs ran at BNL today?'."
         ),
         "question": question,
     }
@@ -499,23 +500,26 @@ def _cannot_answer_evidence(question: str) -> dict[str, Any]:
 
 
 def get_definition() -> dict[str, Any]:
-    """Return the MCP tool definition for ``panda_job_timing``.
+    """Return the MCP tool definition for ``panda_job_stats``.
 
     Returns:
         Tool definition dict compatible with MCP discovery.
     """
     return {
-        "name": "panda_job_timing",
+        "name": "panda_job_stats",
         "description": (
-            "Answer natural-language questions about PanDA job timing and "
-            "performance by querying the OpenSearch atlas_panda_job_timing-* "
-            "index.  Use this tool when the user asks about job wall-clock "
-            "time, queue wait time, stage-in or stage-out duration, payload "
-            "execution time, pilot setup time, or job counts — for example: "
+            "Answer natural-language questions about PanDA job performance "
+            "and statistics by querying the OpenSearch atlas_panda_job_stats-* "
+            "index.  Use this tool when the user asks about job timing, memory "
+            "usage, CPU efficiency, HS06 accounting, I/O throughput, pilot or "
+            "execution errors, task/campaign context, or carbon footprint — "
+            "for example: "
             "'What is the average stage-in time at BNL?', "
-            "'What is the total wall-clock time for finished jobs at CERN?', "
-            "'How many jobs ran at IN2P3 last week?', "
-            "'What is the minimum queue time for failed jobs?'. "
+            "'What is the average RSS memory usage at CERN today?', "
+            "'What is the CPU efficiency at IN2P3 today?', "
+            "'What is the total HS06-seconds at TRIUMF today?', "
+            "'What is the average write throughput at CERN?', "
+            "or 'How many jobs ran at BNL today?'. "
             "Requires ASKPANDA_OPENSEARCH to be set."
         ),
         "inputSchema": {
@@ -524,7 +528,7 @@ def get_definition() -> dict[str, Any]:
                 "question": {
                     "type": "string",
                     "description": (
-                        "Natural-language question about PanDA job timing, "
+                        "Natural-language question about PanDA job performance, "
                         "e.g. 'What is the average stage-in time at BNL?'"
                     ),
                 },
@@ -562,12 +566,12 @@ def get_definition() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class PandaJobTimingTool:
-    """MCP tool that answers NL timing questions via OpenSearch aggregations.
+class PandaJobStatsTool:
+    """MCP tool that answers NL job-stats questions via OpenSearch aggregations.
 
     Translates the user's natural-language question into OpenSearch
     aggregation parameters using a single LLM call, then executes a
-    single-value metric aggregation against ``atlas_panda_job_timing-*``
+    single-value metric aggregation against ``atlas_panda_job_stats-*``
     and returns a compact evidence dict for Bamboo's central synthesiser.
     """
 
@@ -626,14 +630,14 @@ class PandaJobTimingTool:
         arg_from_dt: str | None = (arguments.get("from_dt") or "").strip() or None
         arg_to_dt: str | None = (arguments.get("to_dt") or "").strip() or None
 
-        logger.debug("panda_job_timing: question=%r", question)
+        logger.debug("panda_job_stats: question=%r", question)
 
         # ── Stage 1: LLM parameter extraction ─────────────────────────────
         try:
             raw_reply = await _call_llm_for_params(question)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("panda_job_timing: LLM call failed")
-            from askpanda_atlas.job_timing_schema import DEFAULT_FIELD, DEFAULT_METRIC  # deferred
+            logger.exception("panda_job_stats: LLM call failed")
+            from askpanda_atlas.job_stats_schema import DEFAULT_FIELD, DEFAULT_METRIC  # deferred
             ev = _error_evidence(
                 DEFAULT_METRIC, DEFAULT_FIELD,
                 arg_site, None, None, arg_from_dt, arg_to_dt,
@@ -643,7 +647,7 @@ class PandaJobTimingTool:
 
         params = parse_llm_params(raw_reply)
         if params is None:
-            logger.debug("panda_job_timing: LLM could not extract params")
+            logger.debug("panda_job_stats: LLM could not extract params")
             ev = _cannot_answer_evidence(question)
             return text_content(json.dumps({"evidence": ev}))
 
@@ -662,13 +666,13 @@ class PandaJobTimingTool:
             params["to_dt"] = default_to
 
         logger.debug(
-            "panda_job_timing: params=%s", json.dumps(params, default=str)
+            "panda_job_stats: params=%s", json.dumps(params, default=str)
         )
 
         # ── Stage 2: OpenSearch aggregation ───────────────────────────────
         try:
             evidence = await asyncio.to_thread(
-                fetch_job_timing,
+                fetch_job_stats,
                 params["metric"],
                 params["field"],
                 params["site"],
@@ -679,7 +683,7 @@ class PandaJobTimingTool:
             )
             return text_content(json.dumps({"evidence": evidence}))
         except Exception as exc:  # noqa: BLE001
-            logger.exception("panda_job_timing: OpenSearch query failed")
+            logger.exception("panda_job_stats: OpenSearch query failed")
             ev = _error_evidence(
                 params["metric"], params["field"],
                 params["site"], params["jobstatus"], params["jeditaskid"],
@@ -689,10 +693,10 @@ class PandaJobTimingTool:
             return text_content(json.dumps({"evidence": ev}))
 
 
-panda_job_timing_tool = PandaJobTimingTool()
+panda_job_stats_tool = PandaJobStatsTool()
 
 __all__ = [
-    "PandaJobTimingTool",
+    "PandaJobStatsTool",
     "_cannot_answer_evidence",
     "_default_window",
     "_error_evidence",
@@ -700,8 +704,8 @@ __all__ = [
     "_is_cannot_answer",
     "_str_or_none",
     "_strip_llm_fences",
-    "fetch_job_timing",
+    "fetch_job_stats",
     "get_definition",
-    "panda_job_timing_tool",
+    "panda_job_stats_tool",
     "parse_llm_params",
 ]
