@@ -406,6 +406,71 @@ def fetch_job_stats(
 
 
 # ---------------------------------------------------------------------------
+# OpenSearch exception → user-facing message
+# ---------------------------------------------------------------------------
+
+
+def _os_error_message(exc: BaseException) -> str:
+    """Translate an OpenSearch exception into a concise user-facing message.
+
+    Inspects the exception type and extracts HTTP status / reason where
+    available so the user sees a specific, actionable error rather than the
+    generic "check that ASKPANDA_OPENSEARCH is set" fallback.
+
+    Args:
+        exc: Exception raised by opensearch-py during query execution.
+
+    Returns:
+        A single-sentence string suitable for display in the Bamboo UI.
+    """
+    cls_name = type(exc).__name__
+
+    # AuthorizationException (HTTP 403) ― permissions problem, not connectivity.
+    if cls_name == "AuthorizationException":
+        return (
+            "Permission denied on atlas_panda_job_stats-* (HTTP 403). "
+            "Ask your OpenSearch admin to grant indices:data/read/search "
+            "for the pilot-monitor-agent account on this index pattern."
+        )
+
+    # NotFoundError (HTTP 404) ― index does not exist yet.
+    if cls_name == "NotFoundError":
+        return (
+            "Index atlas_panda_job_stats-* not found (HTTP 404). "
+            "The index may not have been created yet — check with Sasha."
+        )
+
+    # ConnectionError / ConnectionTimeout ― network or VPN issue.
+    if cls_name in ("ConnectionError", "ConnectionTimeout"):
+        return (
+            "Could not reach the OpenSearch cluster. "
+            "Check that you are on the CERN VPN and that "
+            "ASKPANDA_OPENSEARCH_HOST is correct."
+        )
+
+    # Generic TransportError ― include the HTTP status and reason if present.
+    if cls_name == "TransportError" or "TransportError" in cls_name:
+        status = getattr(exc, "status_code", None)
+        error = getattr(exc, "error", None)
+        if status and error:
+            return (
+                f"OpenSearch returned HTTP {status}: {error}. "
+                "Check cluster health and index availability."
+            )
+        if status:
+            return (
+                f"OpenSearch returned HTTP {status}. "
+                "Check cluster health and index availability."
+            )
+
+    # Fallback for anything else (e.g. SSLError, unexpected exceptions).
+    return (
+        "Could not retrieve job stats data. "
+        "Check that ASKPANDA_OPENSEARCH is set and the OpenSearch "
+        "cluster is reachable."
+    )
+
+# ---------------------------------------------------------------------------
 # Structured error constructor
 # ---------------------------------------------------------------------------
 
@@ -419,6 +484,7 @@ def _error_evidence(
     from_dt: str | None,
     to_dt: str | None,
     detail: str,
+    user_message: str | None = None,
 ) -> dict[str, Any]:
     """Return a structured evidence dict representing a fetch failure.
 
@@ -433,7 +499,9 @@ def _error_evidence(
         jeditaskid: Requested JEDI task ID filter, or ``None``.
         from_dt: Requested time-range lower bound, or ``None``.
         to_dt: Requested time-range upper bound, or ``None``.
-        detail: Internal error message for logging.
+        detail: Internal error message for logging (never shown to user).
+        user_message: Optional user-facing error string.  When omitted,
+            falls back to a generic connectivity message.
 
     Returns:
         Evidence dict with ``error`` populated and ``value`` set to ``None``.
@@ -441,6 +509,12 @@ def _error_evidence(
     from askpanda_atlas.job_stats_schema import INDEX_PATTERN  # deferred
 
     logger.debug("panda_job_stats error: %s", detail)
+    if user_message is None:
+        user_message = (
+            "Could not retrieve job stats data. "
+            "Check that ASKPANDA_OPENSEARCH is set and the OpenSearch "
+            "cluster is reachable."
+        )
     return {
         "metric": metric,
         "field": field,
@@ -452,11 +526,7 @@ def _error_evidence(
         "from_dt": from_dt,
         "to_dt": to_dt,
         "endpoint": INDEX_PATTERN,
-        "error": (
-            "Could not retrieve job stats data. "
-            "Check that ASKPANDA_OPENSEARCH is set and the OpenSearch "
-            "cluster is reachable."
-        ),
+        "error": user_message,
     }
 
 
@@ -689,6 +759,7 @@ class PandaJobStatsTool:
                 params["site"], params["jobstatus"], params["jeditaskid"],
                 params["from_dt"], params["to_dt"],
                 detail=repr(exc),
+                user_message=_os_error_message(exc),
             )
             return text_content(json.dumps({"evidence": ev}))
 
@@ -700,6 +771,7 @@ __all__ = [
     "_cannot_answer_evidence",
     "_default_window",
     "_error_evidence",
+    "_os_error_message",
     "_int_or_none",
     "_is_cannot_answer",
     "_str_or_none",

@@ -41,6 +41,7 @@ from askpanda_atlas.job_stats_impl import (
     _cannot_answer_evidence,
     _default_window,
     _error_evidence,
+    _os_error_message,
     fetch_job_stats,
     panda_job_stats_tool,
     parse_llm_params,
@@ -589,6 +590,97 @@ class TestParseLlmParamsNewFields:
         result = parse_llm_params(raw)
         assert result is not None
         assert result["field"] == DEFAULT_FIELD
+
+
+# ---------------------------------------------------------------------------
+# _os_error_message
+# ---------------------------------------------------------------------------
+
+
+class TestOsErrorMessage:
+    """Unit tests for :func:`_os_error_message`."""
+
+    def _exc(self, cls_name: str, status_code: int | None = None, error: str | None = None):
+        """Build a real exception instance whose class has the given name.
+
+        Uses ``type()`` to create a genuine exception subclass so that
+        ``type(exc).__name__`` returns *cls_name* exactly as
+        :func:`_os_error_message` expects.
+
+        Args:
+            cls_name: Desired ``__name__`` for the exception class.
+            status_code: Optional HTTP status code attribute.
+            error: Optional error reason attribute.
+
+        Returns:
+            Exception instance whose class is named *cls_name*.
+        """
+        attrs: dict = {}
+        if status_code is not None:
+            attrs["status_code"] = status_code
+        if error is not None:
+            attrs["error"] = error
+        exc_cls = type(cls_name, (Exception,), attrs)
+        return exc_cls(cls_name)
+
+    def test_authorization_exception_mentions_403(self) -> None:
+        """AuthorizationException message mentions HTTP 403."""
+        msg = _os_error_message(self._exc("AuthorizationException"))
+        assert "403" in msg
+
+    def test_authorization_exception_mentions_permissions(self) -> None:
+        """AuthorizationException message mentions permission."""
+        msg = _os_error_message(self._exc("AuthorizationException"))
+        assert "permission" in msg.lower()
+
+    def test_authorization_exception_names_index(self) -> None:
+        """AuthorizationException message names the index pattern."""
+        msg = _os_error_message(self._exc("AuthorizationException"))
+        assert "atlas_panda_job_stats-*" in msg
+
+    def test_not_found_mentions_404(self) -> None:
+        """NotFoundError message mentions HTTP 404."""
+        msg = _os_error_message(self._exc("NotFoundError"))
+        assert "404" in msg
+
+    def test_not_found_mentions_index(self) -> None:
+        """NotFoundError message mentions the index pattern."""
+        msg = _os_error_message(self._exc("NotFoundError"))
+        assert "atlas_panda_job_stats-*" in msg
+
+    def test_connection_error_mentions_vpn(self) -> None:
+        """ConnectionError message mentions VPN."""
+        msg = _os_error_message(self._exc("ConnectionError"))
+        assert "VPN" in msg
+
+    def test_connection_timeout_mentions_vpn(self) -> None:
+        """ConnectionTimeout message mentions VPN."""
+        msg = _os_error_message(self._exc("ConnectionTimeout"))
+        assert "VPN" in msg
+
+    def test_transport_error_with_status_and_reason(self) -> None:
+        """TransportError with status+reason includes both in message."""
+        msg = _os_error_message(self._exc("TransportError", status_code=503, error="service_unavailable"))
+        assert "503" in msg
+        assert "service_unavailable" in msg
+
+    def test_transport_error_status_only(self) -> None:
+        """TransportError with status but no reason still includes status."""
+        msg = _os_error_message(self._exc("TransportError", status_code=500))
+        assert "500" in msg
+
+    def test_unknown_exception_returns_generic(self) -> None:
+        """Unknown exception type returns the generic connectivity message."""
+        msg = _os_error_message(self._exc("SomeRandomError"))
+        assert "ASKPANDA_OPENSEARCH" in msg
+
+    def test_returns_string(self) -> None:
+        """Return value is always a non-empty string."""
+        for cls_name in ("AuthorizationException", "NotFoundError",
+                         "ConnectionError", "TransportError", "SSLError"):
+            msg = _os_error_message(self._exc(cls_name))
+            assert isinstance(msg, str)
+            assert len(msg) > 0
 
 
 # ---------------------------------------------------------------------------
