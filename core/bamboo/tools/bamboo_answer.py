@@ -681,14 +681,16 @@ _JOB_STATS_SIGNALS: frozenset[str] = frozenset({
     "co2",
     "gco2",
     "carbon footprint",
-    # Pilot and DDM errors (unambiguous — not in DuckDB)
-    "pilot error",
+    # Error field names only (unambiguous as OpenSearch field tokens).
+    # Bare phrases ("pilot error", "ddm error", "exe error") are excluded:
+    # "show jobs with pilot error code 1324" is a DuckDB listing question,
+    # not an OpenSearch aggregation — let the jobs-DB fast-path handle it.
     "piloterrorcode",
     "piloterrordiag",
-    "ddm error",
     "ddmerrorcode",
-    "exe error",
+    "ddmerrordiag",
     "exeerrorcode",
+    "exeerrordiag",
 })
 
 
