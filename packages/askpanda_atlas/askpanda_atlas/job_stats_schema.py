@@ -600,9 +600,14 @@ def build_query_prompt(question: str) -> list[dict[str, Any]]:
         current_utc_date=current_utc_date,
         week_ago_date=week_ago_date,
     )
+    user_content = (
+        f"[Current UTC date and time: {current_utc_datetime} — "
+        f"use this for ALL date calculations; do not use any other date]\n\n"
+        f"{question}"
+    )
     return [
         {"role": "system", "content": system_content},
-        {"role": "user", "content": question},
+        {"role": "user", "content": user_content},
     ]
 
 

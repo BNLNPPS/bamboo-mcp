@@ -178,10 +178,10 @@ class TestSchemaConstants:
         assert msgs[1]["role"] == "user"
 
     def test_build_query_prompt_embeds_question(self) -> None:
-        """User message contains the exact question string."""
+        """User message contains the question string (may have a date prefix)."""
         q = "How long does stage-out take at CERN?"
         msgs = build_query_prompt(q)
-        assert msgs[1]["content"] == q
+        assert q in msgs[1]["content"]
 
     def test_build_query_prompt_embeds_timing_field_names(self) -> None:
         """System message references core timing field names."""
