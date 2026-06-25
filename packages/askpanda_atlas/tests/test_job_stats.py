@@ -798,10 +798,11 @@ class TestFetchJobStats:
             _patch_os(mock_response),
         ):
             from askpanda_atlas._cache import invalidate
+            # Key must match fetch_job_stats exactly (includes group_by/top_n).
             cache_key = (
                 f"job_stats:{metric}|{field}|{site or ''}|"
                 f"{jobstatus or ''}|{jeditaskid or ''}|"
-                f"{from_dt or ''}|{to_dt or ''}"
+                f"{from_dt or ''}|{to_dt or ''}||5"
             )
             invalidate(cache_key)
             return fetch_job_stats(
