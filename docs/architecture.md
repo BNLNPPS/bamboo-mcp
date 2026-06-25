@@ -31,12 +31,34 @@ flowchart LR
 
 **Interfaces process** (TUI or Streamlit): the user-facing layer. It connects to the
 server via `MCPClientSync` (`interfaces/shared/mcp_client.py`), which holds an MCP
-`ClientSession` and communicates over JSON-RPC — either stdio (development) or HTTP
-(production).
+`ClientSession` and communicates over JSON-RPC 2.0 — either stdio (development) or
+streamable HTTP (production). On connection, the client sends an MCP `initialize`
+request; the server responds with its declared capabilities before any tool calls
+are accepted. The client then calls `list_tools` to discover the available tool
+catalog. Only after this handshake does the client begin issuing `tools/call`
+requests.
 
-**Server process** (`bamboo.server`): exposes tools via the MCP protocol. Once a
-`tools/call` arrives, everything that follows is in-process Python. There is no
-second wire crossing inside the server.
+**Server process** (`bamboo.server`): a fully standard MCP server built on the
+official MCP Python SDK (`mcp.server.Server`). The server strictly follows the MCP
+protocol at the wire level:
+
+- **Capability negotiation**: `list_tools` returns the active tool catalog filtered
+  to the configured plugin namespace, keeping the tool list sent to the client
+  minimal and experiment-specific.
+- **Argument validation**: every inbound `tools/call` is validated against the
+  tool's declared `inputSchema` before execution — required fields, `anyOf`
+  branches, and `additionalProperties` constraints are all enforced. An invalid
+  call is rejected with a descriptive error message rather than silently failing
+  inside tool logic.
+- **Bearer token authentication**: the HTTP transport enforces a token allowlist
+  (`BAMBOO_MCP_TOKENS` / `BAMBOO_MCP_TOKENS_FILE`). The stdio transport is
+  unaffected — it is inherently single-user and does not accept HTTP headers.
+- **Structured tracing**: every `tools/call` dispatch is wrapped in a tracing span
+  recording the tool name and argument keys, giving full observability over the
+  server side of the wire.
+
+Once a `tools/call` passes validation, everything that follows is in-process Python.
+There is no second wire crossing inside the server.
 
 ---
 
