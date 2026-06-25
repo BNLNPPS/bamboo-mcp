@@ -360,6 +360,8 @@ Requires `ASKPANDA_OPENSEARCH` to be set.
 > **Expected routing:** `route=FAST_PATH`, tool = `atlas.job_stats`.
 > **Check with `/inspect`:** evidence shows `metric`, `field`, `value`,
 > `doc_count`, `site_filter`, `jobstatus_filter`, `from_dt`, `to_dt`, `error` (null = success).
+> For group-by queries, evidence also shows `group_by`, `top_n`, and a `buckets` list
+> (each entry: `{"key": ..., "value": ..., "doc_count": ...}`) instead of a scalar `value`.
 > **Note:** `value: null` with `doc_count: 0` means the filter matched no documents —
 > try broadening the time range or removing the site filter.
 > **Note:** `hs06sec`, `gco2global`, and `gco2regional` may be null for
@@ -450,6 +452,47 @@ What is the total CO2 footprint at BNL today?
 
 > **Note:** CO2 fields (`gco2global`, `gco2regional`) may be null for many
 > jobs — query a larger time range if `value: null` is returned.
+
+### Per-site and grouped breakdowns (group-by queries)
+
+These questions trigger a terms aggregation bucketed by a keyword field.
+Evidence contains a `buckets` list ranked by the sub-metric value; the top
+bucket is the direct answer.
+
+```
+# Bucketed by computingsite
+Which site has the highest peak memory usage today?
+Which site has the worst CPU efficiency today?
+Which site has the highest average stage-in time today?
+Which site has the highest total HS06-seconds today?
+Which site has the highest average wall-clock time today?
+Which site has the highest average job queue time today?
+What is the average wall-clock time per site today?
+What is the average CPU efficiency per site today?
+What is the total HS06-seconds per site today?
+
+# Bucketed by tier
+What is the average stage-in time broken down by tier today?
+What is the average CPU efficiency by tier today?
+Which tier has the highest average memory usage today?
+
+# Bucketed by jobstatus
+What is the average wall-clock time per job status today?
+
+# Bucketed by task_type
+What is the average CPU efficiency per task type today?
+
+# Top-N variants (default 5 buckets)
+Show the top 10 sites by average stage-in time today?
+Show the top 3 sites by total HS06-seconds today?
+```
+
+> **Permitted group-by fields:** `computingsite`, `jobstatus`, `tier`,
+> `task_campaign`, `task_type`, `task_workinggroup`, `prodsourcelabel`,
+> `transfertype`, `inputfiletype`, `atlasrelease`, `country`,
+> `atlas_resource_type`.
+> Invalid `group_by` values are silently ignored and the query falls back
+> to the scalar path.
 
 ### Time-range variants
 

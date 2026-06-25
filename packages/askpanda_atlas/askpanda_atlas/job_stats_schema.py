@@ -10,6 +10,8 @@ It defines:
   schema (all confirmed fields: core identifiers, timing, I/O, errors, task
   context, software environment, CPU/HS06, memory, carbon, and infrastructure).
 * :data:`VALID_METRICS` — permitted OpenSearch aggregation types.
+* :data:`KEYWORD_GROUP_BY_FIELDS` — keyword fields permitted as ``group_by``
+  targets in terms aggregations.
 * :data:`DEFAULT_WINDOW_HOURS` — default look-back window when the caller
   omits ``from_dt`` / ``to_dt``.
 * :data:`CACHE_TTL_SECS` — result cache TTL.
@@ -413,6 +415,23 @@ ALL_FIELD_NAMES: frozenset[str] = frozenset(
 #: Permitted OpenSearch single-value metric aggregation types.
 VALID_METRICS: frozenset[str] = frozenset({"avg", "sum", "min", "max", "value_count"})
 
+#: Keyword fields permitted as ``group_by`` targets in terms aggregations.
+#: Only fields with ``keyword`` mapping in OpenSearch may be used for bucketing.
+KEYWORD_GROUP_BY_FIELDS: frozenset[str] = frozenset({
+    "computingsite",
+    "jobstatus",
+    "tier",
+    "task_campaign",
+    "task_type",
+    "task_workinggroup",
+    "prodsourcelabel",
+    "transfertype",
+    "inputfiletype",
+    "atlasrelease",
+    "country",
+    "atlas_resource_type",
+})
+
 #: Default metric when the caller does not specify one.
 DEFAULT_METRIC: str = "avg"
 
@@ -452,11 +471,10 @@ _FIELD_CONTEXT: str = "\n".join(
 
 #: System prompt template for NL → query-parameter extraction.
 _SYSTEM_TEMPLATE: str = """\
+TODAY={current_utc_date}  NOW={current_utc_datetime}
+
 You are a query-parameter extractor for an OpenSearch index that stores
 PanDA job statistics (index: atlas_panda_job_stats-*).
-
-Current UTC date and time: {current_utc_datetime}
-Today's date (UTC):        {current_utc_date}
 
 Available fields:
 {field_context}
@@ -480,11 +498,19 @@ these keys (all optional except none are required if you cannot answer):
                   Omit when no job status is mentioned.
   "jeditaskid"  : integer JEDI task ID filter.  Omit when not mentioned.
   "from_dt"     : ISO-8601 lower bound on @timestamp (= statechangetime).
-                  Compute from the current UTC date/time above.
+                  Compute from TODAY/NOW above.
                   Omit when the user does not specify a time range.
   "to_dt"       : ISO-8601 upper bound on @timestamp.
-                  Compute from the current UTC date/time above.
+                  Compute from TODAY/NOW above.
                   Omit when the user does not specify a time range.
+  "group_by"    : field to bucket results by, e.g. "computingsite",
+                  "jobstatus", "tier", "task_campaign".  Use when the
+                  question asks "which site", "per site", "by site",
+                  "breakdown by", "ranked by", etc.  Only keyword fields
+                  may be used here.  Omit for global (single-value)
+                  aggregations.
+  "top_n"       : number of top buckets to return (integer, default 5,
+                  max 20).  Only used when group_by is present.
 
 Rules:
 - If the user's question cannot be answered using the available fields and
@@ -502,11 +528,14 @@ Rules:
 - gco2global and gco2regional (CO2 footprint in grams) may be null.
 - I/O byte fields (inputfilebytes, outputfilebytes, totrbytes, totwbytes) are
   in bytes; throughput fields (raterbytes, ratewbytes) are in bytes/second.
-- IMPORTANT: all date/time values must be computed from the current UTC
-  date/time shown above.  Never invent or guess dates.
-  "today"     → from_dt: "{current_utc_date}T00:00:00", to_dt: "{current_utc_date}T23:59:59"
-  "last hour" → from_dt: subtract 1 hour from {current_utc_datetime}
-  "last 7 days" → from_dt: subtract 7 days from {current_utc_date}T00:00:00
+- DATE RULE: use TODAY={current_utc_date} and NOW={current_utc_datetime} for
+  every date calculation. Do not use any other date.
+  "today"       → from_dt: "{current_utc_date}T00:00:00",
+                  to_dt:   "{current_utc_date}T23:59:59"
+  "last hour"   → from_dt: "{one_hour_ago}",
+                  to_dt:   "{current_utc_datetime}"
+  "last 7 days" → from_dt: "{week_ago_date}T00:00:00",
+                  to_dt:   "{current_utc_date}T23:59:59"
 - Do not include null values — omit the key entirely when the value is absent.
 
 Examples (with today = {current_utc_date}):
@@ -563,6 +592,22 @@ Examples (with today = {current_utc_date}):
   "What is the minimum queue time for failed jobs?"
   → {{"metric": "min", "field": "job_queuetime", "jobstatus": "failed"}}
 
+  "Which site has the highest peak memory usage today?"
+  → {{"metric": "max", "field": "maxrss", "group_by": "computingsite",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "What is the average wall-clock time per site today?"
+  → {{"metric": "avg", "field": "job_walltime", "group_by": "computingsite",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "Which site has the worst CPU efficiency today?"
+  → {{"metric": "avg", "field": "cpu_eff", "group_by": "computingsite",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "What is the average stage-in time broken down by tier today?"
+  → {{"metric": "avg", "field": "pilottiming_stagein", "group_by": "tier",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
   "How many cores does each site have?"
   → CANNOT_ANSWER
 """
@@ -571,16 +616,22 @@ Examples (with today = {current_utc_date}):
 def build_query_prompt(question: str) -> list[dict[str, Any]]:
     """Build the LLM message list for query-parameter extraction.
 
-    Injects the current UTC date and time into the system prompt so the LLM
-    can compute concrete ISO-8601 timestamps for relative time expressions
-    such as "today", "last 7 days", or "last hour" without guessing the date.
+    Injects the current UTC date and time into both the system prompt and the
+    user message so the LLM can compute concrete ISO-8601 timestamps for
+    relative time expressions such as "today", "last 7 days", or "last hour"
+    without guessing the date.
+
+    The user-message prefix uses an imperative anchor ("TODAY IS … USE THESE
+    DATES ONLY.") that instruction-following models honour more reliably than
+    prose date blocks buried in a long system prompt.
 
     Args:
         question: Natural-language question from the user.
 
     Returns:
         A list of ``{"role": str, "content": str}`` dicts suitable for
-        passing to any Bamboo LLM provider.
+        passing to any Bamboo LLM provider.  The list always has two
+        elements: a system message and a user message.
     """
     import datetime  # deferred — only needed at prompt-build time
 
@@ -588,6 +639,7 @@ def build_query_prompt(question: str) -> list[dict[str, Any]]:
     current_utc_datetime = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
     current_utc_date = now_utc.strftime("%Y-%m-%d")
     week_ago_date = (now_utc - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    one_hour_ago = (now_utc - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
 
     numeric_list = ", ".join(sorted(NUMERIC_FIELDS))
     valid_metrics_list = ", ".join(sorted(VALID_METRICS))
@@ -599,10 +651,12 @@ def build_query_prompt(question: str) -> list[dict[str, Any]]:
         current_utc_datetime=current_utc_datetime,
         current_utc_date=current_utc_date,
         week_ago_date=week_ago_date,
+        one_hour_ago=one_hour_ago,
     )
     user_content = (
-        f"[Current UTC date and time: {current_utc_datetime} — "
-        f"use this for ALL date calculations; do not use any other date]\n\n"
+        f"TODAY IS {current_utc_date}. "
+        f"NOW IS {current_utc_datetime} UTC. "
+        f"USE THESE DATES ONLY.\n\n"
         f"{question}"
     )
     return [
@@ -621,6 +675,7 @@ __all__ = [
     "DEFAULT_WINDOW_HOURS",
     "INDEX_PATTERN",
     "JOB_STATS_FIELDS",
+    "KEYWORD_GROUP_BY_FIELDS",
     "NUMERIC_FIELDS",
     "VALID_METRICS",
     "build_query_prompt",

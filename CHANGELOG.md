@@ -6,6 +6,56 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Bug 1 — Date hallucination in `atlas.job_stats` (Mistral-specific)**
+  (`job_stats_schema.py`): Restructured the LLM prompt so the current date
+  is unmissable.  The system prompt now opens with a terse
+  `TODAY=<date>  NOW=<datetime>` anchor on line 1, followed by a `DATE RULE:`
+  block that contains the pre-computed concrete timestamps for "today",
+  "last hour", and "last 7 days" — no arithmetic left for the LLM to perform.
+  The verbose prose `Current UTC date and time:` block is removed.  The
+  user-message prefix is strengthened to `"TODAY IS <date>. NOW IS <datetime>
+  UTC. USE THESE DATES ONLY.\n\n<question>"` (imperative anchor Mistral
+  honours reliably).  The `one_hour_ago` timestamp is now pre-computed in
+  `build_query_prompt` and injected into the template.
+- **Bug 2 — "Which site has the highest X?" returned global max, not per-site**
+  (`job_stats_impl.py`, `job_stats_schema.py`, `bamboo_executor.py`): Added
+  optional `group_by` (keyword field to bucket by) and `top_n` (bucket count,
+  1–20, default 5) parameters throughout the pipeline:
+  - `parse_llm_params` now extracts and validates `group_by` against the new
+    `KEYWORD_GROUP_BY_FIELDS` constant; invalid values are silently rejected.
+  - `fetch_job_stats` gains a **terms path**: when `group_by` is set it
+    executes a terms + sub-aggregation query ordered descending by the
+    sub-metric, and returns a `buckets` list
+    (`[{"key": ..., "value": ..., "doc_count": ...}]`) instead of a scalar
+    `value`.  The existing scalar path is unaffected.
+  - Evidence dict now always contains `group_by`, `top_n`, `buckets`, and
+    `value` keys regardless of path, so the executor can inspect them reliably.
+  - `_error_evidence` and `_cannot_answer_evidence` updated to include the new
+    keys for structural consistency.
+  - `PandaJobStatsTool.call()` passes `group_by` and `top_n` through to
+    `fetch_job_stats`.
+  - Cache key updated to include `group_by` and `top_n`.
+  - `_SYSTEM_JOB_STATS` synthesis prompt updated to describe the buckets path
+    and how to present ranked results.
+
+### Added
+- **`KEYWORD_GROUP_BY_FIELDS`** (`job_stats_schema.py`): frozenset of 12
+  keyword fields permitted as `group_by` targets:
+  `computingsite`, `jobstatus`, `tier`, `task_campaign`, `task_type`,
+  `task_workinggroup`, `prodsourcelabel`, `transfertype`, `inputfiletype`,
+  `atlasrelease`, `country`, `atlas_resource_type`.
+- **37 new tests** (`test_job_stats.py`): 8 date-anchor tests
+  (`TestBuildQueryPromptDateAnchor`), 11 group-by parse tests
+  (`TestParseLlmParamsGroupBy`), 11 group-by fetch tests
+  (`TestGroupByFetchJobStats`), 4 end-to-end tool group-by tests
+  (`TestPandaJobStatsToolGroupBy`), plus 4 new `TestSchemaConstants`
+  assertions for `KEYWORD_GROUP_BY_FIELDS`.
+  Total test count: **158** (was 121).
+- **"Per-site and grouped breakdowns" section** (`docs/question-cheatsheet.md`):
+  group-by example questions, permitted `group_by` field list, and note on
+  invalid-field fallback behaviour.
+
 ### Added
 - **`atlas.job_stats` tool** (`packages/askpanda_atlas`): new OpenSearch-backed
   tool replacing `atlas.job_timing`, targeting the richer

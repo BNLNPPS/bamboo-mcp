@@ -32,6 +32,7 @@ from askpanda_atlas.job_stats_schema import (
     DEFAULT_WINDOW_HOURS,
     INDEX_PATTERN,
     JOB_STATS_FIELDS,
+    KEYWORD_GROUP_BY_FIELDS,
     NUMERIC_FIELDS,
     VALID_METRICS,
     build_query_prompt,
@@ -205,6 +206,23 @@ class TestSchemaConstants:
         system = msgs[0]["content"]
         assert "cpu_eff" in system
         assert "hs06sec" in system
+
+    def test_keyword_group_by_fields_is_frozenset(self) -> None:
+        """KEYWORD_GROUP_BY_FIELDS is a non-empty frozenset."""
+        assert isinstance(KEYWORD_GROUP_BY_FIELDS, frozenset)
+        assert len(KEYWORD_GROUP_BY_FIELDS) > 0
+
+    def test_keyword_group_by_fields_contains_computingsite(self) -> None:
+        """computingsite is a permitted group_by field."""
+        assert "computingsite" in KEYWORD_GROUP_BY_FIELDS
+
+    def test_keyword_group_by_fields_contains_tier(self) -> None:
+        """tier is a permitted group_by field."""
+        assert "tier" in KEYWORD_GROUP_BY_FIELDS
+
+    def test_keyword_group_by_fields_not_numeric(self) -> None:
+        """No KEYWORD_GROUP_BY_FIELDS member is also a numeric field."""
+        assert KEYWORD_GROUP_BY_FIELDS.isdisjoint(NUMERIC_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -1030,3 +1048,512 @@ class TestPandaJobStatsTool:
         tool = PandaJobStatsTool()
         desc = tool.get_definition()["description"].lower()
         assert "cpu" in desc
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 — Date anchor in user message
+# ---------------------------------------------------------------------------
+
+
+class TestBuildQueryPromptDateAnchor:
+    """Tests for the strengthened date anchor in build_query_prompt."""
+
+    def test_date_anchor_today_is_prefix_in_user_message(self) -> None:
+        """User message starts with 'TODAY IS <date>.' anchor."""
+        msgs = build_query_prompt("What is the average wall-clock time today?")
+        user_content = msgs[1]["content"]
+        assert user_content.startswith("TODAY IS ")
+
+    def test_date_anchor_contains_current_date(self) -> None:
+        """User message contains today's actual date string."""
+        import datetime
+
+        today = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%d")
+        msgs = build_query_prompt("What is the average wall-clock time today?")
+        assert today in msgs[1]["content"]
+
+    def test_date_anchor_contains_now_is(self) -> None:
+        """User message contains 'NOW IS' datetime anchor."""
+        msgs = build_query_prompt("avg stagein today?")
+        assert "NOW IS" in msgs[1]["content"]
+
+    def test_date_anchor_contains_use_these_dates_only(self) -> None:
+        """User message contains the imperative 'USE THESE DATES ONLY.'."""
+        msgs = build_query_prompt("avg stagein today?")
+        assert "USE THESE DATES ONLY." in msgs[1]["content"]
+
+    def test_question_still_present_after_anchor(self) -> None:
+        """The original question text still appears in the user message."""
+        q = "How long does stage-out take at CERN?"
+        msgs = build_query_prompt(q)
+        assert q in msgs[1]["content"]
+
+    def test_system_prompt_starts_with_today_equals(self) -> None:
+        """System prompt first line is 'TODAY=<date>  NOW=<datetime>'."""
+        msgs = build_query_prompt("test")
+        first_line = msgs[0]["content"].split("\n")[0]
+        assert first_line.startswith("TODAY=")
+        assert "NOW=" in first_line
+
+    def test_system_prompt_contains_date_rule(self) -> None:
+        """System prompt contains the 'DATE RULE:' section."""
+        msgs = build_query_prompt("test")
+        assert "DATE RULE:" in msgs[0]["content"]
+
+    def test_one_hour_ago_in_system_prompt(self) -> None:
+        """System prompt contains the pre-computed one-hour-ago timestamp."""
+        import datetime
+
+        # Compute expected one-hour-ago (truncated to minute for robustness).
+        one_hour_ago = (
+            datetime.datetime.now(tz=datetime.timezone.utc)
+            - datetime.timedelta(hours=1)
+        ).strftime("%Y-%m-%dT%H:%M")
+        msgs = build_query_prompt("test")
+        assert one_hour_ago[:16] in msgs[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 — parse_llm_params group-by extraction
+# ---------------------------------------------------------------------------
+
+
+class TestParseLlmParamsGroupBy:
+    """Tests for group_by and top_n extraction in :func:`parse_llm_params`."""
+
+    def test_group_by_computingsite_extracted(self) -> None:
+        """group_by=computingsite is accepted and returned."""
+        raw = json.dumps({
+            "metric": "max",
+            "field": "maxrss",
+            "group_by": "computingsite",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] == "computingsite"
+
+    def test_group_by_tier_extracted(self) -> None:
+        """group_by=tier is accepted."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "pilottiming_stagein",
+            "group_by": "tier",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] == "tier"
+
+    def test_group_by_task_campaign_extracted(self) -> None:
+        """group_by=task_campaign is accepted."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "task_campaign",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] == "task_campaign"
+
+    def test_invalid_group_by_rejected(self) -> None:
+        """Unknown group_by value is silently rejected (set to None)."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "pandaid",  # numeric, not a keyword group-by field
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] is None
+
+    def test_numeric_field_as_group_by_rejected(self) -> None:
+        """A numeric field is not a permitted group_by target."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "maxrss",  # numeric, not in KEYWORD_GROUP_BY_FIELDS
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] is None
+
+    def test_group_by_absent_defaults_to_none(self) -> None:
+        """Missing group_by key results in None (scalar path)."""
+        raw = json.dumps({"metric": "avg", "field": "job_walltime"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] is None
+
+    def test_top_n_extracted(self) -> None:
+        """top_n is extracted and returned when present."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "maxrss",
+            "group_by": "computingsite",
+            "top_n": 10,
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["top_n"] == 10
+
+    def test_top_n_defaults_to_five(self) -> None:
+        """top_n defaults to 5 when absent."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "computingsite",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["top_n"] == 5
+
+    def test_top_n_clamped_to_twenty(self) -> None:
+        """top_n > 20 is clamped to 20."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "computingsite",
+            "top_n": 99,
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["top_n"] == 20
+
+    def test_top_n_zero_defaults_to_five(self) -> None:
+        """top_n=0 (invalid) falls back to 5."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "computingsite",
+            "top_n": 0,
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["top_n"] == 5
+
+    def test_all_group_by_fields_accepted(self) -> None:
+        """All KEYWORD_GROUP_BY_FIELDS members are accepted."""
+        from askpanda_atlas.job_stats_schema import KEYWORD_GROUP_BY_FIELDS
+
+        for gb_field in KEYWORD_GROUP_BY_FIELDS:
+            raw = json.dumps({
+                "metric": "avg",
+                "field": "job_walltime",
+                "group_by": gb_field,
+            })
+            result = parse_llm_params(raw)
+            assert result is not None, f"group_by={gb_field!r} was rejected"
+            assert result["group_by"] == gb_field
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 — fetch_job_stats group-by path (OpenSearch mocked)
+# ---------------------------------------------------------------------------
+
+
+def _mock_terms_response(
+    buckets_data: list[tuple[str, float, int]],
+    total_doc_count: int = 10000,
+) -> MagicMock:
+    """Build a mock OpenSearch terms aggregation response.
+
+    Args:
+        buckets_data: List of ``(key, value, doc_count)`` tuples.
+        total_doc_count: Total hits.total.value.
+
+    Returns:
+        MagicMock matching the opensearch-dsl response structure for a
+        terms + sub-metric aggregation.
+    """
+    resp = MagicMock()
+    resp.hits.total.value = total_doc_count
+
+    mock_buckets = []
+    for key, value, doc_count in buckets_data:
+        b = MagicMock()
+        b.key = key
+        b.sub_metric.value = value
+        b.doc_count = doc_count
+        mock_buckets.append(b)
+
+    resp.aggregations.by_group.buckets = mock_buckets
+    return resp
+
+
+def _patch_os_terms(response: MagicMock):
+    """Return a context-manager stack that mocks OpenSearch for group-by queries.
+
+    Constructs a Search mock whose ``aggs.bucket()`` fluent chain returns
+    a bucket mock with a ``.metric()`` method, required for the group-by
+    aggregation code path.
+
+    Args:
+        response: Mock response object to return from ``Search.execute()``.
+    """
+    import unittest.mock as _mock
+
+    mock_search_instance = MagicMock()
+    mock_search_instance.extra.return_value = mock_search_instance
+    mock_search_instance.filter.return_value = mock_search_instance
+    mock_search_instance.execute.return_value = response
+
+    # Fluent chain for group-by: s.aggs.bucket(...).metric(...)
+    mock_bucket_agg = MagicMock()
+    mock_bucket_agg.metric.return_value = MagicMock()
+    mock_search_instance.aggs.bucket.return_value = mock_bucket_agg
+
+    # Scalar path: s.aggs.metric(...)
+    mock_search_instance.aggs.metric.return_value = MagicMock()
+
+    mock_search_cls = MagicMock(return_value=mock_search_instance)
+    mock_os_dsl = MagicMock()
+    mock_os_dsl.Search = mock_search_cls
+
+    return _mock.patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl})
+
+
+class TestGroupByFetchJobStats:
+    """Unit tests for :func:`fetch_job_stats` group-by terms path."""
+
+    def _run_group_by(
+        self,
+        buckets_data: list[tuple[str, float, int]],
+        metric: str = "max",
+        field: str = "maxrss",
+        group_by: str = "computingsite",
+        top_n: int = 5,
+        from_dt: str | None = "2026-06-25T00:00:00",
+        to_dt: str | None = "2026-06-25T23:59:59",
+    ) -> dict[str, Any]:
+        """Run fetch_job_stats with group-by and mock terms response.
+
+        Args:
+            buckets_data: List of ``(key, value, doc_count)`` tuples.
+            metric: Aggregation metric.
+            field: Field to aggregate.
+            group_by: Field to bucket by.
+            top_n: Number of top buckets.
+            from_dt: Lower time bound.
+            to_dt: Upper time bound.
+
+        Returns:
+            Evidence dict from fetch_job_stats.
+        """
+        mock_response = _mock_terms_response(buckets_data)
+
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            _patch_os_terms(mock_response),
+        ):
+            from askpanda_atlas._cache import clear as _clear
+            _clear()
+            return fetch_job_stats(
+                metric, field, group_by=group_by, top_n=top_n,
+                from_dt=from_dt, to_dt=to_dt,
+            )
+
+    def test_group_by_returns_buckets_key(self) -> None:
+        """Group-by evidence contains 'buckets' list."""
+        result = self._run_group_by([("BNL_ATLAS_1", 500000.0, 1234)])
+        assert "buckets" in result
+        assert isinstance(result["buckets"], list)
+
+    def test_group_by_bucket_structure(self) -> None:
+        """Each bucket has 'key', 'value', and 'doc_count' keys."""
+        result = self._run_group_by([("BNL_ATLAS_1", 500000.0, 1234)])
+        bucket = result["buckets"][0]
+        assert bucket["key"] == "BNL_ATLAS_1"
+        assert bucket["value"] == 500000.0
+        assert bucket["doc_count"] == 1234
+
+    def test_group_by_multiple_buckets_preserved(self) -> None:
+        """Multiple buckets are all returned."""
+        data = [
+            ("BNL_ATLAS_1", 500000.0, 1234),
+            ("CERN_PROD", 450000.0, 5678),
+            ("IN2P3", 420000.0, 890),
+        ]
+        result = self._run_group_by(data)
+        assert len(result["buckets"]) == 3
+
+    def test_group_by_value_is_none_in_evidence(self) -> None:
+        """Scalar 'value' key is None in group-by evidence."""
+        result = self._run_group_by([("BNL_ATLAS_1", 1.0, 100)])
+        assert result["value"] is None
+
+    def test_group_by_field_in_evidence(self) -> None:
+        """Evidence carries group_by field name."""
+        result = self._run_group_by([("BNL_ATLAS_1", 1.0, 100)])
+        assert result["group_by"] == "computingsite"
+
+    def test_group_by_top_n_in_evidence(self) -> None:
+        """Evidence carries top_n value."""
+        result = self._run_group_by([("BNL_ATLAS_1", 1.0, 100)], top_n=3)
+        assert result["top_n"] == 3
+
+    def test_group_by_error_is_none_on_success(self) -> None:
+        """Error is None on a successful group-by query."""
+        result = self._run_group_by([("BNL_ATLAS_1", 1.0, 100)])
+        assert result["error"] is None
+
+    def test_group_by_empty_buckets_handled(self) -> None:
+        """Empty bucket list is propagated correctly."""
+        result = self._run_group_by([])
+        assert result["buckets"] == []
+
+    def test_scalar_path_unaffected_by_group_by_param(self) -> None:
+        """group_by=None still executes the scalar path (returns value, not buckets)."""
+        mock_response = _mock_os_response(42.0, doc_count=100)
+
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            _patch_os(mock_response),
+        ):
+            from askpanda_atlas._cache import clear as _clear
+            _clear()
+            result = fetch_job_stats(
+                "avg", "job_walltime",
+                from_dt="2026-06-25T00:00:00",
+                to_dt="2026-06-25T23:59:59",
+                group_by=None,
+            )
+
+        assert result["value"] == 42.0
+        assert result["buckets"] is None
+        assert result["group_by"] is None
+
+    def test_group_by_top_n_clamped_in_fetch(self) -> None:
+        """top_n > 20 is clamped to 20 inside fetch_job_stats."""
+        result = self._run_group_by([], top_n=99)
+        assert result["top_n"] == 20
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 — PandaJobStatsTool group-by end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestPandaJobStatsToolGroupBy:
+    """Integration tests for group-by queries through :class:`PandaJobStatsTool`."""
+
+    def _call_group_by(
+        self,
+        question: str,
+        llm_reply: str,
+        buckets_data: list[tuple[str, float, int]] | None = None,
+    ) -> dict[str, Any]:
+        """Run tool.call() for a group-by query with patched LLM and OpenSearch.
+
+        Args:
+            question: Question to pass to the tool.
+            llm_reply: Raw JSON string the LLM returns.
+            buckets_data: Mock bucket data for the terms response.
+
+        Returns:
+            Deserialised evidence wrapper dict.
+        """
+        if buckets_data is None:
+            buckets_data = [
+                ("BNL_ATLAS_1", 308322392.0, 1234),
+                ("CERN_PROD", 290000000.0, 5678),
+            ]
+
+        mock_text_content = lambda s: [{"type": "text", "text": s}]  # noqa: E731
+        mock_response = _mock_terms_response(buckets_data)
+
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._call_llm_for_params",
+                new=AsyncMock(return_value=llm_reply),
+            ),
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "bamboo.tools.base.text_content",
+                side_effect=mock_text_content,
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            _patch_os_terms(mock_response),
+        ):
+            from askpanda_atlas._cache import clear as _clear
+            _clear()
+            tool = PandaJobStatsTool()
+            return _unpack(asyncio.run(tool.call({"question": question})))
+
+    def test_group_by_evidence_has_buckets(self) -> None:
+        """Group-by tool call returns evidence with buckets list."""
+        llm_reply = json.dumps({
+            "metric": "max",
+            "field": "maxrss",
+            "group_by": "computingsite",
+            "from_dt": "2026-06-25T00:00:00",
+            "to_dt": "2026-06-25T23:59:59",
+        })
+        result = self._call_group_by(
+            "Which site has the highest peak memory usage today?",
+            llm_reply,
+        )
+        ev = result["evidence"]
+        assert ev["error"] is None
+        assert ev["buckets"] is not None
+        assert isinstance(ev["buckets"], list)
+
+    def test_group_by_evidence_top_bucket_correct(self) -> None:
+        """Top bucket is the first entry in the buckets list."""
+        llm_reply = json.dumps({
+            "metric": "max",
+            "field": "maxrss",
+            "group_by": "computingsite",
+            "from_dt": "2026-06-25T00:00:00",
+            "to_dt": "2026-06-25T23:59:59",
+        })
+        result = self._call_group_by(
+            "Which site has the highest peak memory usage today?",
+            llm_reply,
+        )
+        ev = result["evidence"]
+        assert ev["buckets"][0]["key"] == "BNL_ATLAS_1"
+        assert ev["buckets"][0]["value"] == 308322392.0
+
+    def test_group_by_value_is_none(self) -> None:
+        """Scalar 'value' key is None when group_by is set."""
+        llm_reply = json.dumps({
+            "metric": "max",
+            "field": "maxrss",
+            "group_by": "computingsite",
+            "from_dt": "2026-06-25T00:00:00",
+            "to_dt": "2026-06-25T23:59:59",
+        })
+        result = self._call_group_by(
+            "Which site has the highest peak memory usage today?",
+            llm_reply,
+        )
+        assert result["evidence"]["value"] is None
+
+    def test_group_by_tier_bucketing(self) -> None:
+        """group_by=tier produces evidence with group_by=tier."""
+        llm_reply = json.dumps({
+            "metric": "avg",
+            "field": "pilottiming_stagein",
+            "group_by": "tier",
+            "from_dt": "2026-06-25T00:00:00",
+            "to_dt": "2026-06-25T23:59:59",
+        })
+        buckets = [("T1", 42.0, 5000), ("T2", 35.0, 8000), ("T3", 28.0, 1000)]
+        result = self._call_group_by(
+            "What is the average stage-in time by tier today?",
+            llm_reply,
+            buckets_data=buckets,
+        )
+        ev = result["evidence"]
+        assert ev["group_by"] == "tier"
+        assert len(ev["buckets"]) == 3

@@ -1,14 +1,14 @@
 """Implementation of ``panda_job_stats`` — NL queries against job stats data.
 
 Translates a natural-language question into OpenSearch aggregation parameters,
-executes a single-value metric aggregation against the
-``atlas_panda_job_stats-*`` index, and returns a compact evidence dict
-structured for LLM synthesis by the Bamboo executor.
+executes either a single-value metric aggregation or a terms+sub-aggregation
+(group-by) against the ``atlas_panda_job_stats-*`` index, and returns a
+compact evidence dict structured for LLM synthesis by the Bamboo executor.
 
 Pipeline
 --------
 1. LLM call (async): NL question → structured query parameters (JSON).
-2. Parameter validation and defaults.
+2. Parameter validation and defaults (including ``group_by`` / ``top_n``).
 3. Synchronous OpenSearch aggregation query (wrapped in
    ``asyncio.to_thread``).
 4. Evidence dict returned as MCP content.
@@ -240,11 +240,13 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
     Returns:
         Validated parameter dict with keys ``metric``, ``field``,
         ``site``, ``jobstatus``, ``jeditaskid``, ``from_dt``, ``to_dt``,
+        ``group_by``, and ``top_n``,
         or ``None`` when the LLM signalled it cannot answer.
     """
     from askpanda_atlas.job_stats_schema import (  # deferred
         DEFAULT_FIELD,
         DEFAULT_METRIC,
+        KEYWORD_GROUP_BY_FIELDS,
         NUMERIC_FIELDS,
         VALID_METRICS,
     )
@@ -275,6 +277,20 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
         logger.debug("panda_job_stats: non-numeric field %r, using default", field)
         field = DEFAULT_FIELD
 
+    # Validate group_by — only keyword fields are permitted.
+    raw_group_by = _str_or_none(parsed, "group_by")
+    if raw_group_by is not None and raw_group_by not in KEYWORD_GROUP_BY_FIELDS:
+        logger.debug(
+            "panda_job_stats: unsupported group_by %r, ignoring", raw_group_by
+        )
+        raw_group_by = None
+
+    # Validate top_n — must be a positive integer ≤ 20; default 5.
+    raw_top_n = _int_or_none(parsed, "top_n")
+    if raw_top_n is None or raw_top_n < 1:
+        raw_top_n = 5
+    top_n: int = min(raw_top_n, 20)
+
     return {
         "metric": metric,
         "field": field,
@@ -283,6 +299,8 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
         "jeditaskid": _int_or_none(parsed, "jeditaskid"),
         "from_dt": _str_or_none(parsed, "from_dt"),
         "to_dt": _str_or_none(parsed, "to_dt"),
+        "group_by": raw_group_by,
+        "top_n": top_n,
     }
 
 
@@ -299,17 +317,28 @@ def fetch_job_stats(
     jeditaskid: int | None = None,
     from_dt: str | None = None,
     to_dt: str | None = None,
+    group_by: str | None = None,
+    top_n: int = 5,
 ) -> dict[str, Any]:
-    """Execute a single-value metric aggregation against the job stats index.
+    """Execute a metric aggregation against the job stats index.
+
+    Supports two execution paths:
+
+    * **Scalar path** (``group_by=None``): executes a single-value metric
+      aggregation and returns a ``value`` key with the scalar result.
+    * **Terms path** (``group_by`` is a keyword field): executes a terms
+      aggregation bucketed by *group_by*, with a metric sub-aggregation per
+      bucket ordered descending.  Returns a ``buckets`` key (list of
+      ``{"key": ..., "value": ..., "doc_count": ...}`` dicts) instead of a
+      scalar ``value``.
 
     Creates a fresh OpenSearch client per call.  Checks the module-level
     cache first; on a miss executes the query and caches the result for
     :data:`~job_stats_schema.CACHE_TTL_SECS` seconds.
 
     The query applies optional ``term`` filters for ``computingsite``,
-    ``jobstatus``, and ``jeditaskid``, an optional ``range`` filter on
-    ``@timestamp``, and a single metric aggregation (``avg``, ``sum``,
-    ``min``, ``max``, or ``value_count``) over the requested *field*.
+    ``jobstatus``, and ``jeditaskid``, and an optional ``range`` filter on
+    ``@timestamp``.
 
     Args:
         metric: OpenSearch metric aggregation type (``avg``, ``sum``,
@@ -322,9 +351,15 @@ def fetch_job_stats(
         jeditaskid: Optional integer JEDI task ID filter.
         from_dt: Optional ISO-8601 lower bound on ``@timestamp``.
         to_dt: Optional ISO-8601 upper bound on ``@timestamp``.
+        group_by: Optional keyword field to bucket by (terms aggregation).
+            When set, the evidence dict contains a ``"buckets"`` list
+            instead of a scalar ``"value"``.
+        top_n: Number of top buckets to return when *group_by* is set.
+            Clamped to the range ``[1, 20]``; default is ``5``.
 
     Returns:
-        Evidence dict with keys ``metric``, ``field``, ``value``,
+        Evidence dict with keys ``metric``, ``field``, ``group_by``,
+        ``top_n``, ``value`` (scalar path) or ``buckets`` (terms path),
         ``doc_count``, ``site_filter``, ``jobstatus_filter``,
         ``jeditaskid_filter``, ``from_dt``, ``to_dt``, ``endpoint``,
         and ``error``.
@@ -338,10 +373,13 @@ def fetch_job_stats(
     from askpanda_atlas._cache import _MISS, _get, _set  # deferred
     from askpanda_atlas.job_stats_schema import CACHE_PREFIX, CACHE_TTL_SECS, INDEX_PATTERN  # deferred
 
+    top_n = max(1, min(top_n, 20))
+
     cache_key = (
         f"{CACHE_PREFIX}{metric}|{field}|{site or ''}|"
         f"{jobstatus or ''}|{jeditaskid or ''}|"
-        f"{from_dt or ''}|{to_dt or ''}"
+        f"{from_dt or ''}|{to_dt or ''}|"
+        f"{group_by or ''}|{top_n}"
     )
     cached = _get(cache_key)
     if cached is not _MISS:
@@ -373,19 +411,77 @@ def fetch_job_stats(
     if site:
         s = s.filter("wildcard", **{"computingsite.keyword": f"*{site}*"})
 
-    # Metric aggregation.
+    if group_by:
+        # ── Terms + sub-aggregation path ─────────────────────────────────
+        # Bucket by group_by field (uses the .keyword sub-field for keyword
+        # fields).  Sort buckets descending by the sub-metric value so the
+        # caller naturally gets the highest-value bucket first.
+        group_field = f"{group_by}.keyword"
+        (
+            s.aggs
+            .bucket("by_group", "terms",
+                    field=group_field,
+                    size=top_n,
+                    order={"sub_metric": "desc"})
+            .metric("sub_metric", metric, field=field)
+        )
+
+        response = s.execute()
+
+        doc_count: int = (
+            response.hits.total.value
+            if hasattr(response.hits.total, "value") else 0
+        )
+        buckets = [
+            {
+                "key": b.key,
+                "value": b.sub_metric.value,
+                "doc_count": b.doc_count,
+            }
+            for b in response.aggregations.by_group.buckets
+        ]
+
+        evidence: dict[str, Any] = {
+            "metric": metric,
+            "field": field,
+            "group_by": group_by,
+            "top_n": top_n,
+            "buckets": buckets,
+            "value": None,          # not used in group_by path
+            "doc_count": doc_count,
+            "site_filter": site,
+            "jobstatus_filter": jobstatus,
+            "jeditaskid_filter": jeditaskid,
+            "from_dt": from_dt,
+            "to_dt": to_dt,
+            "endpoint": INDEX_PATTERN,
+            "error": None,
+        }
+
+        _set(cache_key, evidence, CACHE_TTL_SECS)
+        logger.debug(
+            "panda_job_stats: %s(%s) grouped by %s  top_n=%d  "
+            "buckets=%d  doc_count=%d",
+            metric, field, group_by, top_n, len(buckets), doc_count,
+        )
+        return evidence
+
+    # ── Single-value scalar path ──────────────────────────────────────────
     agg_name = "stats_value"
     s.aggs.metric(agg_name, metric, field=field)
 
     response = s.execute()
 
-    doc_count: int = response.hits.total.value if hasattr(response.hits.total, "value") else 0
+    doc_count = response.hits.total.value if hasattr(response.hits.total, "value") else 0
     agg = response.aggregations[agg_name]
     value: float | int | None = getattr(agg, "value", None)
 
-    evidence: dict[str, Any] = {
+    evidence = {
         "metric": metric,
         "field": field,
+        "group_by": None,
+        "top_n": None,
+        "buckets": None,
         "value": value,
         "doc_count": doc_count,
         "site_filter": site,
@@ -485,6 +581,8 @@ def _error_evidence(
     to_dt: str | None,
     detail: str,
     user_message: str | None = None,
+    group_by: str | None = None,
+    top_n: int | None = None,
 ) -> dict[str, Any]:
     """Return a structured evidence dict representing a fetch failure.
 
@@ -502,6 +600,8 @@ def _error_evidence(
         detail: Internal error message for logging (never shown to user).
         user_message: Optional user-facing error string.  When omitted,
             falls back to a generic connectivity message.
+        group_by: Requested group-by field, or ``None``.
+        top_n: Requested bucket count, or ``None``.
 
     Returns:
         Evidence dict with ``error`` populated and ``value`` set to ``None``.
@@ -518,6 +618,9 @@ def _error_evidence(
     return {
         "metric": metric,
         "field": field,
+        "group_by": group_by,
+        "top_n": top_n,
+        "buckets": None,
         "value": None,
         "doc_count": 0,
         "site_filter": site,
@@ -544,6 +647,9 @@ def _cannot_answer_evidence(question: str) -> dict[str, Any]:
     return {
         "metric": None,
         "field": None,
+        "group_by": None,
+        "top_n": None,
+        "buckets": None,
         "value": None,
         "doc_count": 0,
         "site_filter": None,
@@ -750,6 +856,8 @@ class PandaJobStatsTool:
                 params["jeditaskid"],
                 params["from_dt"],
                 params["to_dt"],
+                params.get("group_by"),
+                params.get("top_n", 5),
             )
             return text_content(json.dumps({"evidence": evidence}))
         except Exception as exc:  # noqa: BLE001
@@ -760,6 +868,8 @@ class PandaJobStatsTool:
                 params["from_dt"], params["to_dt"],
                 detail=repr(exc),
                 user_message=_os_error_message(exc),
+                group_by=params.get("group_by"),
+                top_n=params.get("top_n"),
             )
             return text_content(json.dumps({"evidence": ev}))
 
