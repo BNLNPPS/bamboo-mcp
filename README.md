@@ -309,6 +309,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/developer.md`](docs/developer.md) | Full setup, editable installs, testing, linting |
 | [`docs/http-server.md`](docs/http-server.md) | Running the HTTP server for shared/testbed deployments |
 | [`docs/mcp.md`](docs/mcp.md) | MCP protocol, tool contracts, LLM roles, orchestration |
+| [`docs/architecture.md`](docs/architecture.md) | Process boundary, MCP wire, `bamboo_answer` routing flow |
 | [`docs/interfaces.md`](docs/interfaces.md) | TUI, Streamlit UI, HTTP transport, context memory |
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
 | [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
