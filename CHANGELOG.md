@@ -39,19 +39,45 @@ All notable changes to Bamboo are documented here.
   - `_SYSTEM_JOB_STATS` synthesis prompt updated to describe the buckets path
     and how to present ranked results.
 
+- **Bug 3 — "Which site has the worst X?" returned the best performers**
+  (`job_stats_impl.py`, `job_stats_schema.py`, `bamboo_executor.py`): The
+  terms aggregation was hardcoded to `order={"sub_metric": "desc"}`, so
+  questions asking for worst/lowest/least always returned the top performers.
+  Added an explicit `order` parameter (`"asc"` / `"desc"`, default `"desc"`)
+  throughout the group-by pipeline:
+  - `job_stats_schema.py`: `"order"` key added to the LLM response spec with
+    a clear rule — use `"asc"` for worst/lowest/least/bottom/poorest, `"desc"`
+    for highest/best/most/top/greatest (or omit).  The
+    `"Which site has the worst CPU efficiency today?"` example now correctly
+    includes `"order": "asc"`.  A second `"asc"` example added
+    (`"Which site has the lowest average stage-in time today?"`).
+  - `job_stats_impl.py`: `parse_llm_params` extracts and validates `order`
+    (invalid values fall back to `"desc"`); `fetch_job_stats` accepts `order`,
+    passes it to `bucket(..., order={"sub_metric": order})`, includes it in
+    the cache key and evidence dict (scalar path sets `order: None`);
+    `_error_evidence` and `_cannot_answer_evidence` include `order` key;
+    `PandaJobStatsTool.call()` threads `order` through.
+  - `bamboo_executor.py`: `_SYSTEM_JOB_STATS` group-by rule now references
+    the `order` field and tells the synthesiser to frame `"asc"` results as
+    "worst/lowest".
+- **Test cache-key bug** (`test_job_stats.py`): `TestFetchJobStats._run` was
+  building cache keys without the `group_by`/`top_n`/`order` suffixes added
+  in the previous session, causing `test_none_value_when_no_docs` to receive
+  a stale hit from `test_avg_returns_value` and assert `42.5 is None`.
+
 ### Added
 - **`KEYWORD_GROUP_BY_FIELDS`** (`job_stats_schema.py`): frozenset of 12
   keyword fields permitted as `group_by` targets:
   `computingsite`, `jobstatus`, `tier`, `task_campaign`, `task_type`,
   `task_workinggroup`, `prodsourcelabel`, `transfertype`, `inputfiletype`,
   `atlasrelease`, `country`, `atlas_resource_type`.
-- **37 new tests** (`test_job_stats.py`): 8 date-anchor tests
-  (`TestBuildQueryPromptDateAnchor`), 11 group-by parse tests
-  (`TestParseLlmParamsGroupBy`), 11 group-by fetch tests
-  (`TestGroupByFetchJobStats`), 4 end-to-end tool group-by tests
-  (`TestPandaJobStatsToolGroupBy`), plus 4 new `TestSchemaConstants`
-  assertions for `KEYWORD_GROUP_BY_FIELDS`.
-  Total test count: **158** (was 121).
+- **46 new tests** (`test_job_stats.py`): 8 date-anchor tests
+  (`TestBuildQueryPromptDateAnchor`), 17 group-by parse tests
+  (`TestParseLlmParamsGroupBy`, including 6 `order` cases), 15 group-by
+  fetch tests (`TestGroupByFetchJobStats`, including 4 `order` cases),
+  4 end-to-end tool group-by tests (`TestPandaJobStatsToolGroupBy`), plus
+  4 new `TestSchemaConstants` assertions for `KEYWORD_GROUP_BY_FIELDS`.
+  Total test count: **167** (was 121).
 - **"Per-site and grouped breakdowns" section** (`docs/question-cheatsheet.md`):
   group-by example questions, permitted `group_by` field list, and note on
   invalid-field fallback behaviour.

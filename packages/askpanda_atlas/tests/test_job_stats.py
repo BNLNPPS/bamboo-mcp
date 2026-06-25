@@ -798,11 +798,11 @@ class TestFetchJobStats:
             _patch_os(mock_response),
         ):
             from askpanda_atlas._cache import invalidate
-            # Key must match fetch_job_stats exactly (includes group_by/top_n).
+            # Key must match fetch_job_stats exactly (includes group_by/top_n/order).
             cache_key = (
                 f"job_stats:{metric}|{field}|{site or ''}|"
                 f"{jobstatus or ''}|{jeditaskid or ''}|"
-                f"{from_dt or ''}|{to_dt or ''}||5"
+                f"{from_dt or ''}|{to_dt or ''}||5|desc"
             )
             invalidate(cache_key)
             return fetch_job_stats(
@@ -1245,6 +1245,60 @@ class TestParseLlmParamsGroupBy:
             assert result is not None, f"group_by={gb_field!r} was rejected"
             assert result["group_by"] == gb_field
 
+    def test_order_asc_extracted(self) -> None:
+        """order='asc' is extracted and returned."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "cpu_eff",
+            "group_by": "computingsite",
+            "order": "asc",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["order"] == "asc"
+
+    def test_order_desc_extracted(self) -> None:
+        """order='desc' is extracted and returned."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "cpu_eff",
+            "group_by": "computingsite",
+            "order": "desc",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["order"] == "desc"
+
+    def test_order_absent_defaults_to_desc(self) -> None:
+        """Missing order key defaults to 'desc'."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "computingsite",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["order"] == "desc"
+
+    def test_order_invalid_defaults_to_desc(self) -> None:
+        """Unrecognised order value is replaced with 'desc'."""
+        raw = json.dumps({
+            "metric": "avg",
+            "field": "job_walltime",
+            "group_by": "computingsite",
+            "order": "random",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["order"] == "desc"
+
+    def test_order_present_without_group_by(self) -> None:
+        """order is parsed even when group_by is absent (scalar path ignores it)."""
+        raw = json.dumps({"metric": "avg", "field": "job_walltime", "order": "asc"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["order"] == "asc"
+
 
 # ---------------------------------------------------------------------------
 # Bug 2 — fetch_job_stats group-by path (OpenSearch mocked)
@@ -1322,6 +1376,7 @@ class TestGroupByFetchJobStats:
         field: str = "maxrss",
         group_by: str = "computingsite",
         top_n: int = 5,
+        order: str = "desc",
         from_dt: str | None = "2026-06-25T00:00:00",
         to_dt: str | None = "2026-06-25T23:59:59",
     ) -> dict[str, Any]:
@@ -1333,6 +1388,7 @@ class TestGroupByFetchJobStats:
             field: Field to aggregate.
             group_by: Field to bucket by.
             top_n: Number of top buckets.
+            order: Sort direction (``"desc"`` or ``"asc"``).
             from_dt: Lower time bound.
             to_dt: Upper time bound.
 
@@ -1352,7 +1408,7 @@ class TestGroupByFetchJobStats:
             from askpanda_atlas._cache import clear as _clear
             _clear()
             return fetch_job_stats(
-                metric, field, group_by=group_by, top_n=top_n,
+                metric, field, group_by=group_by, top_n=top_n, order=order,
                 from_dt=from_dt, to_dt=to_dt,
             )
 
@@ -1434,6 +1490,44 @@ class TestGroupByFetchJobStats:
         """top_n > 20 is clamped to 20 inside fetch_job_stats."""
         result = self._run_group_by([], top_n=99)
         assert result["top_n"] == 20
+
+    def test_group_by_default_order_is_desc(self) -> None:
+        """order defaults to 'desc' when not specified."""
+        result = self._run_group_by([("BNL_ATLAS_1", 1.0, 100)])
+        assert result["order"] == "desc"
+
+    def test_group_by_order_asc_stored_in_evidence(self) -> None:
+        """order='asc' is stored in evidence."""
+        result = self._run_group_by([("SITE_X", 10.0, 50)], order="asc")
+        assert result["order"] == "asc"
+
+    def test_group_by_order_desc_stored_in_evidence(self) -> None:
+        """order='desc' is stored in evidence."""
+        result = self._run_group_by([("SITE_X", 90.0, 50)], order="desc")
+        assert result["order"] == "desc"
+
+    def test_scalar_path_order_is_none(self) -> None:
+        """order is None in scalar-path evidence."""
+        mock_response = _mock_os_response(42.0, doc_count=100)
+
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            _patch_os(mock_response),
+        ):
+            from askpanda_atlas._cache import clear as _clear
+            _clear()
+            result = fetch_job_stats(
+                "avg", "job_walltime",
+                from_dt="2026-06-25T00:00:00",
+                to_dt="2026-06-25T23:59:59",
+                group_by=None,
+            )
+
+        assert result["order"] is None
 
 
 # ---------------------------------------------------------------------------

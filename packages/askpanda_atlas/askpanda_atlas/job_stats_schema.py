@@ -511,6 +511,13 @@ these keys (all optional except none are required if you cannot answer):
                   aggregations.
   "top_n"       : number of top buckets to return (integer, default 5,
                   max 20).  Only used when group_by is present.
+  "order"       : sort direction for group-by buckets: "desc" (default)
+                  or "asc".
+                  Use "asc" when the question asks for worst, lowest,
+                  least, minimum, bottom, or poorest performers.
+                  Use "desc" (or omit) for highest, best, most, top,
+                  maximum, or greatest.
+                  Only used when group_by is present.
 
 Rules:
 - If the user's question cannot be answered using the available fields and
@@ -602,6 +609,12 @@ Examples (with today = {current_utc_date}):
 
   "Which site has the worst CPU efficiency today?"
   → {{"metric": "avg", "field": "cpu_eff", "group_by": "computingsite",
+      "order": "asc",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "Which site has the lowest average stage-in time today?"
+  → {{"metric": "avg", "field": "pilottiming_stagein", "group_by": "computingsite",
+      "order": "asc",
       "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
 
   "What is the average stage-in time broken down by tier today?"

@@ -291,6 +291,11 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
         raw_top_n = 5
     top_n: int = min(raw_top_n, 20)
 
+    # Validate order — "asc" or "desc"; default "desc".
+    raw_order = _str_or_none(parsed, "order")
+    if raw_order not in ("asc", "desc"):
+        raw_order = "desc"
+
     return {
         "metric": metric,
         "field": field,
@@ -301,6 +306,7 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
         "to_dt": _str_or_none(parsed, "to_dt"),
         "group_by": raw_group_by,
         "top_n": top_n,
+        "order": raw_order,
     }
 
 
@@ -319,6 +325,7 @@ def fetch_job_stats(
     to_dt: str | None = None,
     group_by: str | None = None,
     top_n: int = 5,
+    order: str = "desc",
 ) -> dict[str, Any]:
     """Execute a metric aggregation against the job stats index.
 
@@ -328,7 +335,7 @@ def fetch_job_stats(
       aggregation and returns a ``value`` key with the scalar result.
     * **Terms path** (``group_by`` is a keyword field): executes a terms
       aggregation bucketed by *group_by*, with a metric sub-aggregation per
-      bucket ordered descending.  Returns a ``buckets`` key (list of
+      bucket sorted by *order*.  Returns a ``buckets`` key (list of
       ``{"key": ..., "value": ..., "doc_count": ...}`` dicts) instead of a
       scalar ``value``.
 
@@ -354,13 +361,16 @@ def fetch_job_stats(
         group_by: Optional keyword field to bucket by (terms aggregation).
             When set, the evidence dict contains a ``"buckets"`` list
             instead of a scalar ``"value"``.
-        top_n: Number of top buckets to return when *group_by* is set.
+        top_n: Number of buckets to return when *group_by* is set.
             Clamped to the range ``[1, 20]``; default is ``5``.
+        order: Sort direction for group-by buckets: ``"desc"`` (default,
+            highest-first) or ``"asc"`` (lowest-first, for "worst" /
+            "lowest" queries).  Ignored when *group_by* is ``None``.
 
     Returns:
         Evidence dict with keys ``metric``, ``field``, ``group_by``,
-        ``top_n``, ``value`` (scalar path) or ``buckets`` (terms path),
-        ``doc_count``, ``site_filter``, ``jobstatus_filter``,
+        ``top_n``, ``order``, ``value`` (scalar path) or ``buckets``
+        (terms path), ``doc_count``, ``site_filter``, ``jobstatus_filter``,
         ``jeditaskid_filter``, ``from_dt``, ``to_dt``, ``endpoint``,
         and ``error``.
 
@@ -374,12 +384,13 @@ def fetch_job_stats(
     from askpanda_atlas.job_stats_schema import CACHE_PREFIX, CACHE_TTL_SECS, INDEX_PATTERN  # deferred
 
     top_n = max(1, min(top_n, 20))
+    order = order if order in ("asc", "desc") else "desc"
 
     cache_key = (
         f"{CACHE_PREFIX}{metric}|{field}|{site or ''}|"
         f"{jobstatus or ''}|{jeditaskid or ''}|"
         f"{from_dt or ''}|{to_dt or ''}|"
-        f"{group_by or ''}|{top_n}"
+        f"{group_by or ''}|{top_n}|{order}"
     )
     cached = _get(cache_key)
     if cached is not _MISS:
@@ -414,15 +425,15 @@ def fetch_job_stats(
     if group_by:
         # ── Terms + sub-aggregation path ─────────────────────────────────
         # Bucket by group_by field (uses the .keyword sub-field for keyword
-        # fields).  Sort buckets descending by the sub-metric value so the
-        # caller naturally gets the highest-value bucket first.
+        # fields).  Sort by sub-metric in the requested direction so
+        # "highest" (desc) and "worst/lowest" (asc) both work correctly.
         group_field = f"{group_by}.keyword"
         (
             s.aggs
             .bucket("by_group", "terms",
                     field=group_field,
                     size=top_n,
-                    order={"sub_metric": "desc"})
+                    order={"sub_metric": order})
             .metric("sub_metric", metric, field=field)
         )
 
@@ -446,6 +457,7 @@ def fetch_job_stats(
             "field": field,
             "group_by": group_by,
             "top_n": top_n,
+            "order": order,
             "buckets": buckets,
             "value": None,          # not used in group_by path
             "doc_count": doc_count,
@@ -460,9 +472,9 @@ def fetch_job_stats(
 
         _set(cache_key, evidence, CACHE_TTL_SECS)
         logger.debug(
-            "panda_job_stats: %s(%s) grouped by %s  top_n=%d  "
+            "panda_job_stats: %s(%s) grouped by %s  order=%s  top_n=%d  "
             "buckets=%d  doc_count=%d",
-            metric, field, group_by, top_n, len(buckets), doc_count,
+            metric, field, group_by, order, top_n, len(buckets), doc_count,
         )
         return evidence
 
@@ -481,6 +493,7 @@ def fetch_job_stats(
         "field": field,
         "group_by": None,
         "top_n": None,
+        "order": None,
         "buckets": None,
         "value": value,
         "doc_count": doc_count,
@@ -583,6 +596,7 @@ def _error_evidence(
     user_message: str | None = None,
     group_by: str | None = None,
     top_n: int | None = None,
+    order: str | None = None,
 ) -> dict[str, Any]:
     """Return a structured evidence dict representing a fetch failure.
 
@@ -602,6 +616,7 @@ def _error_evidence(
             falls back to a generic connectivity message.
         group_by: Requested group-by field, or ``None``.
         top_n: Requested bucket count, or ``None``.
+        order: Requested sort order (``"asc"`` / ``"desc"``), or ``None``.
 
     Returns:
         Evidence dict with ``error`` populated and ``value`` set to ``None``.
@@ -620,6 +635,7 @@ def _error_evidence(
         "field": field,
         "group_by": group_by,
         "top_n": top_n,
+        "order": order,
         "buckets": None,
         "value": None,
         "doc_count": 0,
@@ -649,6 +665,7 @@ def _cannot_answer_evidence(question: str) -> dict[str, Any]:
         "field": None,
         "group_by": None,
         "top_n": None,
+        "order": None,
         "buckets": None,
         "value": None,
         "doc_count": 0,
@@ -858,6 +875,7 @@ class PandaJobStatsTool:
                 params["to_dt"],
                 params.get("group_by"),
                 params.get("top_n", 5),
+                params.get("order", "desc"),
             )
             return text_content(json.dumps({"evidence": evidence}))
         except Exception as exc:  # noqa: BLE001
@@ -870,6 +888,7 @@ class PandaJobStatsTool:
                 user_message=_os_error_message(exc),
                 group_by=params.get("group_by"),
                 top_n=params.get("top_n"),
+                order=params.get("order"),
             )
             return text_content(json.dumps({"evidence": ev}))
 
