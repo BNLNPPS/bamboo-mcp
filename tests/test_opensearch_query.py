@@ -713,6 +713,45 @@ class TestGenerateDsl:
         # Date-math anchors for today must appear.
         assert "now/d" in _DSL_GENERATION_SYSTEM_PROMPT
 
+    def test_dsl_system_prompt_has_mandatory_rating_filter_rule(self) -> None:
+        """The rating filter rule must be imperative (MUST/CRITICAL), not merely advisory."""
+        from bamboo.tools.opensearch_promptlog_query import _DSL_GENERATION_SYSTEM_PROMPT
+
+        # The rule should use strong language so the LLM cannot skip the filter.
+        upper = _DSL_GENERATION_SYSTEM_PROMPT.upper()
+        assert "RATING" in upper
+        assert "MUST" in upper or "CRITICAL" in upper or "MANDATORY" in upper
+
+    def test_dsl_system_prompt_rating_filter_includes_gte_1(self) -> None:
+        """The ratings example DSL in the prompt must include gte:1 on the rating field."""
+        from bamboo.tools.opensearch_promptlog_query import _DSL_GENERATION_SYSTEM_PROMPT
+
+        # The example output for ratings must contain the numeric filter.
+        assert '"rating":{"gte":1}' in _DSL_GENERATION_SYSTEM_PROMPT or \
+               '"rating": {"gte": 1}' in _DSL_GENERATION_SYSTEM_PROMPT
+
+
+class TestDefaultSourceFieldsContainsRating:
+    """rating must be in DEFAULT_SOURCE_FIELDS so hits always carry it."""
+
+    def test_rating_in_default_source_fields(self) -> None:
+        """rating field must appear in DEFAULT_SOURCE_FIELDS."""
+        from bamboo.tools.opensearch_promptlog_query import DEFAULT_SOURCE_FIELDS
+
+        assert "rating" in DEFAULT_SOURCE_FIELDS
+
+    def test_timestamp_in_default_source_fields(self) -> None:
+        """@timestamp must remain in DEFAULT_SOURCE_FIELDS."""
+        from bamboo.tools.opensearch_promptlog_query import DEFAULT_SOURCE_FIELDS
+
+        assert "@timestamp" in DEFAULT_SOURCE_FIELDS
+
+    def test_raw_question_in_default_source_fields(self) -> None:
+        """raw_question must remain in DEFAULT_SOURCE_FIELDS."""
+        from bamboo.tools.opensearch_promptlog_query import DEFAULT_SOURCE_FIELDS
+
+        assert "raw_question" in DEFAULT_SOURCE_FIELDS
+
 
 # ---------------------------------------------------------------------------
 # jobs_query_schema.build_sql_prompt — date injection tests

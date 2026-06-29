@@ -90,26 +90,23 @@ Rules:
 - For aggregation-only queries (counts, averages, groupings) set size:0 in the body.
 - For display queries (show recent turns, replay session) omit size from the body
   and let the caller control the result count via max_hits.
-- For rating queries: filter with range:{rating:{gte:1}} to exclude unrated turns.
-  Include source_fields hint in your response only if needed — the caller controls
-  source projection separately, so just return the DSL body.
-- For "show all ratings today" or "show rated responses": use a bool must with
-  range @timestamp gte now/d AND range rating gte 1, sorted by rating desc.
+- RATING QUERIES — CRITICAL: any question containing "rating", "ratings", "rated",
+  "star", "score", "feedback" MUST include {"range":{"rating":{"gte":1}}} as a
+  filter clause. This is mandatory — omitting it returns unrated records that have
+  no rating value, which is always wrong for these questions. Use a bool must to
+  combine it with any date filter. Sort by rating desc, then @timestamp desc.
 
 Example outputs:
 - "Show me all ratings from today" →
-  {"query":{"bool":{"must":[{"range":{"@timestamp":{"gte":"now/d"}}},\
-{"range":{"rating":{"gte":1}}}]}},"sort":[{"rating":{"order":"desc"}},\
-{"@timestamp":{"order":"desc"}}]}
+  {"query":{"bool":{"must":[{"range":{"@timestamp":{"gte":"now/d"}}},{"range":{"rating":{"gte":1}}}]}},"sort":[{"rating":{"order":"desc"}},{"@timestamp":{"order":"desc"}}]}
+- "Show all ratings" (no date restriction) →
+  {"query":{"range":{"rating":{"gte":1}}},"sort":[{"rating":{"order":"desc"}},{"@timestamp":{"order":"desc"}}]}
 - "Most frequently asked questions today" →
-  {"query":{"range":{"@timestamp":{"gte":"now/d"}}},\
-"aggs":{"faq":{"terms":{"field":"raw_question.keyword","size":20}}},"size":0}
+  {"query":{"range":{"@timestamp":{"gte":"now/d"}}},"aggs":{"faq":{"terms":{"field":"raw_question.keyword","size":20}}},"size":0}
 - "How many turns in the last hour?" →
-  {"query":{"range":{"@timestamp":{"gte":"now-1h"}}},"size":0,\
-"aggs":{"turns":{"value_count":{"field":"turn_number"}}}}
+  {"query":{"range":{"@timestamp":{"gte":"now-1h"}}},"size":0,"aggs":{"turns":{"value_count":{"field":"turn_number"}}}}
 - "Which tools were used most today?" →
-  {"query":{"range":{"@timestamp":{"gte":"now/d"}}},\
-"aggs":{"tools":{"terms":{"field":"tools_used","size":20}}},"size":0}
+  {"query":{"range":{"@timestamp":{"gte":"now/d"}}},"aggs":{"tools":{"terms":{"field":"tools_used","size":20}}},"size":0}
 - "Show 5 most recent turns" →
   {"query":{"match_all":{}},"sort":[{"@timestamp":{"order":"desc"}}],"size":5}
 """
@@ -196,6 +193,7 @@ DEFAULT_SOURCE_FIELDS: list[str] = [
     "input_tokens",
     "output_tokens",
     "raw_question",
+    "rating",
 ]
 
 

@@ -46,6 +46,20 @@ All notable changes to Bamboo are documented here.
   including the `rating` field with worked examples for ratings queries,
   FAQ frequency aggregations, and session replay.
 
+- **`opensearch_promptlog_query` / "show me all ratings" returns unrated records**
+  (`core/bamboo/tools/opensearch_promptlog_query.py`):
+  Two follow-up defects surfaced after live testing. (1) `DEFAULT_SOURCE_FIELDS`
+  did not include `rating`, so the `rating` field was absent from every returned
+  hit — the synthesiser saw `NULL` on all records and concluded no ratings
+  existed. `rating` added to `DEFAULT_SOURCE_FIELDS`. (2) The `_generate_dsl`
+  LLM was not reliably including `{"range":{"rating":{"gte":1}}}` in the
+  generated DSL for ratings questions, returning all 14 unrated turns instead of
+  only rated ones. The advisory "For rating queries: filter with…" rule was
+  replaced with a `RATING QUERIES — CRITICAL: MUST include…` imperative rule and
+  a second ratings example (all-time, no date restriction) was added alongside
+  the existing "ratings today" example, so the LLM sees the filter used
+  consistently across both forms.
+
 - **Bug 1 — Date hallucination in `atlas.job_stats` (Mistral-specific)**
   (`job_stats_schema.py`): Restructured the LLM prompt so the current date
   is unmissable.  The system prompt now opens with a terse
