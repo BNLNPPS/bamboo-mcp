@@ -375,6 +375,32 @@ _SYSTEM_JOBS_QUERY: str = (
     "- Be concise. For count questions, lead with the number.\n"
 )
 
+_SYSTEM_PROMPTLOG_QUERY: str = (
+    "You are AskPanDA, an expert assistant for the PanDA workload management "
+    "system and ATLAS experiment workflows at CERN.\n"
+    "You have queried the Bamboo prompt/session log index (bamboomcp-promptlog-*) "
+    "in OpenSearch and received structured results.\n"
+    "The evidence contains: hits (list of documents), total (total matching docs "
+    "in the index — may exceed len(hits) if results were capped), took_ms, and "
+    "aggregations (may be empty).\n"
+    "Rules:\n"
+    "- Answer directly from the hits and aggregations in the evidence.\n"
+    "- TRUNCATION: if total > len(hits), always note how many were retrieved vs total, "
+    "  e.g. '10 of 15 rated interactions shown'. Never silently drop the remainder.\n"
+    "- Do NOT use Mermaid diagrams. Do NOT produce flowcharts, sequence diagrams, "
+    "  or any fenced ```mermaid block. All output must be plain markdown.\n"
+    "- For ratings / display queries: present results as a markdown table with "
+    "  columns Time (UTC), Rating (stars), Question (truncated to 60 chars), "
+    "  Tools Used. Sort rows by rating descending, then time descending. "
+    "  Follow the table with a brief summary section showing counts per rating.\n"
+    "- For aggregation queries (counts, averages, tool-usage frequency): present "
+    "  results as a concise bullet list or small table as appropriate.\n"
+    "- If hits is empty and total is 0, say no matching records were found.\n"
+    "- If the evidence contains an error key, report the error clearly.\n"
+    "- Do not fabricate session IDs, questions, or rating values not in the hits.\n"
+    "- Do not include any timestamp, freshness, or 'data as of' text.\n"
+)
+
 _SYSTEM_JOB_STATS: str = (
     "You are AskPanDA, an expert assistant for the PanDA workload management "
     "system and ATLAS experiment workflows at CERN.\n"
@@ -924,34 +950,36 @@ def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> s
         (_SYSTEM_RAG, _SYSTEM_RAG_NO_CONTEXT, _SYSTEM_GENERIC),
     )
     doc_tools = _PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS)
+    tool_set = set(tool_names)
 
-    if "panda_log_analysis" in tool_names:
-        return _SYSTEM_LOG_ANALYSIS
-    if "pilot_source_analysis" in tool_names:
-        return _SYSTEM_PILOT_SOURCE
-    if "pilot_code_query" in tool_names:
-        return _SYSTEM_CODE_QUERY
-    if "panda_job_status" in tool_names:
-        return _SYSTEM_JOB
-    if "panda_task_status" in tool_names:
-        return _SYSTEM_TASK
-    if "panda_server_health" in tool_names:
-        return _SYSTEM_PANDA_HEALTH
-    if "panda_harvester_workers" in tool_names and "panda_jobs_query" in tool_names:
+    # Compound check must precede its individual components.
+    if "panda_harvester_workers" in tool_set and "panda_jobs_query" in tool_set:
         return _SYSTEM_SITE_HEALTH
-    if "panda_harvester_workers" in tool_names:
-        return _SYSTEM_HARVESTER_WORKERS
-    if "atlas.harvester_timeseries" in tool_names:
-        return _SYSTEM_HARVESTER_TIMESERIES
-    if "panda_jobs_query" in tool_names:
-        return _SYSTEM_JOBS_QUERY
-    if "cric_query" in tool_names:
-        return _SYSTEM_CRIC_QUERY
-    if "atlas.job_stats" in tool_names:
-        return _SYSTEM_JOB_STATS
-    if "cgsim.sim_query" in tool_names:
-        return _SYSTEM_CGSIM_SIM_QUERY
-    if any(t in tool_names for t in doc_tools):
+
+    # Single-tool priority lookup (ordered highest → lowest priority).
+    _TOOL_PROMPT: list[tuple[str, str]] = [
+        ("panda_log_analysis", _SYSTEM_LOG_ANALYSIS),
+        ("pilot_source_analysis", _SYSTEM_PILOT_SOURCE),
+        ("pilot_code_query", _SYSTEM_CODE_QUERY),
+        ("panda_job_status", _SYSTEM_JOB),
+        ("panda_task_status", _SYSTEM_TASK),
+        ("panda_server_health", _SYSTEM_PANDA_HEALTH),
+        ("panda_harvester_workers", _SYSTEM_HARVESTER_WORKERS),
+        ("atlas.harvester_timeseries", _SYSTEM_HARVESTER_TIMESERIES),
+        ("panda_jobs_query", _SYSTEM_JOBS_QUERY),
+        ("cric_query", _SYSTEM_CRIC_QUERY),
+        ("atlas.job_stats", _SYSTEM_JOB_STATS),
+        ("cgsim.sim_query", _SYSTEM_CGSIM_SIM_QUERY),
+    ]
+    for tool_name, prompt in _TOOL_PROMPT:
+        if tool_name in tool_set:
+            return prompt
+
+    # OpenSearch tools (promptlog or generic query) share one prompt.
+    if tool_set & {"opensearch_promptlog_query", "opensearch_query"}:
+        return _SYSTEM_PROMPTLOG_QUERY
+
+    if any(t in tool_set for t in doc_tools):
         return rag_sys
     return generic_sys
 
@@ -1579,6 +1607,7 @@ __all__ = [
     "_SYSTEM_GENERIC",
     "_SYSTEM_JOB_STATS",
     "_SYSTEM_JOBS_QUERY",
+    "_SYSTEM_PROMPTLOG_QUERY",
     "_SYSTEM_CRIC_QUERY",
     "_format_cric_full_list",
     "_CRIC_DIRECT_FORMAT_THRESHOLD",

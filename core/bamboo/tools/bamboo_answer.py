@@ -1454,6 +1454,11 @@ def _is_promptlog_question(question: str) -> bool:
 def _build_promptlog_plan(question: str, reuse: ReusePolicy) -> Plan:
     """Build a fast-path Plan routing to ``opensearch_promptlog_query``.
 
+    Passes ``max_hits=100`` when the question contains an "all" intent
+    keyword (e.g. "show me all ratings"), and ``max_hits=50`` otherwise.
+    The OpenSearch hard cap is 100; the default of 10 is too low for any
+    useful display of ratings or session history.
+
     Args:
         question: User question text.
         reuse: Reuse policy forwarded from the calling plan builder.
@@ -1461,12 +1466,19 @@ def _build_promptlog_plan(question: str, reuse: ReusePolicy) -> Plan:
     Returns:
         A :class:`Plan` routing to ``opensearch_promptlog_query``.
     """
+    _ALL_INTENT: tuple[str, ...] = (
+        "all ", "show all", "show me all", "every ", "full list",
+        "list all", "all ratings", "all questions", "all turns",
+        "all sessions", "all interactions",
+    )
+    q_lower = question.lower()
+    max_hits = 100 if any(p in q_lower for p in _ALL_INTENT) else 50
     return Plan(
         route=PlanRoute.FAST_PATH,
         confidence=0.95,
         tool_calls=[ToolCall(
             tool="opensearch_promptlog_query",
-            arguments={"query": question},
+            arguments={"query": question, "max_hits": max_hits},
         )],
         reuse_policy=reuse,
         explain="Deterministic: prompt-log signals → opensearch_promptlog_query.",

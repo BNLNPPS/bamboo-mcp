@@ -822,3 +822,130 @@ class TestBuildSqlPromptDateInjection:
         msgs = build_sql_prompt("histogram")
         system = msgs[0]["content"]
         assert "histogram" in system.lower()
+
+# ---------------------------------------------------------------------------
+# _build_promptlog_plan max_hits tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPromptlogPlanMaxHits:
+    """Tests that _build_promptlog_plan passes appropriate max_hits."""
+
+    def _plan_args(self, question: str) -> dict[str, Any]:
+        """Return the tool-call arguments from _build_promptlog_plan."""
+        from bamboo.tools.bamboo_answer import _build_promptlog_plan, ReusePolicy
+        plan = _build_promptlog_plan(question, ReusePolicy())
+        return plan.tool_calls[0].arguments
+
+    def test_all_ratings_gets_max_hits_100(self) -> None:
+        """'show me all ratings' must request max_hits=100."""
+        args = self._plan_args("Show me all ratings from today")
+        assert args["max_hits"] == 100
+
+    def test_all_questions_gets_max_hits_100(self) -> None:
+        """'all questions' must request max_hits=100."""
+        args = self._plan_args("What are all questions asked today?")
+        assert args["max_hits"] == 100
+
+    def test_show_all_turns_gets_max_hits_100(self) -> None:
+        """'show all turns' must request max_hits=100."""
+        args = self._plan_args("show all turns from this session")
+        assert args["max_hits"] == 100
+
+    def test_scoped_question_gets_max_hits_50(self) -> None:
+        """A question without 'all' intent gets max_hits=50, not 10."""
+        args = self._plan_args("Show me the most recent ratings")
+        assert args["max_hits"] == 50
+
+    def test_which_tools_gets_max_hits_50(self) -> None:
+        """'which tools were used today' has no all-intent; gets max_hits=50."""
+        args = self._plan_args("which tools were used most today?")
+        assert args["max_hits"] == 50
+
+    def test_query_arg_is_original_question(self) -> None:
+        """The raw question is always passed as the query argument."""
+        q = "Show me all ratings from today"
+        args = self._plan_args(q)
+        assert args["query"] == q
+
+
+# ---------------------------------------------------------------------------
+# _pick_synthesis_prompt opensearch routing tests
+# ---------------------------------------------------------------------------
+
+
+class TestPickSynthesisPromptOpenSearch:
+    """Tests that opensearch tools route to _SYSTEM_PROMPTLOG_QUERY."""
+
+    def test_opensearch_promptlog_query_uses_promptlog_prompt(self) -> None:
+        """opensearch_promptlog_query must route to _SYSTEM_PROMPTLOG_QUERY."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_PROMPTLOG_QUERY,
+        )
+        result = _pick_synthesis_prompt(["opensearch_promptlog_query"])
+        assert result is _SYSTEM_PROMPTLOG_QUERY
+
+    def test_opensearch_query_uses_promptlog_prompt(self) -> None:
+        """opensearch_query must also route to _SYSTEM_PROMPTLOG_QUERY."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_PROMPTLOG_QUERY,
+        )
+        result = _pick_synthesis_prompt(["opensearch_query"])
+        assert result is _SYSTEM_PROMPTLOG_QUERY
+
+    def test_panda_jobs_query_not_affected(self) -> None:
+        """panda_jobs_query must still route to _SYSTEM_JOBS_QUERY."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_JOBS_QUERY,
+        )
+        result = _pick_synthesis_prompt(["panda_jobs_query"])
+        assert result is _SYSTEM_JOBS_QUERY
+
+    def test_site_health_compound_check_unaffected(self) -> None:
+        """panda_harvester_workers + panda_jobs_query must still give _SYSTEM_SITE_HEALTH."""
+        from bamboo.tools.bamboo_executor import (
+            _pick_synthesis_prompt,
+            _SYSTEM_SITE_HEALTH,
+        )
+        result = _pick_synthesis_prompt(["panda_harvester_workers", "panda_jobs_query"])
+        assert result is _SYSTEM_SITE_HEALTH
+
+
+# ---------------------------------------------------------------------------
+# _SYSTEM_PROMPTLOG_QUERY content tests
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptlogQueryContent:
+    """Tests for the content of the _SYSTEM_PROMPTLOG_QUERY synthesis prompt."""
+
+    def test_no_mermaid_instruction(self) -> None:
+        """The prompt must explicitly forbid Mermaid diagrams."""
+        from bamboo.tools.bamboo_executor import _SYSTEM_PROMPTLOG_QUERY
+
+        assert "Mermaid" in _SYSTEM_PROMPTLOG_QUERY or "mermaid" in _SYSTEM_PROMPTLOG_QUERY
+        assert "NOT" in _SYSTEM_PROMPTLOG_QUERY or "Do NOT" in _SYSTEM_PROMPTLOG_QUERY
+
+    def test_truncation_rule_present(self) -> None:
+        """The prompt must tell the synthesiser to report total vs retrieved."""
+        from bamboo.tools.bamboo_executor import _SYSTEM_PROMPTLOG_QUERY
+
+        assert "total" in _SYSTEM_PROMPTLOG_QUERY.lower()
+        assert "truncat" in _SYSTEM_PROMPTLOG_QUERY.lower() or "cap" in _SYSTEM_PROMPTLOG_QUERY.lower()
+
+    def test_ratings_table_format_specified(self) -> None:
+        """The prompt must specify a table format for ratings display queries."""
+        from bamboo.tools.bamboo_executor import _SYSTEM_PROMPTLOG_QUERY
+
+        assert "table" in _SYSTEM_PROMPTLOG_QUERY.lower()
+        assert "rating" in _SYSTEM_PROMPTLOG_QUERY.lower()
+
+    def test_no_mermaid_guidance_appended(self) -> None:
+        """_MERMAID_GUIDANCE must NOT be appended to _SYSTEM_PROMPTLOG_QUERY."""
+        from bamboo.tools.bamboo_executor import _SYSTEM_PROMPTLOG_QUERY
+
+        # _MERMAID_GUIDANCE starts with this distinctive phrase.
+        assert "Diagram rule:" not in _SYSTEM_PROMPTLOG_QUERY
