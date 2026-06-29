@@ -470,3 +470,316 @@ class TestOpenSearchPromptlogQueryToolCall:
             })
 
         assert captured_max[0] == 25
+
+    def test_valid_json_query_forwarded_unchanged(self) -> None:
+        """A valid JSON query string is not sent through DSL generation."""
+        captured_queries: list[str] = []
+
+        async def _fake_call(args: dict[str, Any]) -> Any:
+            captured_queries.append(args.get("query", ""))
+            from bamboo.tools.base import text_content
+            return text_content(json.dumps(_make_mock_result()))
+
+        dsl = '{"query":{"match_all":{}}}'
+        with patch(
+            "bamboo.tools.opensearch_query.opensearch_query_tool.call",
+            side_effect=_fake_call,
+        ):
+            self._call({"query": dsl})
+
+        # The query forwarded to opensearch_query_tool must be exactly the
+        # JSON the caller supplied — _generate_dsl must NOT have been invoked.
+        assert captured_queries[0] == dsl
+
+    def test_natural_language_query_generates_dsl(self) -> None:
+        """When query is not JSON, _generate_dsl is called and its result forwarded."""
+        generated_dsl = '{"query":{"range":{"@timestamp":{"gte":"now/d"}}}}'
+        captured_queries: list[str] = []
+
+        async def _fake_generate(question: str) -> str:
+            return generated_dsl
+
+        async def _fake_call(args: dict[str, Any]) -> Any:
+            captured_queries.append(args.get("query", ""))
+            from bamboo.tools.base import text_content
+            return text_content(json.dumps(_make_mock_result()))
+
+        with patch(
+            "bamboo.tools.opensearch_promptlog_query._generate_dsl",
+            side_effect=_fake_generate,
+        ):
+            with patch(
+                "bamboo.tools.opensearch_query.opensearch_query_tool.call",
+                side_effect=_fake_call,
+            ):
+                self._call({"query": "Show me all ratings from today"})
+
+        assert captured_queries[0] == generated_dsl
+
+    def test_dsl_generation_failure_returns_error_payload(self) -> None:
+        """When _generate_dsl returns empty string, an error dict is returned."""
+        async def _fake_generate(question: str) -> str:
+            return ""
+
+        with patch(
+            "bamboo.tools.opensearch_promptlog_query._generate_dsl",
+            side_effect=_fake_generate,
+        ):
+            result = self._call({"query": "some natural language question"})
+
+        assert "error" in result
+        assert "natural language question" in result["error"]
+
+    def test_natural_language_still_injects_index_pattern(self) -> None:
+        """Even when DSL is generated from NL, the index pattern is injected."""
+        captured_args: list[dict[str, Any]] = []
+
+        async def _fake_generate(question: str) -> str:
+            return '{"query":{"match_all":{}}}'
+
+        async def _fake_call(args: dict[str, Any]) -> Any:
+            captured_args.append(dict(args))
+            from bamboo.tools.base import text_content
+            return text_content(json.dumps(_make_mock_result()))
+
+        from bamboo.tools.opensearch_promptlog_query import PROMPTLOG_INDEX_PATTERN
+
+        with patch(
+            "bamboo.tools.opensearch_promptlog_query._generate_dsl",
+            side_effect=_fake_generate,
+        ):
+            with patch(
+                "bamboo.tools.opensearch_query.opensearch_query_tool.call",
+                side_effect=_fake_call,
+            ):
+                self._call({"query": "How many turns today?"})
+
+        assert captured_args[0]["index_pattern"] == PROMPTLOG_INDEX_PATTERN
+
+    def test_natural_language_applies_default_source_fields(self) -> None:
+        """Default source fields are applied for NL queries that omit source_fields."""
+        captured_args: list[dict[str, Any]] = []
+
+        async def _fake_generate(question: str) -> str:
+            return '{"query":{"match_all":{}}}'
+
+        async def _fake_call(args: dict[str, Any]) -> Any:
+            captured_args.append(dict(args))
+            from bamboo.tools.base import text_content
+            return text_content(json.dumps(_make_mock_result()))
+
+        from bamboo.tools.opensearch_promptlog_query import DEFAULT_SOURCE_FIELDS
+
+        with patch(
+            "bamboo.tools.opensearch_promptlog_query._generate_dsl",
+            side_effect=_fake_generate,
+        ):
+            with patch(
+                "bamboo.tools.opensearch_query.opensearch_query_tool.call",
+                side_effect=_fake_call,
+            ):
+                self._call({"query": "show me recent turns"})
+
+        assert captured_args[0]["source_fields"] == DEFAULT_SOURCE_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# _generate_dsl unit tests
+# ---------------------------------------------------------------------------
+
+
+async def _async_return(value: Any) -> Any:
+    """Return *value* from an async context immediately."""
+    return value
+
+
+async def _async_raise(exc: Exception) -> Any:
+    """Raise *exc* from an async context immediately."""
+    raise exc
+
+
+class TestGenerateDsl:
+    """Unit tests for opensearch_promptlog_query._generate_dsl."""
+
+    def _run(self, question: str, llm_reply: str) -> str:
+        """Run _generate_dsl with a mocked LLM that replies with *llm_reply*.
+
+        Args:
+            question: Natural-language question to pass.
+            llm_reply: Text the mocked LLM returns.
+
+        Returns:
+            Whatever _generate_dsl returns.
+        """
+        from bamboo.tools.opensearch_promptlog_query import _generate_dsl
+
+        mock_resp = MagicMock()
+        mock_resp.text = llm_reply
+
+        mock_client = MagicMock()
+        mock_client.generate = MagicMock(
+            side_effect=lambda **kw: _async_return(mock_resp)
+        )
+
+        mock_selector = MagicMock()
+        mock_selector.registry = {"default": MagicMock()}
+        mock_selector.default_profile = "default"
+
+        mock_manager = MagicMock()
+        mock_manager.get_client = MagicMock(
+            side_effect=lambda spec: _async_return(mock_client)
+        )
+
+        with patch(
+            "bamboo.llm.runtime.get_llm_selector",
+            return_value=mock_selector,
+        ):
+            with patch(
+                "bamboo.llm.runtime.get_llm_manager",
+                return_value=mock_manager,
+            ):
+                return asyncio.run(_generate_dsl(question))
+
+    def test_valid_json_reply_returned_verbatim(self) -> None:
+        """A clean JSON object response from the LLM is returned as-is."""
+        dsl = '{"query":{"match_all":{}}}'
+        result = self._run("show all turns", dsl)
+        assert result == dsl
+
+    def test_strips_json_fenced_markdown(self) -> None:
+        """JSON wrapped in ```json…``` fences is unwrapped correctly."""
+        dsl_obj = '{"query":{"match_all":{}}}'
+        fenced = f"```json\n{dsl_obj}\n```"
+        result = self._run("show all turns", fenced)
+        parsed = json.loads(result)
+        assert "query" in parsed
+
+    def test_strips_plain_fenced_markdown(self) -> None:
+        """JSON wrapped in plain ```…``` fences is unwrapped correctly."""
+        dsl_obj = '{"size":0}'
+        fenced = f"```\n{dsl_obj}\n```"
+        result = self._run("count turns", fenced)
+        assert json.loads(result) == {"size": 0}
+
+    def test_non_json_llm_reply_returns_empty_string(self) -> None:
+        """If the LLM returns plain text (not JSON), _generate_dsl returns ''."""
+        result = self._run("foo", "I cannot answer that.")
+        assert result == ""
+
+    def test_json_array_reply_returns_empty_string(self) -> None:
+        """A JSON array instead of an object returns ''."""
+        result = self._run("foo", "[1, 2, 3]")
+        assert result == ""
+
+    def test_llm_exception_returns_empty_string(self) -> None:
+        """If the LLM call raises any exception, _generate_dsl returns ''."""
+        from bamboo.tools.opensearch_promptlog_query import _generate_dsl
+
+        mock_selector = MagicMock()
+        mock_selector.registry = {"default": MagicMock()}
+        mock_selector.default_profile = "default"
+
+        mock_manager = MagicMock()
+        mock_manager.get_client = MagicMock(
+            side_effect=lambda spec: _async_raise(RuntimeError("network error"))
+        )
+
+        with patch(
+            "bamboo.llm.runtime.get_llm_selector",
+            return_value=mock_selector,
+        ):
+            with patch(
+                "bamboo.llm.runtime.get_llm_manager",
+                return_value=mock_manager,
+            ):
+                result = asyncio.run(_generate_dsl("show turns"))
+
+        assert result == ""
+
+    def test_dsl_system_prompt_documents_schema_fields(self) -> None:
+        """The DSL generation system prompt covers all key schema fields."""
+        from bamboo.tools.opensearch_promptlog_query import _DSL_GENERATION_SYSTEM_PROMPT
+
+        for field in ("@timestamp", "session_id", "tools_used", "rating", "raw_question"):
+            assert field in _DSL_GENERATION_SYSTEM_PROMPT, (
+                f"Expected field {field!r} in _DSL_GENERATION_SYSTEM_PROMPT"
+            )
+
+    def test_dsl_system_prompt_contains_ratings_example(self) -> None:
+        """The DSL generation system prompt includes a ratings example."""
+        from bamboo.tools.opensearch_promptlog_query import _DSL_GENERATION_SYSTEM_PROMPT
+
+        assert "rating" in _DSL_GENERATION_SYSTEM_PROMPT
+        # Date-math anchors for today must appear.
+        assert "now/d" in _DSL_GENERATION_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# jobs_query_schema.build_sql_prompt — date injection tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSqlPromptDateInjection:
+    """Tests that build_sql_prompt injects the current UTC date and time."""
+
+    def test_returns_two_messages(self) -> None:
+        """build_sql_prompt returns a system + user message pair."""
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        msgs = build_sql_prompt("How many failed jobs at BNL?")
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+
+    def test_user_message_contains_question(self) -> None:
+        """The user message must echo the original question verbatim."""
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        q = "How many failed jobs at BNL?"
+        msgs = build_sql_prompt(q)
+        assert msgs[1]["content"] == q
+
+    def test_system_message_contains_today_anchor(self) -> None:
+        """The system prompt must contain a TODAY= anchor."""
+        import datetime
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        msgs = build_sql_prompt("whatever")
+        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        assert f"TODAY={today}" in msgs[0]["content"]
+
+    def test_system_message_contains_now_anchor(self) -> None:
+        """The system prompt must contain a NOW= anchor in ISO-Z format."""
+        import re
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        msgs = build_sql_prompt("whatever")
+        # Expect NOW=2026-06-29T15:00:00Z (or similar)
+        assert re.search(r"NOW=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", msgs[0]["content"])
+
+    def test_system_message_contains_date_rule(self) -> None:
+        """The DATE RULE block must be present to warn about statechangetime scope."""
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        msgs = build_sql_prompt("histogram of failures")
+        assert "DATE RULE" in msgs[0]["content"]
+        assert "statechangetime" in msgs[0]["content"]
+
+    def test_system_message_relaxes_queue_filter_rule(self) -> None:
+        """The _queue rule must no longer require filtering on ALL queries."""
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        msgs = build_sql_prompt("global failure histogram")
+        system = msgs[0]["content"]
+        # Old unconditional rule should be gone.
+        assert "Always filter by _queue" not in system
+        # New conditional rule should be present.
+        assert "ONLY when the question mentions a specific site" in system
+
+    def test_system_message_contains_global_histogram_example(self) -> None:
+        """A global histogram example (no _queue filter) must be in the prompt."""
+        from askpanda_atlas.jobs_query_schema import build_sql_prompt
+
+        msgs = build_sql_prompt("histogram")
+        system = msgs[0]["content"]
+        assert "histogram" in system.lower()

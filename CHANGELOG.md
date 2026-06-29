@@ -7,6 +7,45 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **`panda_jobs_query` histogram returns 0 rows for multi-hour time windows**
+  (`packages/askpanda_atlas/askpanda_atlas/jobs_query_schema.py`,
+  `core/bamboo/tools/bamboo_executor.py`):
+  Two compounding root causes. (1) The SQL generation prompt had no date/time
+  anchor — the LLM had no temporal reference point. `build_sql_prompt` now
+  injects `TODAY=` and `NOW=` (current UTC) on line 1 of the system prompt at
+  call time, following the same pattern already used in `job_stats_schema.py`.
+  (2) The prompt never explained that `statechangetime` data spans only the
+  last ~1 hour per queue snapshot — longer `INTERVAL` filters always produced
+  0 rows because older rows simply aren't retained. A `DATE RULE` block now
+  states this constraint explicitly and instructs the LLM to drop the time
+  filter for windows that exceed the snapshot. (3) The `_queue` rule was
+  changed from "Always filter by `_queue`" to "filter ONLY when a specific
+  site is mentioned", which is correct for global queries like histograms
+  (the LLM was already omitting it correctly, but the contradictory rule
+  invited future regressions). Three global-query examples added to the
+  prompt (histogram, global count, cross-queue status breakdown). The
+  `_SYSTEM_JOBS_QUERY` synthesis prompt was also extended: when `row_count`
+  is 0 and the SQL contains a `statechangetime` interval filter spanning
+  more than 1 hour, the synthesiser now explains the data-window limitation
+  and suggests rephrasing without a time filter.
+
+- **`opensearch_promptlog_query` / ratings query fails with "not valid JSON"**
+  (`core/bamboo/tools/opensearch_promptlog_query.py`):
+  The Bamboo fast-path router (`bamboo_answer.py`) passes the raw
+  natural-language question as the `query` argument when routing to
+  `opensearch_promptlog_query`. The tool forwarded this directly to
+  `opensearch_query_tool.call()`, which does `json.loads(query)` and raised
+  `'query' is not valid JSON: Expecting value: line 1 column 1 (char 0)`.
+  Fixed by adding a `_generate_dsl(question)` async helper that calls the
+  Bamboo LLM to translate a natural-language question into an OpenSearch DSL
+  body (same LLM-generation pattern as `_call_llm_for_sql` in
+  `jobs_query_impl.py`). `call()` now detects non-JSON `query` values and
+  invokes `_generate_dsl` transparently before forwarding to
+  `opensearch_query_tool`. A dedicated DSL generation system prompt
+  (`_DSL_GENERATION_SYSTEM_PROMPT`) documents the full promptlog schema
+  including the `rating` field with worked examples for ratings queries,
+  FAQ frequency aggregations, and session replay.
+
 - **Bug 1 — Date hallucination in `atlas.job_stats` (Mistral-specific)**
   (`job_stats_schema.py`): Restructured the LLM prompt so the current date
   is unmissable.  The system prompt now opens with a terse
