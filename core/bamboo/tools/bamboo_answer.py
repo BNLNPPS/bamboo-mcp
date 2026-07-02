@@ -612,8 +612,9 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
 #: Signal phrases that unambiguously indicate a job stats / performance query
 #: against the ``atlas_panda_job_stats-*`` OpenSearch index.  These phrases
 #: reference pilot timing sub-fields, wall-clock / queue time metrics, memory
-#: usage, CPU efficiency, HS06 accounting, I/O throughput, or carbon footprint
-#: fields that are only present in that index, not in the live DuckDB snapshot.
+#: usage, memory-leak diagnostics, CPU efficiency, HS06 accounting, I/O
+#: throughput, or carbon footprint fields that are only present in that
+#: index, not in the live DuckDB snapshot.
 #:
 #: Checked BEFORE the jobs-DB fast-path so that questions like
 #: "What is the average wall-clock time for failed jobs?" route to
@@ -691,6 +692,22 @@ _JOB_STATS_SIGNALS: frozenset[str] = frozenset({
     "ddmerrordiag",
     "exeerrorcode",
     "exeerrordiag",
+    # Memory-leak diagnostics (linear fit fields; the only meaning "memory
+    # leak" / "leak rate" has anywhere in Bamboo MCP is this job_stats model,
+    # so natural phrases are safe to include alongside the literal tokens).
+    "leak_slope",
+    "leak_intersect",
+    "leak_chi2",
+    "memory leak",
+    "leak rate",
+    "memory leak rate",
+    # Software environment (field-name tokens only — natural phrases like
+    # "python version" or "os version" are ambiguous with generic questions
+    # unrelated to job stats, so they are deliberately excluded and left to
+    # the LLM planner, same treatment as atlasrelease/cmtconfig/homepackage).
+    "lsetup_time",
+    "os_version",
+    "python_version",
 })
 
 

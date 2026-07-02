@@ -6,6 +6,31 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`atlas.job_stats`: memory-leak diagnostics and software-environment
+  fields** (`packages/askpanda_atlas/askpanda_atlas/job_stats_schema.py`,
+  `core/bamboo/tools/bamboo_answer.py`, `docs/question-cheatsheet.md`):
+  Sasha's ingestion pipeline now parses the raw `jobmetrics` VARCHAR string
+  upstream and exposes six previously-nested sub-fields as flat top-level
+  fields: `lsetup_time` (s), `os_version` (keyword), `python_version`
+  (keyword), and the memory-usage linear-fit parameters `leak_slope` (kB/s),
+  `leak_intersect` (kB), `leak_chi2` (dimensionless goodness-of-fit) — renamed
+  from PanDA's raw `leak`/`intersect`/`chi2` for clarity, since the fit model
+  is `memory(t) ≈ leak_slope * t + leak_intersect`. Also added
+  `task_container_name` (keyword), a previously-unregistered task-context
+  field observed in the same sample record. `os_version` and `python_version`
+  were added to `KEYWORD_GROUP_BY_FIELDS` for platform-breakdown queries.
+  `_JOB_STATS_SIGNALS` gained fast-path routing tokens for all six jobmetrics
+  fields plus natural-language phrases ("memory leak", "leak rate") for the
+  leak-fit fields specifically — natural phrasing for `os_version` /
+  `python_version` (e.g. "python version") was deliberately excluded as too
+  ambiguous with generic non-job-stats questions, left to the LLM planner
+  instead, same treatment as `atlasrelease`/`cmtconfig`/`homepackage`.
+  `task_container_name` was not added as a `group_by` target pending a use
+  case. Test coverage added in `test_job_stats.py`
+  (`TestJobMetricsFields`, plus `parse_llm_params`/`group_by` round-trips)
+  and `test_bamboo_answer_helpers.py` (`TestIsJobStatsQuestion`).
+
 ### Fixed
 - **`panda_jobs_query` histogram returns 0 rows for multi-hour time windows**
   (`packages/askpanda_atlas/askpanda_atlas/jobs_query_schema.py`,

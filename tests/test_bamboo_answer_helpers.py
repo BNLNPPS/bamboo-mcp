@@ -23,6 +23,7 @@ from bamboo.tools.bamboo_answer import (
     _is_contextual_followup,
     _is_implicit_contextual_followup,
     _is_conceptual_question,
+    _is_job_stats_question,
     _is_log_analysis_request,
 )
 from bamboo.tools.bamboo_executor import (
@@ -157,6 +158,64 @@ class TestIsLogAnalysisRequest:
     def test_empty(self) -> None:
         """Empty input returns False."""
         assert _is_log_analysis_request("") is False
+
+
+class TestIsJobStatsQuestion:
+    """Fast-path routing signal detection for ``atlas.job_stats``.
+
+    Covers the memory-leak diagnostics fields (``leak_slope``,
+    ``leak_intersect``, ``leak_chi2``) and the software-environment fields
+    (``lsetup_time``, ``os_version``, ``python_version``) added alongside
+    ``task_container_name`` when Sasha exposed the parsed ``jobmetrics``
+    sub-fields as flat top-level fields.
+    """
+
+    def test_memory_leak_phrase(self) -> None:
+        """The natural phrase 'memory leak' is a signal."""
+        assert _is_job_stats_question("What is the average memory leak rate at CERN today?") is True
+
+    def test_leak_rate_phrase(self) -> None:
+        """The natural phrase 'leak rate' is a signal."""
+        assert _is_job_stats_question("Which site has the highest leak rate today?") is True
+
+    def test_leak_slope_token(self) -> None:
+        """The literal field token 'leak_slope' is a signal."""
+        assert _is_job_stats_question("What is the average leak_slope at BNL?") is True
+
+    def test_leak_intersect_token(self) -> None:
+        """The literal field token 'leak_intersect' is a signal."""
+        assert _is_job_stats_question("Show me leak_intersect for job stats at CERN") is True
+
+    def test_leak_chi2_token(self) -> None:
+        """The literal field token 'leak_chi2' is a signal."""
+        assert _is_job_stats_question("What is the average leak_chi2 today?") is True
+
+    def test_lsetup_time_token(self) -> None:
+        """The literal field token 'lsetup_time' is a signal."""
+        assert _is_job_stats_question("What is the average lsetup_time at IN2P3?") is True
+
+    def test_os_version_token(self) -> None:
+        """The literal field token 'os_version' is a signal."""
+        assert _is_job_stats_question("Break down jobs by os_version at CERN") is True
+
+    def test_python_version_token(self) -> None:
+        """The literal field token 'python_version' is a signal."""
+        assert _is_job_stats_question("Break down jobs by python_version at CERN") is True
+
+    def test_natural_os_version_phrase_not_a_signal(self) -> None:
+        """The natural phrase 'os version' (not the field token) is NOT a
+        signal — deliberately excluded as too ambiguous with generic
+        questions unrelated to job stats, same treatment as atlasrelease."""
+        assert _is_job_stats_question("What OS version does ATLAS require?") is False
+
+    def test_natural_python_version_phrase_not_a_signal(self) -> None:
+        """The natural phrase 'python version' (not the field token) is NOT
+        a signal, for the same ambiguity reason as os_version."""
+        assert _is_job_stats_question("What python version does this tool use?") is False
+
+    def test_unrelated_question_not_a_signal(self) -> None:
+        """A question with no job-stats signal phrase returns False."""
+        assert _is_job_stats_question("What is the weather today?") is False
 
 
 class TestCompactJson:

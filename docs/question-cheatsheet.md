@@ -366,6 +366,9 @@ Requires `ASKPANDA_OPENSEARCH` to be set.
 > try broadening the time range or removing the site filter.
 > **Note:** `hs06sec`, `gco2global`, and `gco2regional` may be null for
 > non-terminal jobs (running/transferring) even when `doc_count > 0`.
+> **Note:** `leak_slope`, `leak_intersect`, and `leak_chi2` may be null for
+> jobs too short to fit a reliable linear memory model. `lsetup_time` may be
+> null for containerized payloads that skip lsetup.
 
 ### Wall-clock and queue time
 
@@ -403,6 +406,33 @@ What is the maximum virtual memory for finished jobs at BNL today?
 What is the average PSS memory for production jobs today?
 What is the average swap usage at CERN today?
 ```
+
+### Memory-leak diagnostics
+
+Linear fit of memory usage over job runtime:
+`memory(t) ≈ leak_slope * t + leak_intersect`, with `leak_chi2` as the
+goodness-of-fit. `leak_slope` is in kB/s; `leak_intersect` is in kB.
+
+```
+What is the average memory leak rate at CERN today?
+Which site has the highest memory leak rate today?
+What is the average leak_slope for finished jobs at BNL today?
+What is the average goodness-of-fit for the memory model at CERN today?
+```
+
+> **Note:** All three fields may be null for jobs too short to fit a
+> reliable linear model.
+
+### Software environment
+
+```
+How many jobs ran per Python version today?
+Break down jobs by OS version at CERN today.
+What is the average lsetup time at IN2P3 today?
+```
+
+> **Note:** `os_version` and `python_version` are keyword fields — only
+> usable as `group_by` targets, not as an aggregation `field`.
 
 ### CPU and HS06 accounting
 
@@ -1014,5 +1044,3 @@ Show me responses where the provider fallback was triggered.
 
 > **Provider field:** `llm_provider` and `llm_model` are stored per entry.
 > Fallback events are flagged with `provider_fallback: true`.
->
->

@@ -378,6 +378,90 @@ class TestNewNumericFields:
 
 
 # ---------------------------------------------------------------------------
+# jobmetrics-derived fields (lsetup_time, os_version, python_version,
+# leak_slope, leak_intersect, leak_chi2) + task_container_name
+# ---------------------------------------------------------------------------
+
+
+class TestJobMetricsFields:
+    """Field-registry checks for the jobmetrics-derived fields.
+
+    Sasha's ingestion pipeline now parses the raw ``jobmetrics`` VARCHAR
+    string upstream and exposes these as flat top-level fields, alongside
+    the newly-observed ``task_container_name`` field.
+    """
+
+    def test_all_new_fields_present(self) -> None:
+        """All seven newly-registered fields are in ALL_FIELD_NAMES."""
+        new_fields = {
+            "task_container_name",
+            "lsetup_time",
+            "os_version",
+            "python_version",
+            "leak_slope",
+            "leak_intersect",
+            "leak_chi2",
+        }
+        assert new_fields <= ALL_FIELD_NAMES
+
+    def test_lsetup_time_is_numeric(self) -> None:
+        """lsetup_time (seconds) is a numeric aggregation target."""
+        assert "lsetup_time" in NUMERIC_FIELDS
+
+    def test_leak_slope_is_numeric(self) -> None:
+        """leak_slope (kB/s) is a numeric aggregation target."""
+        assert "leak_slope" in NUMERIC_FIELDS
+
+    def test_leak_intersect_is_numeric(self) -> None:
+        """leak_intersect (kB) is a numeric aggregation target."""
+        assert "leak_intersect" in NUMERIC_FIELDS
+
+    def test_leak_chi2_is_numeric(self) -> None:
+        """leak_chi2 (dimensionless) is a numeric aggregation target."""
+        assert "leak_chi2" in NUMERIC_FIELDS
+
+    def test_os_version_not_numeric(self) -> None:
+        """os_version (keyword) is not in NUMERIC_FIELDS."""
+        assert "os_version" not in NUMERIC_FIELDS
+
+    def test_python_version_not_numeric(self) -> None:
+        """python_version (keyword) is not in NUMERIC_FIELDS."""
+        assert "python_version" not in NUMERIC_FIELDS
+
+    def test_task_container_name_not_numeric(self) -> None:
+        """task_container_name (keyword) is not in NUMERIC_FIELDS."""
+        assert "task_container_name" not in NUMERIC_FIELDS
+
+    def test_os_version_is_group_by_field(self) -> None:
+        """os_version is a permitted group_by target (platform breakdown)."""
+        assert "os_version" in KEYWORD_GROUP_BY_FIELDS
+
+    def test_python_version_is_group_by_field(self) -> None:
+        """python_version is a permitted group_by target (platform breakdown)."""
+        assert "python_version" in KEYWORD_GROUP_BY_FIELDS
+
+    def test_task_container_name_not_group_by_field(self) -> None:
+        """task_container_name is not (yet) a permitted group_by target."""
+        assert "task_container_name" not in KEYWORD_GROUP_BY_FIELDS
+
+    def test_build_query_prompt_embeds_leak_field_names(self) -> None:
+        """System message references the memory-leak fit field names."""
+        msgs = build_query_prompt("test")
+        system = msgs[0]["content"]
+        assert "leak_slope" in system
+        assert "leak_intersect" in system
+        assert "leak_chi2" in system
+
+    def test_build_query_prompt_embeds_software_env_field_names(self) -> None:
+        """System message references the new software-environment fields."""
+        msgs = build_query_prompt("test")
+        system = msgs[0]["content"]
+        assert "lsetup_time" in system
+        assert "os_version" in system
+        assert "python_version" in system
+
+
+# ---------------------------------------------------------------------------
 # _default_window
 # ---------------------------------------------------------------------------
 
@@ -608,6 +692,77 @@ class TestParseLlmParamsNewFields:
         result = parse_llm_params(raw)
         assert result is not None
         assert result["field"] == DEFAULT_FIELD
+
+    def test_leak_slope(self) -> None:
+        """leak_slope parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "leak_slope", "site": "CERN"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "leak_slope"
+
+    def test_leak_intersect(self) -> None:
+        """leak_intersect parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "leak_intersect"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "leak_intersect"
+
+    def test_leak_chi2(self) -> None:
+        """leak_chi2 parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "leak_chi2"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "leak_chi2"
+
+    def test_lsetup_time(self) -> None:
+        """lsetup_time parses as a valid numeric aggregation target."""
+        raw = json.dumps({"metric": "avg", "field": "lsetup_time", "site": "IN2P3"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == "lsetup_time"
+
+    def test_os_version_rejected_as_field(self) -> None:
+        """os_version (keyword) is rejected as an aggregation field."""
+        raw = json.dumps({"metric": "avg", "field": "os_version"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == DEFAULT_FIELD
+
+    def test_python_version_rejected_as_field(self) -> None:
+        """python_version (keyword) is rejected as an aggregation field."""
+        raw = json.dumps({"metric": "avg", "field": "python_version"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == DEFAULT_FIELD
+
+    def test_task_container_name_rejected_as_field(self) -> None:
+        """task_container_name (keyword) is rejected as an aggregation field."""
+        raw = json.dumps({"metric": "avg", "field": "task_container_name"})
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["field"] == DEFAULT_FIELD
+
+    def test_group_by_os_version_extracted(self) -> None:
+        """group_by=os_version is accepted (platform breakdown)."""
+        raw = json.dumps({
+            "metric": "value_count",
+            "field": "pandaid",
+            "group_by": "os_version",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] == "os_version"
+
+    def test_group_by_python_version_extracted(self) -> None:
+        """group_by=python_version is accepted (platform breakdown)."""
+        raw = json.dumps({
+            "metric": "value_count",
+            "field": "pandaid",
+            "group_by": "python_version",
+        })
+        result = parse_llm_params(raw)
+        assert result is not None
+        assert result["group_by"] == "python_version"
 
 
 # ---------------------------------------------------------------------------

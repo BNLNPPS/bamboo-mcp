@@ -268,6 +268,11 @@ JOB_STATS_FIELDS: list[tuple[str, str, str, str]] = [
         "task_modificationtime", "date", "UTC",
         "Last task modification time (ISO-8601 string).",
     ),
+    (
+        "task_container_name", "keyword", "—",
+        "Container image or runtime container name used by the task, if any. "
+        "Frequently null for non-containerized jobs.",
+    ),
     # ── Software environment ───────────────────────────────────────────────
     (
         "atlasrelease", "keyword", "—",
@@ -280,6 +285,41 @@ JOB_STATS_FIELDS: list[tuple[str, str, str, str]] = [
     (
         "homepackage", "keyword", "—",
         "Home package, e.g. Athena/21.0.129.",
+    ),
+    (
+        "lsetup_time", "integer", "s",
+        "Time spent in lsetup execution during pilot payload setup. May be "
+        "null for jobs that skip lsetup (e.g. containerized payloads).",
+    ),
+    (
+        "os_version", "keyword", "—",
+        "Operating system version on the worker node, e.g. '7' for EL7, "
+        "'9.7' for EL9.",
+    ),
+    (
+        "python_version", "keyword", "—",
+        "Python version used by the payload, e.g. '3.9.22'.",
+    ),
+    # ── Memory-leak diagnostics ──────────────────────────────────────────
+    # Linear fit of memory usage over job runtime: y = leak_slope * x +
+    # leak_intersect, where x is elapsed time and y is memory usage.
+    # leak_chi2 is the goodness-of-fit for that model.
+    (
+        "leak_slope", "double", "kB/s",
+        "Slope of the linear memory-usage fit over the job's runtime — the "
+        "rate of memory growth. Positive values indicate memory usage "
+        "increasing over time (a potential leak); near-zero is stable.",
+    ),
+    (
+        "leak_intersect", "double", "kB",
+        "Intercept of the linear memory-usage fit (extrapolated memory at "
+        "t=0, i.e. job start).",
+    ),
+    (
+        "leak_chi2", "double", "—",
+        "Chi-squared goodness-of-fit for the linear memory-usage model. "
+        "Lower is a better fit; high values mean the linear leak model is "
+        "unreliable for this job (e.g. non-linear memory behavior).",
     ),
     # ── Carbon footprint (may be null for non-terminal jobs) ───────────────
     (
@@ -430,6 +470,8 @@ KEYWORD_GROUP_BY_FIELDS: frozenset[str] = frozenset({
     "atlasrelease",
     "country",
     "atlas_resource_type",
+    "os_version",
+    "python_version",
 })
 
 #: Default metric when the caller does not specify one.
@@ -530,6 +572,15 @@ Rules:
   implementation will apply a wildcard search so partial names are fine.
 - Memory fields (avgrss, maxrss, avgpss, maxpss, avgvmem, maxvmem, avgswap,
   maxswap) are in kilobytes (kB). minramcount is in megabytes (MB).
+- Memory-leak fit fields describe a linear model of memory usage over job
+  runtime: memory(t) ≈ leak_slope * t + leak_intersect. leak_slope is in
+  kB/s (rate of growth; positive = increasing memory), leak_intersect is in
+  kB (fit intercept), and leak_chi2 is a dimensionless goodness-of-fit
+  (lower = better fit). All three may be null for jobs too short to fit.
+- lsetup_time (s) may be null for jobs that skip lsetup (e.g. containerized
+  payloads). os_version and python_version are keyword fields — use them
+  only as group_by targets or in phrasing about "which OS/Python version",
+  never as an aggregation "field".
 - CPU efficiency (cpu_eff) is a percentage. cpuconsumptiontime is in seconds.
 - hs06sec may be null for non-terminal jobs (running, transferring).
 - gco2global and gco2regional (CO2 footprint in grams) may be null.
@@ -619,6 +670,18 @@ Examples (with today = {current_utc_date}):
 
   "What is the average stage-in time broken down by tier today?"
   → {{"metric": "avg", "field": "pilottiming_stagein", "group_by": "tier",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "What is the average memory leak rate at CERN today?"
+  → {{"metric": "avg", "field": "leak_slope", "site": "CERN",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "Which site has the highest memory leak rate today?"
+  → {{"metric": "avg", "field": "leak_slope", "group_by": "computingsite",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "How many jobs ran per Python version today?"
+  → {{"metric": "value_count", "field": "pandaid", "group_by": "python_version",
       "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
 
   "How many cores does each site have?"
