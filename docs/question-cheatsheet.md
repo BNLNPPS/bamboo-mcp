@@ -431,8 +431,25 @@ Break down jobs by OS version at CERN today.
 What is the average lsetup time at IN2P3 today?
 ```
 
-> **Note:** `os_version` and `python_version` are keyword fields — only
-> usable as `group_by` targets, not as an aggregation `field`.
+**Filtering by a specific version** (in addition to breaking down by version):
+
+```
+Which sites are still running jobs using python 3.7?
+Which sites are still on python 2?
+How many jobs used python3.7 at CERN this week?
+What is the average CPU efficiency for jobs on EL9 at CERN today?
+Which sites are still on EL7?
+Break down jobs by site for os version 9.7 today.
+What is the average wall-clock time for python 3.9 jobs at BNL?
+```
+
+> **Note:** `os_version` and `python_version` are keyword fields — never
+> usable as an aggregation `field`, but usable both as `group_by` targets
+> (breakdown) and as filters (restrict to one version). Both filters are
+> **prefix matches**: `"3.7"` matches the stored `"3.7.9"`-style full
+> version string but not `"13.7.0"`. For `os_version`, the shorthand
+> `"EL7"` / `"EL9"` is recognized and converted to the bare number (`"7"`,
+> `"9"`) automatically.
 
 ### CPU and HS06 accounting
 

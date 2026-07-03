@@ -217,6 +217,67 @@ class TestIsJobStatsQuestion:
         """A question with no job-stats signal phrase returns False."""
         assert _is_job_stats_question("What is the weather today?") is False
 
+    def test_python_37_site_question(self) -> None:
+        """'sites ... using python 3.7' is a signal via the version regex.
+
+        Regression test: this phrasing has no "version" word and no
+        "python_version" token, so it matched _is_jobs_db_question (via
+        "sites") before _is_job_stats_question ever had a chance — routing
+        to the jobs/CRIC database-disambiguation prompt, or worse, to
+        panda_jobs_query (which has no python_version column), instead of
+        atlas.job_stats. Reported live as: "Which sites are still using
+        python 3.7?" and "Which sites are still running jobs using python
+        3.7?".
+        """
+        assert _is_job_stats_question("Which sites are still using python 3.7?") is True
+
+    def test_python_37_running_jobs_phrase(self) -> None:
+        """The 'running jobs using python 3.7' variant is also a signal."""
+        assert _is_job_stats_question(
+            "Which sites are still running jobs using python 3.7?"
+        ) is True
+
+    def test_python_no_space_version(self) -> None:
+        """'python3.7' with no space is also a signal."""
+        assert _is_job_stats_question("How many jobs used python3.7 at CERN?") is True
+
+    def test_python_bare_major_version(self) -> None:
+        """A bare major version ('python 2', 'python 3') is a signal."""
+        assert _is_job_stats_question("Are any sites still on python 2?") is True
+
+    def test_python_mention_without_version_number_not_a_signal(self) -> None:
+        """A generic Python mention with no version number is NOT a signal
+        via the regex (deliberately left to the LLM planner, same as the
+        plural 'python versions' phrasing)."""
+        assert _is_job_stats_question("How do I write a python script for bamboo?") is False
+
+    def test_el7_shorthand_site_question(self) -> None:
+        """'sites ... on EL7' is a signal via the OS version extraction.
+
+        Regression test: this was broken the same way as the Python
+        version case above — "Which sites are still on EL7?" matched
+        _is_jobs_db_question (via "sites") before this function recognised
+        "EL7" as an OS version mention, routing to panda_jobs_query
+        (no os_version column) instead of atlas.job_stats.
+        """
+        assert _is_job_stats_question("Which sites are still on EL7?") is True
+
+    def test_el9_shorthand_is_a_signal(self) -> None:
+        """'EL9' shorthand is a signal."""
+        assert _is_job_stats_question(
+            "What is the average CPU efficiency for jobs on EL9 at CERN today?"
+        ) is True
+
+    def test_os_version_word_phrase_is_a_signal(self) -> None:
+        """'os version 9.7' (explicit number) is a signal."""
+        assert _is_job_stats_question(
+            "Break down jobs by site for os version 9.7 today."
+        ) is True
+
+    def test_os_mention_without_version_number_not_a_signal(self) -> None:
+        """A generic 'os' mention with no version number is NOT a signal."""
+        assert _is_job_stats_question("What OS does the pilot run on?") is False
+
     def test_queue_time_phrase(self) -> None:
         """'queue time' is a signal (pre-existing)."""
         assert _is_job_stats_question("What is the average queue time at CERN?") is True

@@ -720,12 +720,27 @@ def _is_job_stats_question(question: str) -> bool:
 
     Detects questions about pilot timing sub-fields (stage-in, stage-out,
     payload execution, etc.), wall-clock / queue time, memory usage, CPU
-    efficiency, HS06 accounting, I/O throughput, carbon footprint, or pilot /
-    DDM / execution error codes — all of which are only available in
+    efficiency, HS06 accounting, I/O throughput, carbon footprint, pilot /
+    DDM / execution error codes, or a specific Python/OS version (e.g.
+    "python 3.7", "EL9") — all of which are only available in
     atlas_panda_job_stats-*.
 
     Checked before the jobs-DB fast-path so job stats questions route to
     atlas.job_stats rather than panda_jobs_query.
+
+    A specific version number/shorthand (unlike the bare word "version",
+    which is deliberately excluded from _JOB_STATS_SIGNALS as too
+    ambiguous) is unambiguous in this domain, so it's safe to fast-path.
+    Regression test: "Which sites are still using python 3.7?" and "Which
+    sites are still on EL7?" both matched _is_jobs_db_question (via
+    "sites") before this function recognised the version mention, routing
+    into the jobs/CRIC database-disambiguation prompt or (worse) to
+    panda_jobs_query, which has no python_version/os_version column.
+    Reuses :func:`_extract_python_version_from_question` and
+    :func:`_extract_os_version_from_question` (defined later in this
+    module) as the single source of truth for what counts as a version
+    mention, so routing detection and argument extraction can never drift
+    apart.
 
     Args:
         question: User question text (before any normalisation).
@@ -734,7 +749,11 @@ def _is_job_stats_question(question: str) -> bool:
         True if the question should be routed to atlas.job_stats.
     """
     q = question.lower()
-    return any(sig in q for sig in _JOB_STATS_SIGNALS)
+    if any(sig in q for sig in _JOB_STATS_SIGNALS):
+        return True
+    if _extract_python_version_from_question(question) is not None:
+        return True
+    return _extract_os_version_from_question(question) is not None
 
 
 # Job-specific signals for site-health detection: a subset of _JOBS_DB_SIGNALS
@@ -1224,6 +1243,97 @@ def _extract_site_from_question(question: str) -> str | None:
             return site
 
     return None
+
+
+# Captures a bare Python major(.minor) version mention, e.g. "python 3.7",
+# "python3.7", "python 2". Mirrors _JOB_STATS_VERSION_RE but with a capture
+# group so the version string can be extracted, not just detected.
+_PYTHON_VERSION_EXTRACT_RE: re.Pattern[str] = re.compile(r"\bpython\s*([23](?:\.\d+)?)\b")
+
+# Captures an OS version mention in either "EL<N>" form (e.g. "EL7", "EL9")
+# or "os [version] <N>" form (e.g. "os version 7", "OS 9.7"). Checked in
+# this order since "EL<N>" is the more common ATLAS shorthand and is
+# unambiguous, whereas the bare "os" form needs a word boundary to avoid
+# matching inside unrelated words.
+_OS_VERSION_EL_RE: re.Pattern[str] = re.compile(r"\bel\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_OS_VERSION_WORD_RE: re.Pattern[str] = re.compile(
+    r"\bos\s*(?:version\s*)?(\d+(?:\.\d+)?)\b", re.IGNORECASE
+)
+
+
+def _extract_python_version_from_question(question: str) -> str | None:
+    """Extract a bare Python version mention from a question, if present.
+
+    This is a deterministic safety net for the ``atlas.job_stats``
+    argument-level override, applied only within job-stats-routed
+    branches — so there's no risk of it firing on unrelated questions.
+    It exists because the sub-LLM that translates the question into query
+    parameters (see ``job_stats_schema.build_query_prompt``) can miss the
+    version even when routing correctly identified the question as a
+    job-stats question; this guarantees the filter is applied regardless.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Version prefix string (e.g. ``"3.7"``), or ``None`` if not found.
+    """
+    m = _PYTHON_VERSION_EXTRACT_RE.search(question.lower())
+    return m.group(1) if m else None
+
+
+def _extract_os_version_from_question(question: str) -> str | None:
+    """Extract an OS version mention from a question, if present.
+
+    Recognises both the common ATLAS "EL<N>" shorthand (e.g. "EL7", "EL9")
+    and explicit "os version <N>" / "OS <N>" phrasing. See
+    :func:`_extract_python_version_from_question` for why this exists as a
+    deterministic safety net alongside the sub-LLM extraction.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Version prefix string (e.g. ``"7"``, ``"9.7"``), or ``None`` if not
+        found.
+    """
+    m = _OS_VERSION_EL_RE.search(question)
+    if m:
+        return m.group(1)
+    m = _OS_VERSION_WORD_RE.search(question)
+    return m.group(1) if m else None
+
+
+def _build_job_stats_args(question: str) -> dict[str, str]:
+    """Build the ``atlas.job_stats`` tool-call arguments for a question.
+
+    Extracts ``site``, ``python_version``, and ``os_version`` overrides
+    deterministically from the question text, in addition to the
+    sub-LLM's own extraction inside the ``atlas.job_stats`` tool. This
+    guarantees the filter is applied even if the sub-LLM misses it,
+    mirroring the existing ``site`` safety-net pattern. Shared by both
+    job-stats fast-path call sites (``_run_fast_path_intercepts`` and
+    ``_build_deterministic_plan``) to keep them under the complexity
+    threshold and avoid duplicating the extraction logic.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Arguments dict with ``question`` always present, plus ``site``,
+        ``python_version``, and/or ``os_version`` when detected.
+    """
+    stats_args: dict[str, str] = {"question": question}
+    site = _extract_site_from_question(question)
+    if site:
+        stats_args["site"] = site
+    python_version = _extract_python_version_from_question(question)
+    if python_version:
+        stats_args["python_version"] = python_version
+    os_version = _extract_os_version_from_question(question)
+    if os_version:
+        stats_args["os_version"] = os_version
+    return stats_args
 
 
 def _extract_time_window_from_question(
@@ -1732,10 +1842,7 @@ def _build_deterministic_plan(  # noqa: C901
     # fast-path because signals like 'queue time' and 'wall-clock time' also
     # loosely match _JOBS_DB_SIGNALS.
     if plugin_id in _PANDA_PLUGINS and _is_job_stats_question(question):
-        stats_args: dict[str, str] = {"question": question}
-        site = _extract_site_from_question(question)
-        if site:
-            stats_args["site"] = site
+        stats_args = _build_job_stats_args(question)
         return Plan(
             route=PlanRoute.FAST_PATH,
             confidence=0.9,
@@ -2475,10 +2582,7 @@ async def _run_fast_path_intercepts(
         # also loosely match _JOBS_DB_SIGNALS and would otherwise route
         # to panda_jobs_query instead of atlas.job_stats.
         if plugin_id in frozenset({"atlas", "epic"}) and _is_job_stats_question(question):
-            stats_args: dict[str, str] = {"question": question}
-            site = _extract_site_from_question(question)
-            if site:
-                stats_args["site"] = site
+            stats_args = _build_job_stats_args(question)
             stats_plan = Plan(
                 route=PlanRoute.FAST_PATH,
                 confidence=0.9,

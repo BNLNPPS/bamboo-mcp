@@ -239,9 +239,9 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
 
     Returns:
         Validated parameter dict with keys ``metric``, ``field``,
-        ``site``, ``jobstatus``, ``jeditaskid``, ``from_dt``, ``to_dt``,
-        ``group_by``, and ``top_n``,
-        or ``None`` when the LLM signalled it cannot answer.
+        ``site``, ``jobstatus``, ``jeditaskid``, ``python_version``,
+        ``os_version``, ``from_dt``, ``to_dt``, ``group_by``, and
+        ``top_n``, or ``None`` when the LLM signalled it cannot answer.
     """
     from askpanda_atlas.job_stats_schema import (  # deferred
         DEFAULT_FIELD,
@@ -302,6 +302,8 @@ def parse_llm_params(raw: str) -> dict[str, Any] | None:
         "site": _str_or_none(parsed, "site"),
         "jobstatus": _str_or_none(parsed, "jobstatus"),
         "jeditaskid": _int_or_none(parsed, "jeditaskid"),
+        "python_version": _str_or_none(parsed, "python_version"),
+        "os_version": _str_or_none(parsed, "os_version"),
         "from_dt": _str_or_none(parsed, "from_dt"),
         "to_dt": _str_or_none(parsed, "to_dt"),
         "group_by": raw_group_by,
@@ -326,6 +328,8 @@ def fetch_job_stats(
     group_by: str | None = None,
     top_n: int = 5,
     order: str = "desc",
+    python_version: str | None = None,
+    os_version: str | None = None,
 ) -> dict[str, Any]:
     """Execute a metric aggregation against the job stats index.
 
@@ -343,9 +347,9 @@ def fetch_job_stats(
     cache first; on a miss executes the query and caches the result for
     :data:`~job_stats_schema.CACHE_TTL_SECS` seconds.
 
-    The query applies optional ``term`` filters for ``computingsite``,
-    ``jobstatus``, and ``jeditaskid``, and an optional ``range`` filter on
-    ``@timestamp``.
+    The query applies optional ``term``/``wildcard`` filters for
+    ``computingsite``, ``jobstatus``, ``jeditaskid``, ``python_version``,
+    and ``os_version``, and an optional ``range`` filter on ``@timestamp``.
 
     Args:
         metric: OpenSearch metric aggregation type (``avg``, ``sum``,
@@ -366,13 +370,20 @@ def fetch_job_stats(
         order: Sort direction for group-by buckets: ``"desc"`` (default,
             highest-first) or ``"asc"`` (lowest-first, for "worst" /
             "lowest" queries).  Ignored when *group_by* is ``None``.
+        python_version: Optional Python version prefix filter, e.g.
+            ``"3.7"``.  Matches jobs whose ``python_version`` field starts
+            with this prefix (e.g. ``"3.7"`` matches ``"3.7.9"``), since
+            the stored value is a full version string but users typically
+            refer to just the major/minor version.
+        os_version: Optional OS version prefix filter, e.g. ``"7"`` or
+            ``"9.7"``.  Same prefix-match semantics as *python_version*.
 
     Returns:
         Evidence dict with keys ``metric``, ``field``, ``group_by``,
         ``top_n``, ``order``, ``value`` (scalar path) or ``buckets``
         (terms path), ``doc_count``, ``site_filter``, ``jobstatus_filter``,
-        ``jeditaskid_filter``, ``from_dt``, ``to_dt``, ``endpoint``,
-        and ``error``.
+        ``jeditaskid_filter``, ``python_version_filter``, ``os_version_filter``,
+        ``from_dt``, ``to_dt``, ``endpoint``, and ``error``.
 
     Raises:
         RuntimeError: If ``ASKPANDA_OPENSEARCH`` is not set or the query
@@ -389,6 +400,7 @@ def fetch_job_stats(
     cache_key = (
         f"{CACHE_PREFIX}{metric}|{field}|{site or ''}|"
         f"{jobstatus or ''}|{jeditaskid or ''}|"
+        f"{python_version or ''}|{os_version or ''}|"
         f"{from_dt or ''}|{to_dt or ''}|"
         f"{group_by or ''}|{top_n}|{order}"
     )
@@ -417,6 +429,15 @@ def fetch_job_stats(
         s = s.filter("term", **{"jobstatus.keyword": jobstatus.lower()})
     if jeditaskid is not None:
         s = s.filter("term", jeditaskid=jeditaskid)
+
+    # Version filters: prefix match (not substring) so "3.7" matches
+    # "3.7.9" but not "13.7.0" or "9.3.7" — the stored value is a full
+    # version string (e.g. "3.9.22") but users typically refer to just the
+    # major/minor version they care about.
+    if python_version:
+        s = s.filter("wildcard", **{"python_version.keyword": f"{python_version}*"})
+    if os_version:
+        s = s.filter("wildcard", **{"os_version.keyword": f"{os_version}*"})
 
     # Site filter: wildcard on computingsite.keyword so partial names work.
     if site:
@@ -464,6 +485,8 @@ def fetch_job_stats(
             "site_filter": site,
             "jobstatus_filter": jobstatus,
             "jeditaskid_filter": jeditaskid,
+            "python_version_filter": python_version,
+            "os_version_filter": os_version,
             "from_dt": from_dt,
             "to_dt": to_dt,
             "endpoint": INDEX_PATTERN,
@@ -500,6 +523,8 @@ def fetch_job_stats(
         "site_filter": site,
         "jobstatus_filter": jobstatus,
         "jeditaskid_filter": jeditaskid,
+        "python_version_filter": python_version,
+        "os_version_filter": os_version,
         "from_dt": from_dt,
         "to_dt": to_dt,
         "endpoint": INDEX_PATTERN,
@@ -597,6 +622,8 @@ def _error_evidence(
     group_by: str | None = None,
     top_n: int | None = None,
     order: str | None = None,
+    python_version: str | None = None,
+    os_version: str | None = None,
 ) -> dict[str, Any]:
     """Return a structured evidence dict representing a fetch failure.
 
@@ -617,6 +644,8 @@ def _error_evidence(
         group_by: Requested group-by field, or ``None``.
         top_n: Requested bucket count, or ``None``.
         order: Requested sort order (``"asc"`` / ``"desc"``), or ``None``.
+        python_version: Requested Python version prefix filter, or ``None``.
+        os_version: Requested OS version prefix filter, or ``None``.
 
     Returns:
         Evidence dict with ``error`` populated and ``value`` set to ``None``.
@@ -642,6 +671,8 @@ def _error_evidence(
         "site_filter": site,
         "jobstatus_filter": jobstatus,
         "jeditaskid_filter": jeditaskid,
+        "python_version_filter": python_version,
+        "os_version_filter": os_version,
         "from_dt": from_dt,
         "to_dt": to_dt,
         "endpoint": INDEX_PATTERN,
@@ -672,6 +703,8 @@ def _cannot_answer_evidence(question: str) -> dict[str, Any]:
         "site_filter": None,
         "jobstatus_filter": None,
         "jeditaskid_filter": None,
+        "python_version_filter": None,
+        "os_version_filter": None,
         "from_dt": None,
         "to_dt": None,
         "endpoint": INDEX_PATTERN,
@@ -705,13 +738,15 @@ def get_definition() -> dict[str, Any]:
             "and statistics by querying the OpenSearch atlas_panda_job_stats-* "
             "index.  Use this tool when the user asks about job timing, memory "
             "usage, CPU efficiency, HS06 accounting, I/O throughput, pilot or "
-            "execution errors, task/campaign context, or carbon footprint — "
+            "execution errors, task/campaign context, carbon footprint, or "
+            "software environment (Python version, OS version) — "
             "for example: "
             "'What is the average stage-in time at BNL?', "
             "'What is the average RSS memory usage at CERN today?', "
             "'What is the CPU efficiency at IN2P3 today?', "
             "'What is the total HS06-seconds at TRIUMF today?', "
             "'What is the average write throughput at CERN?', "
+            "'Which sites are still running python 3.7?', "
             "or 'How many jobs ran at BNL today?'. "
             "Requires ASKPANDA_OPENSEARCH to be set."
         ),
@@ -730,6 +765,24 @@ def get_definition() -> dict[str, Any]:
                     "description": (
                         "Optional computing site filter, e.g. 'BNL', 'CERN'. "
                         "Overrides any site extracted from the question."
+                    ),
+                },
+                "python_version": {
+                    "type": "string",
+                    "description": (
+                        "Optional Python version prefix filter, e.g. '3.7'. "
+                        "Matches jobs whose python_version starts with this "
+                        "prefix. Overrides any version extracted from the "
+                        "question."
+                    ),
+                },
+                "os_version": {
+                    "type": "string",
+                    "description": (
+                        "Optional OS version prefix filter, e.g. '7', '9.7'. "
+                        "Matches jobs whose os_version starts with this "
+                        "prefix. Overrides any version extracted from the "
+                        "question."
                     ),
                 },
                 "from_dt": {
@@ -787,8 +840,8 @@ class PandaJobStatsTool:
 
         1. Validate and normalise the ``question`` argument.
         2. Call the LLM (async) to extract structured query parameters.
-        3. Apply any argument-level overrides (``site``, ``from_dt``,
-           ``to_dt``).
+        3. Apply any argument-level overrides (``site``, ``python_version``,
+           ``os_version``, ``from_dt``, ``to_dt``).
         4. Fall back to the default time window when no time range is
            specified.
         5. Execute the OpenSearch aggregation synchronously via
@@ -800,7 +853,8 @@ class PandaJobStatsTool:
 
         Args:
             arguments: Dict with required ``"question"`` (str) and optional
-                ``"site"`` (str), ``"from_dt"`` (str), ``"to_dt"`` (str).
+                ``"site"`` (str), ``"python_version"`` (str),
+                ``"os_version"`` (str), ``"from_dt"`` (str), ``"to_dt"`` (str).
 
         Returns:
             One-element MCP content list containing the JSON-serialised
@@ -820,6 +874,8 @@ class PandaJobStatsTool:
 
         # Argument-level overrides (take precedence over LLM extraction).
         arg_site: str | None = (arguments.get("site") or "").strip() or None
+        arg_python_version: str | None = (arguments.get("python_version") or "").strip() or None
+        arg_os_version: str | None = (arguments.get("os_version") or "").strip() or None
         arg_from_dt: str | None = (arguments.get("from_dt") or "").strip() or None
         arg_to_dt: str | None = (arguments.get("to_dt") or "").strip() or None
 
@@ -835,6 +891,8 @@ class PandaJobStatsTool:
                 DEFAULT_METRIC, DEFAULT_FIELD,
                 arg_site, None, None, arg_from_dt, arg_to_dt,
                 detail=f"LLM call failed: {exc}",
+                python_version=arg_python_version,
+                os_version=arg_os_version,
             )
             return text_content(json.dumps({"evidence": ev}))
 
@@ -847,6 +905,10 @@ class PandaJobStatsTool:
         # Apply argument-level overrides.
         if arg_site:
             params["site"] = arg_site
+        if arg_python_version:
+            params["python_version"] = arg_python_version
+        if arg_os_version:
+            params["os_version"] = arg_os_version
         if arg_from_dt:
             params["from_dt"] = arg_from_dt
         if arg_to_dt:
@@ -876,6 +938,8 @@ class PandaJobStatsTool:
                 params.get("group_by"),
                 params.get("top_n", 5),
                 params.get("order", "desc"),
+                params.get("python_version"),
+                params.get("os_version"),
             )
             return text_content(json.dumps({"evidence": evidence}))
         except Exception as exc:  # noqa: BLE001
@@ -889,6 +953,8 @@ class PandaJobStatsTool:
                 group_by=params.get("group_by"),
                 top_n=params.get("top_n"),
                 order=params.get("order"),
+                python_version=params.get("python_version"),
+                os_version=params.get("os_version"),
             )
             return text_content(json.dumps({"evidence": ev}))
 

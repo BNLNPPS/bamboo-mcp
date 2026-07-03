@@ -539,6 +539,14 @@ these keys (all optional except none are required if you cannot answer):
   "jobstatus"   : jobstatus keyword filter, e.g. "finished", "failed"
                   Omit when no job status is mentioned.
   "jeditaskid"  : integer JEDI task ID filter.  Omit when not mentioned.
+  "python_version" : Python version prefix filter, e.g. "3.7", "3.9".
+                  Use the shortest prefix the user mentions — the
+                  implementation matches it against the start of the full
+                  version string (e.g. "3.7" matches "3.7.9"). Omit when no
+                  Python version is mentioned.
+  "os_version"  : OS version prefix filter, e.g. "7", "9.7". If the user
+                  says "EL7" or "EL9", convert to the bare number ("7",
+                  "9"). Omit when no OS version is mentioned.
   "from_dt"     : ISO-8601 lower bound on @timestamp (= statechangetime).
                   Compute from TODAY/NOW above.
                   Omit when the user does not specify a time range.
@@ -578,9 +586,13 @@ Rules:
   kB (fit intercept), and leak_chi2 is a dimensionless goodness-of-fit
   (lower = better fit). All three may be null for jobs too short to fit.
 - lsetup_time (s) may be null for jobs that skip lsetup (e.g. containerized
-  payloads). os_version and python_version are keyword fields — use them
-  only as group_by targets or in phrasing about "which OS/Python version",
-  never as an aggregation "field".
+  payloads). os_version and python_version are keyword fields — never use
+  them as an aggregation "field" or "group_by" is fine, but for a specific
+  version mentioned by the user (e.g. "python 3.7", "EL9", "os version 7")
+  use the "python_version" / "os_version" filter keys instead. Both are
+  prefix matches, not exact matches — give the shortest prefix the user
+  said (e.g. "3.7" not "3.7.9") and the implementation matches jobs whose
+  full version string starts with it.
 - CPU efficiency (cpu_eff) is a percentage. cpuconsumptiontime is in seconds.
 - hs06sec may be null for non-terminal jobs (running, transferring).
 - gco2global and gco2regional (CO2 footprint in grams) may be null.
@@ -682,6 +694,15 @@ Examples (with today = {current_utc_date}):
 
   "How many jobs ran per Python version today?"
   → {{"metric": "value_count", "field": "pandaid", "group_by": "python_version",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "Which sites are still running jobs using python 3.7?"
+  → {{"metric": "value_count", "field": "pandaid", "group_by": "computingsite",
+      "python_version": "3.7",
+      "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
+
+  "What is the average CPU efficiency for jobs on EL9 at CERN today?"
+  → {{"metric": "avg", "field": "cpu_eff", "site": "CERN", "os_version": "9",
       "from_dt": "{current_utc_date}T00:00:00", "to_dt": "{current_utc_date}T23:59:59"}}
 
   "How many cores does each site have?"

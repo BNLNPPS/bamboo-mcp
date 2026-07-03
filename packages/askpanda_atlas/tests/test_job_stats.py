@@ -925,6 +925,8 @@ class TestFetchJobStats:
         jeditaskid: int | None = None,
         from_dt: str | None = "2026-06-01T00:00:00",
         to_dt: str | None = "2026-06-08T00:00:00",
+        python_version: str | None = None,
+        os_version: str | None = None,
     ) -> dict[str, Any]:
         """Execute fetch_job_stats with patched OpenSearch.
 
@@ -938,6 +940,8 @@ class TestFetchJobStats:
             jeditaskid: Optional task ID filter.
             from_dt: Lower time bound.
             to_dt: Upper time bound.
+            python_version: Optional Python version prefix filter.
+            os_version: Optional OS version prefix filter.
 
         Returns:
             Evidence dict from fetch_job_stats.
@@ -953,15 +957,18 @@ class TestFetchJobStats:
             _patch_os(mock_response),
         ):
             from askpanda_atlas._cache import invalidate
-            # Key must match fetch_job_stats exactly (includes group_by/top_n/order).
+            # Key must match fetch_job_stats exactly (includes group_by/top_n/order
+            # and the python_version/os_version filter segment).
             cache_key = (
                 f"job_stats:{metric}|{field}|{site or ''}|"
                 f"{jobstatus or ''}|{jeditaskid or ''}|"
+                f"{python_version or ''}|{os_version or ''}|"
                 f"{from_dt or ''}|{to_dt or ''}||5|desc"
             )
             invalidate(cache_key)
             return fetch_job_stats(
-                metric, field, site, jobstatus, jeditaskid, from_dt, to_dt
+                metric, field, site, jobstatus, jeditaskid, from_dt, to_dt,
+                python_version=python_version, os_version=os_version,
             )
 
     def test_avg_returns_value(self) -> None:
@@ -1037,6 +1044,114 @@ class TestFetchJobStats:
             os.environ.pop("ASKPANDA_OPENSEARCH", None)
             with pytest.raises(RuntimeError, match="ASKPANDA_OPENSEARCH"):
                 fetch_job_stats("avg", "job_walltime")
+
+    # ------------------------------------------------------------------
+    # python_version / os_version prefix-wildcard filters
+    # ------------------------------------------------------------------
+
+    def test_python_version_filter_in_evidence(self) -> None:
+        """python_version_filter appears in evidence with the requested value."""
+        from askpanda_atlas._cache import clear as _clear
+        _clear()
+        result = self._run(value=42.0, python_version="3.7")
+        assert result["python_version_filter"] == "3.7"
+
+    def test_os_version_filter_in_evidence(self) -> None:
+        """os_version_filter appears in evidence with the requested value."""
+        from askpanda_atlas._cache import clear as _clear
+        _clear()
+        result = self._run(value=42.0, os_version="9")
+        assert result["os_version_filter"] == "9"
+
+    def test_no_version_filters_when_omitted(self) -> None:
+        """Both version filters are None in evidence when not requested."""
+        from askpanda_atlas._cache import clear as _clear
+        _clear()
+        result = self._run(value=42.0)
+        assert result["python_version_filter"] is None
+        assert result["os_version_filter"] is None
+
+    def test_python_version_applies_prefix_wildcard_filter(self) -> None:
+        """python_version is applied as a '<value>*' wildcard filter, not
+        exact-match or substring, so '3.7' matches the stored '3.7.9' style
+        full version strings but is anchored to the start."""
+        from askpanda_atlas._cache import clear as _clear
+        _clear()
+
+        mock_search = MagicMock()
+        mock_search.return_value.extra.return_value = mock_search.return_value
+        mock_search.return_value.filter.return_value = mock_search.return_value
+        mock_search.return_value.aggs.metric.return_value = MagicMock()
+        mock_search.return_value.execute.return_value = _mock_os_response(42.0, 100)
+        mock_os_dsl = MagicMock()
+        mock_os_dsl.Search = mock_search
+
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl}),
+        ):
+            fetch_job_stats("avg", "job_walltime", python_version="3.7")
+
+        filter_calls = mock_search.return_value.filter.call_args_list
+        wildcard_calls = [c for c in filter_calls if c.args and c.args[0] == "wildcard"]
+        assert any(
+            c.kwargs.get("python_version.keyword") == "3.7*" for c in wildcard_calls
+        ), f"Expected a wildcard filter on 'python_version.keyword'='3.7*', got: {filter_calls}"
+
+    def test_os_version_applies_prefix_wildcard_filter(self) -> None:
+        """os_version is applied as a '<value>*' wildcard filter."""
+        from askpanda_atlas._cache import clear as _clear
+        _clear()
+
+        mock_search = MagicMock()
+        mock_search.return_value.extra.return_value = mock_search.return_value
+        mock_search.return_value.filter.return_value = mock_search.return_value
+        mock_search.return_value.aggs.metric.return_value = MagicMock()
+        mock_search.return_value.execute.return_value = _mock_os_response(42.0, 100)
+        mock_os_dsl = MagicMock()
+        mock_os_dsl.Search = mock_search
+
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            patch.dict(sys.modules, {"opensearch_dsl": mock_os_dsl}),
+        ):
+            fetch_job_stats("avg", "job_walltime", os_version="9")
+
+        filter_calls = mock_search.return_value.filter.call_args_list
+        wildcard_calls = [c for c in filter_calls if c.args and c.args[0] == "wildcard"]
+        assert any(
+            c.kwargs.get("os_version.keyword") == "9*" for c in wildcard_calls
+        ), f"Expected a wildcard filter on 'os_version.keyword'='9*', got: {filter_calls}"
+
+    def test_both_version_filters_combined_with_group_by_site(self) -> None:
+        """python_version filter works alongside group_by=computingsite —
+        the combination the original 'which sites still use python 3.7'
+        report needed."""
+        from askpanda_atlas._cache import clear as _clear
+        _clear()
+        mock_response = _mock_terms_response([("BNL_ATLAS_1", 1.0, 42)])
+        with (
+            patch(
+                "askpanda_atlas.job_stats_impl._create_os_client",
+                return_value=MagicMock(),
+            ),
+            patch.dict(os.environ, {"ASKPANDA_OPENSEARCH": "test-password"}),
+            _patch_os_terms(mock_response),
+        ):
+            result = fetch_job_stats(
+                "value_count", "pandaid",
+                group_by="computingsite", python_version="3.7",
+            )
+        assert result["python_version_filter"] == "3.7"
+        assert result["buckets"][0]["key"] == "BNL_ATLAS_1"
 
 
 # ---------------------------------------------------------------------------

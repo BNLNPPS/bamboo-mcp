@@ -30,8 +30,70 @@ All notable changes to Bamboo are documented here.
   case. Test coverage added in `test_job_stats.py`
   (`TestJobMetricsFields`, plus `parse_llm_params`/`group_by` round-trips)
   and `test_bamboo_answer_helpers.py` (`TestIsJobStatsQuestion`).
+- **`atlas.job_stats`: `python_version` / `os_version` equality filters**
+  (`packages/askpanda_atlas/askpanda_atlas/job_stats_schema.py`,
+  `packages/askpanda_atlas/askpanda_atlas/job_stats_impl.py`,
+  `core/bamboo/tools/bamboo_answer.py`):
+  Previously the only filterable fields were `site`, `jobstatus`, and
+  `jeditaskid` — `group_by=python_version` could show a breakdown, but
+  there was no way to filter to a specific version while grouping by a
+  different field (e.g. "which sites are still running python 3.7").
+  Reported live: routing correctly deferred to `atlas.job_stats` but the
+  tool itself had no way to express the query.
+  Added `python_version` and `os_version` as new filter keys throughout
+  the stack: the sub-LLM's JSON extraction schema (`_SYSTEM_TEMPLATE`),
+  `parse_llm_params`, `fetch_job_stats` (new `wildcard` filter clauses,
+  prefix-match not substring-match, so `"3.7"` matches stored `"3.7.9"`
+  but not `"13.7.0"`), `_error_evidence`/`_cannot_answer_evidence` (new
+  `python_version_filter`/`os_version_filter` evidence keys), and the
+  tool's `inputSchema` (mandatory since `additionalProperties: false` is
+  set — an argument override without a matching schema property would be
+  rejected outright).
+  Also added `bamboo_answer.py`-level deterministic extraction
+  (`_extract_python_version_from_question`, recognizing "python 3.7"/
+  "python3.7"/"python 2"; `_extract_os_version_from_question`, recognizing
+  "EL7"/"EL9" and "os version 7"/"OS 9.7") as an argument-level safety net
+  on top of the sub-LLM's own extraction — mirrors the existing `site`
+  override pattern. Consolidated into a new `_build_job_stats_args` helper
+  shared by both job-stats fast-path call sites (`_run_fast_path_intercepts`
+  and `_build_deterministic_plan`) to avoid duplicating the extraction
+  logic and to keep `_run_fast_path_intercepts` under the flake8
+  max-complexity threshold (adding the two extractions inline pushed it
+  from 15 to 17).
+  Test coverage: `packages/askpanda_atlas/tests/test_job_stats.py` gained
+  wildcard-filter assertions (prefix match verified directly against the
+  mocked `Search.filter()` calls) and a combined filter+group_by test
+  matching the original report's exact use case.
+  Full suite: 2025 tests pass (1082 core + 760 askpanda_atlas + 89
+  askpanda_epic + 94 askcgsim).
 
 ### Fixed
+- **`_is_job_stats_question` didn't recognise bare OS version mentions
+  either** (`core/bamboo/tools/bamboo_answer.py`): found while writing
+  cheat-sheet examples for the new `os_version` filter — "Which sites are
+  still on EL7?" and "...os version 9.7..." both routed to
+  `panda_jobs_query` (no `os_version` column) via the same
+  `_is_jobs_db_question`-wins-first mechanism as the Python version bug
+  above. Fixed by having `_is_job_stats_question` reuse
+  `_extract_python_version_from_question` /
+  `_extract_os_version_from_question` directly instead of a separate
+  detection-only regex, so routing detection and argument extraction share
+  one source of truth and can't drift apart again. Added symmetric
+  regression tests (`test_el7_shorthand_site_question`,
+  `test_el9_shorthand_is_a_signal`, `test_os_version_word_phrase_is_a_signal`).
+- **`_is_job_stats_question` didn't recognise bare Python version mentions**
+  (`core/bamboo/tools/bamboo_answer.py`): "Which sites are still using
+  python 3.7?" matched `_is_jobs_db_question` (via "sites") before
+  `_is_job_stats_question` ever had a chance, since job_stats only
+  recognised the literal `python_version` token or "memory leak"-style
+  phrases — not a bare version number. This routed the question into the
+  jobs/CRIC database-disambiguation prompt, or (with "running jobs" added)
+  into `panda_jobs_query`, which has no `python_version` column at all.
+  Fixed with a new regex signal (`_JOB_STATS_VERSION_RE`,
+  `\bpython\s*[23](?:\.\d+)?\b`) checked alongside the existing literal-token
+  signals in `_is_job_stats_question`. Known trade-off: an extremely
+  contrived phrase like "python 2 days ago" would also match — accepted as
+  low-risk given the domain.
 - **Deterministic fast-path silently defaulted every unmatched question to
   RAG, never reaching the LLM planner** (`core/bamboo/tools/bamboo_answer.py`,
   `core/bamboo/tools/bamboo_executor.py`, `core/bamboo/tools/planner.py`):
