@@ -1,11 +1,15 @@
 """Tests for LLM error handling in bamboo_answer.
 
-After the deterministic fast-path refactor, _route() calls execute_plan()
-directly (no planner LLM call). LLMError can surface from inside execute_plan
-(specifically from call_llm). The BambooAnswerTool.call() boundary catches all
-LLMError and converts it to a friendly message.
+BambooAnswerTool.call() must never propagate LLMError to the caller,
+regardless of which internal path raises it: execute_plan() (called
+directly for ID-driven FAST_PATH routes) or bamboo_plan_tool.call() (used
+when no fast-path signal matches and the question defers to the LLM
+planner). The BambooAnswerTool.call() boundary catches all LLMError from
+either path and converts it to a friendly message.
 
-We mock execute_plan at the bamboo.tools.bamboo_answer level to inject errors.
+Tests mock whichever internal call the specific question is expected to
+reach: execute_plan for ID-driven questions (e.g. a task ID), bamboo_plan_tool
+for plain no-ID questions.
 """
 from __future__ import annotations
 
@@ -113,17 +117,22 @@ class TestBambooAnswerLLMErrorHandling:
 
     @pytest.mark.asyncio
     async def test_503_from_execute_plan_returns_friendly_message(self) -> None:
-        """503 raised from execute_plan returns a friendly overloaded message."""
+        """503 raised from the LLM planner returns a friendly overloaded message.
+
+        "What is PanDA?" has no ID and no fast-path signal, so it now defers
+        to bamboo_plan_tool rather than calling execute_plan directly.
+        """
         exc = LLMProviderError(
             "Mistral error after retries: Status 503 upstream connect error reset reason: overflow"
         )
         guard_mock = AsyncMock(return_value=_mock_guard())
-        exec_mock = AsyncMock(side_effect=exc)
+        plan_mock = AsyncMock(side_effect=exc)
         tool = BambooAnswerTool()
         with (
             patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-            patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+            patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
         ):
+            mock_plan_tool.call = plan_mock
             result = await tool.call({"question": "What is PanDA?"})
         assert result[0]["type"] == "text"
         text = result[0]["text"]
@@ -133,7 +142,12 @@ class TestBambooAnswerLLMErrorHandling:
 
     @pytest.mark.asyncio
     async def test_timeout_from_execute_plan_returns_friendly_message(self) -> None:
-        """Timeout raised from execute_plan returns a friendly timeout message."""
+        """Timeout raised from execute_plan returns a friendly timeout message.
+
+        "What is task 12345678 status?" has a task ID, so this stays on the
+        deterministic FAST_PATH → execute_plan directly, unaffected by the
+        no-signal-matched deferral to the LLM planner.
+        """
         guard_mock = AsyncMock(return_value=_mock_guard())
         exec_mock = AsyncMock(side_effect=LLMTimeoutError("deadline exceeded"))
         tool = BambooAnswerTool()
@@ -146,27 +160,37 @@ class TestBambooAnswerLLMErrorHandling:
 
     @pytest.mark.asyncio
     async def test_config_error_from_execute_plan_returns_friendly_message(self) -> None:
-        """Missing API key surfaces as a configuration hint, not an exception."""
+        """Missing API key surfaces as a configuration hint, not an exception.
+
+        "What is brokerage?" has no ID and no fast-path signal, so it defers
+        to bamboo_plan_tool rather than calling execute_plan directly.
+        """
         guard_mock = AsyncMock(return_value=_mock_guard())
-        exec_mock = AsyncMock(side_effect=LLMConfigError("MISTRAL_API_KEY is not set"))
+        plan_mock = AsyncMock(side_effect=LLMConfigError("MISTRAL_API_KEY is not set"))
         tool = BambooAnswerTool()
         with (
             patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-            patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+            patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
         ):
+            mock_plan_tool.call = plan_mock
             result = await tool.call({"question": "What is brokerage?"})
         assert "⚙️" in result[0]["text"]
 
     @pytest.mark.asyncio
     async def test_rate_limit_from_execute_plan_returns_friendly_message(self) -> None:
-        """429 rate limit error surfaces clearly."""
+        """429 rate limit error surfaces clearly.
+
+        "What is JEDI?" has no ID and no fast-path signal, so it defers to
+        bamboo_plan_tool rather than calling execute_plan directly.
+        """
         guard_mock = AsyncMock(return_value=_mock_guard())
-        exec_mock = AsyncMock(side_effect=LLMProviderError("Status 429 too many requests"))
+        plan_mock = AsyncMock(side_effect=LLMProviderError("Status 429 too many requests"))
         tool = BambooAnswerTool()
         with (
             patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-            patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+            patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
         ):
+            mock_plan_tool.call = plan_mock
             result = await tool.call({"question": "What is JEDI?"})
         assert "⏳" in result[0]["text"]
 
@@ -182,14 +206,19 @@ class TestBambooAnswerLLMErrorHandling:
 
     @pytest.mark.asyncio
     async def test_successful_response_unaffected(self) -> None:
-        """Normal successful responses are unaffected by the error handler."""
+        """Normal successful responses are unaffected by the error handler.
+
+        "What is PanDA?" has no ID and no fast-path signal, so it defers to
+        bamboo_plan_tool rather than calling execute_plan directly.
+        """
         llm_reply = "PanDA is the Production and Distributed Analysis system."
         guard_mock = AsyncMock(return_value=_mock_guard())
-        exec_mock = AsyncMock(return_value=[{"type": "text", "text": llm_reply}])
+        plan_mock = AsyncMock(return_value=[{"type": "text", "text": llm_reply}])
         tool = BambooAnswerTool()
         with (
             patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-            patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+            patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
         ):
+            mock_plan_tool.call = plan_mock
             result = await tool.call({"question": "What is PanDA?"})
         assert result[0]["text"] == llm_reply

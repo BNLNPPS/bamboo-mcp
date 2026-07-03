@@ -1394,6 +1394,52 @@ def _is_enumeration_question(question: str) -> bool:
     return any(phrase in q for phrase in _ENUMERATION_PHRASES)
 
 
+# All doc-search/BM25 tool names across every plugin, used to identify which
+# tool_calls in a Plan are RAG retrieval calls eligible for automatic topic
+# injection (see _inject_doc_topics).
+_ALL_DOC_TOOL_NAMES: frozenset[str] = frozenset(
+    name for tools in _PLUGIN_DOC_TOOLS.values() for name in tools
+) | frozenset(_DEFAULT_DOC_TOOLS)
+
+
+def _inject_doc_topics(plan: Plan, question: str, plugin_id: str) -> None:
+    """Fill in a missing ``topic`` argument on doc-search tool calls.
+
+    The deterministic fast-path builder used to compute ``topic`` via
+    :func:`~bamboo.tools.bamboo_answer._topic_for_question` itself before
+    constructing a RETRIEVE plan. Now that unmatched questions defer to the
+    LLM planner (see ``_build_deterministic_plan`` in ``bamboo_answer.py``),
+    the planner's own prompt does not know about topic-to-collection
+    routing and never supplies a ``topic`` argument — so without this,
+    every planner-issued doc_search/doc_bm25 call would silently fall back
+    to the default ChromaDB collection instead of the topic-specific one
+    (e.g. ``rucio``, ``root``, ``bamboo_mcp``) that the deterministic path
+    used to resolve. Mutates ``plan.tool_calls`` in place; a no-op for
+    tool_calls that already specify ``topic`` or are not doc-search tools.
+
+    Args:
+        plan: The plan whose tool_calls may need a topic filled in.
+        question: The question used to derive the topic when needed.
+        plugin_id: Active plugin identifier, passed through to
+            ``_topic_for_question`` for plugin-scoped topic defaults.
+    """
+    topic: str | None = None
+    for tc in plan.tool_calls:
+        if tc.tool not in _ALL_DOC_TOOL_NAMES:
+            continue
+        if tc.arguments.get("topic"):
+            continue
+        if topic is None:
+            # Deferred import: bamboo_answer imports execute_plan from this
+            # module at module load time, so a module-level import here
+            # would be circular. By call time bamboo_answer is fully
+            # loaded, so a local import is safe (same pattern used
+            # elsewhere in this codebase for cross-module helpers).
+            from bamboo.tools.bamboo_answer import _topic_for_question  # noqa: PLC0415
+            topic = _topic_for_question(question, plugin_id)
+        tc.arguments["topic"] = topic
+
+
 async def execute_plan(
     plan: Plan,
     question: str,
@@ -1420,7 +1466,8 @@ async def execute_plan(
         original_question: The user's actual phrasing when ``question`` has
             been reformulated (e.g. for content-free follow-ups).  Passed to
             :func:`_build_synthesis_prompt` to enable expansion framing.
-        plugin_id: Active plugin identifier for synthesis prompt selection.
+        plugin_id: Active plugin identifier for synthesis prompt selection
+            and topic resolution for any doc-search tool calls in the plan.
 
     Returns:
         One-element ``list[MCPContent]`` with the synthesised text answer.
@@ -1428,6 +1475,8 @@ async def execute_plan(
     evidence_parts: list[str] = []
     called_tool_names: list[str] = []
     errors: list[str] = []
+
+    _inject_doc_topics(plan, question, plugin_id)
 
     async with span(EVENT_PLAN, tool="bamboo_executor", plan=plan.model_dump()):
         pass  # Emit the plan as a trace event so the TUI /plan command can find it.

@@ -643,6 +643,10 @@ _JOB_STATS_SIGNALS: frozenset[str] = frozenset({
     "wallclock time",
     "wall clock time",
     "queue time",
+    "queuing time",
+    "queueing time",
+    "queue wait time",
+    "queue wait",
     "queuetime",
     "job_walltime",
     "job_queuetime",
@@ -1543,8 +1547,20 @@ def _build_deterministic_plan(  # noqa: C901
 ) -> "Plan | None":
     """Build a Plan without an LLM call for unambiguous routing cases.
 
-    Returns a validated Plan for the six clear-cut routes, or ``None`` when
-    the question is ambiguous enough to need the LLM planner.
+    Returns a validated Plan for a clear-cut deterministic route, or
+    ``None`` when no fast-path signal matches — including plain
+    documentation-style questions — so the caller (``_route``) defers to
+    the LLM planner (``bamboo_plan_tool``), which is itself capable of
+    choosing RETRIEVE with doc_search/doc_bm25 for genuine doc questions.
+
+    This function previously defaulted every "no ID, no signal matched"
+    question straight to a deterministic RAG plan (see CHANGELOG for the
+    "queuing time" / "python versions used" incidents this caused: any
+    phrasing gap in ANY of the signal sets below silently produced a wrong
+    "documentation doesn't cover this" answer instead of ever reaching the
+    LLM planner, even though the planner's own routing prompt already knew
+    how to handle the phrasing). Returning ``None`` here closes that
+    failure mode for every fast-path domain, not just job stats.
 
     Fast-path rules (in priority order):
     1b. Job ID + pilot-source signals + stored pilot_monitoring_error → ``pilot_source_analysis`` FAST_PATH
@@ -1552,17 +1568,20 @@ def _build_deterministic_plan(  # noqa: C901
     2. Job ID (no task ID)          → ``panda_job_status``         FAST_PATH
     3. Task ID                      → ``panda_task_status``        FAST_PATH
     4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
-    5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
-    6. Source code signals          → ``code_query``               FAST_PATH
-    7. Prompt-log signals           → ``opensearch_promptlog_query`` FAST_PATH
-    8. No IDs                       → doc_search + doc_bm25        RETRIEVE
+    5. CRIC signals                 → ``cric_query``               FAST_PATH
+    6. CGSim plugin, non-conceptual → ``cgsim.sim_query``          FAST_PATH
+    7. Job stats signals            → ``atlas.job_stats``          FAST_PATH
+    8. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
+    9. Prompt-log signals           → ``opensearch_promptlog_query`` FAST_PATH
+    10. Source code signals         → ``code_query``               FAST_PATH
+    11. Nothing matched             → ``None`` (defer to LLM planner)
 
     Args:
         question: User question text.
         task_id: Extracted task ID, or None.
         job_id: Extracted job ID, or None.
-        plugin_id: Active plugin identifier; determines which doc tools to use
-            for the fallback RAG retrieval route.
+        plugin_id: Active plugin identifier; determines which PanDA-family
+            routing rules apply and which CGSim/CRIC rules are reachable.
 
     Returns:
         A validated :class:`~bamboo.tools.planner.Plan`, or ``None`` to
@@ -1760,30 +1779,18 @@ def _build_deterministic_plan(  # noqa: C901
     if _is_code_query_question(question):
         return _build_code_query_plan(question, reuse)
 
-    # No IDs: general knowledge / documentation question → always retrieve.
-    # top_k=5 for both to keep synthesis prompt within ~2500 input tokens,
-    # well clear of the 30s TUI timeout even on follow-up turns with history.
-    from bamboo.tools.bamboo_executor import _PLUGIN_DOC_TOOLS, _DEFAULT_DOC_TOOLS  # noqa: PLC0415
-    _doc_tools = list(_PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS))
-    doc_search = _doc_tools[0] if _doc_tools else "panda_doc_search"
-    doc_bm25 = _doc_tools[1] if len(_doc_tools) > 1 else "panda_doc_bm25"
-    topic = _topic_for_question(question, plugin_id)
-    return Plan(
-        route=PlanRoute.RETRIEVE,
-        confidence=1.0,
-        tool_calls=[
-            ToolCall(
-                tool=doc_search,
-                arguments={"query": question, "top_k": 5, "topic": topic},
-            ),
-            ToolCall(
-                tool=doc_bm25,
-                arguments={"query": question, "top_k": 5, "topic": topic},
-            ),
-        ],
-        reuse_policy=reuse,
-        explain=f"Deterministic: no task/job ID → RAG retrieval ({doc_search}, {doc_bm25}, topic={topic}).",
-    )
+    # Nothing matched: defer to the LLM planner rather than assuming this is
+    # a documentation question. The planner's own routing prompt already
+    # knows how to select doc_search + doc_bm25 with route=RETRIEVE for
+    # genuine conceptual/doc questions (see _build_atlas_planner_prompt /
+    # _build_cgsim_planner_prompt in planner.py) — so returning None here
+    # does not lose RAG capability, it just routes it through the planner
+    # instead of guaranteeing it deterministically for every unmatched
+    # question, some of which are live-data questions phrased in a way none
+    # of the signal sets above anticipated (e.g. "queuing time" vs. the
+    # registered "queue time", or "which python versions are used" vs. the
+    # registered "python_version" token).
+    return None
 
 
 # Matches content-free follow-up phrases that carry no domain information.

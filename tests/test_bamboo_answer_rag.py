@@ -1,10 +1,19 @@
 """Tests for BambooAnswerTool routing after the deterministic fast-path refactor.
 
-After the refactor, _route() calls _build_deterministic_plan() for all common
-cases and then calls execute_plan() directly — bypassing the LLM planner
-entirely. The planner is only invoked when _build_deterministic_plan returns
-None (which it never currently does; it covers all four cases). Tests mock
-execute_plan at the bamboo.tools.bamboo_answer module level.
+_route() calls _build_deterministic_plan() for domain-specific fast-path
+cases (job/task ID, pilot, CRIC, job stats, jobs DB, prompt-log, code query).
+When none of those signal sets match, _build_deterministic_plan() returns
+None, and _route() defers to the LLM planner (bamboo_plan_tool) rather than
+building a RAG plan itself — the planner is fully capable of choosing
+RETRIEVE with doc_search/doc_bm25 for genuine documentation questions via its
+own routing prompt (see planner.py). This closes a class of bug where any
+phrasing gap in a fast-path signal set (e.g. "queuing time" vs. the
+registered "queue time", or "which python versions are used" vs. the
+registered "python_version" token) silently produced a deterministic
+"documentation doesn't cover this" answer instead of ever reaching the
+planner. Tests mock bamboo_plan_tool at the bamboo.tools.bamboo_answer
+module level for the no-signal-matched case, and execute_plan for the
+ID-driven fast-path cases.
 """
 from __future__ import annotations
 
@@ -41,16 +50,18 @@ def _mock_guard(allowed: bool = True) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-def test_no_ids_returns_retrieve_plan():
-    """Questions with no IDs produce a RETRIEVE plan with both RAG tools."""
+def test_no_ids_no_signal_returns_none():
+    """Questions with no IDs and no fast-path domain signal defer to the
+    LLM planner (return None) rather than building a deterministic RAG plan.
+
+    Regression test for the "queuing time" / "which python versions are
+    used" incidents: previously this branch always built a RETRIEVE plan
+    with doc_search/doc_bm25, so any signal-set phrasing gap silently
+    produced a wrong "documentation doesn't cover this" answer instead of
+    ever reaching the LLM planner.
+    """
     plan = _build_deterministic_plan("What is PanDA?", None, None)
-    assert plan is not None
-    assert plan.route == PlanRoute.RETRIEVE
-    tools = [tc.tool for tc in plan.tool_calls]
-    assert "panda_doc_search" in tools
-    assert "panda_doc_bm25" in tools
-    # Vector search must come before BM25 (stable ordering from _DEFAULT_DOC_TOOLS)
-    assert tools.index("panda_doc_search") < tools.index("panda_doc_bm25")
+    assert plan is None
 
 
 def test_task_id_returns_task_plan():
@@ -115,19 +126,24 @@ def test_jobs_db_question_no_site_omits_queue():
 
 
 @pytest.mark.asyncio
-async def test_general_question_calls_execute_plan():
-    """A question with no ID calls execute_plan with a RETRIEVE plan."""
-    exec_mock = AsyncMock(return_value=_exec_result("PanDA is a workload manager."))
+async def test_general_question_defers_to_llm_planner():
+    """A question with no ID and no fast-path signal defers to
+    bamboo_plan_tool (the LLM planner) rather than a deterministic RAG plan.
+    """
+    plan_mock = AsyncMock(return_value=_exec_result("PanDA is a workload manager."))
     guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
     tool = BambooAnswerTool()
     with (
         patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+        patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
     ):
+        mock_plan_tool.call = plan_mock
         result = await tool.call({"question": "What is PanDA?"})
-    exec_mock.assert_awaited_once()
-    plan_arg = exec_mock.call_args[0][0]
-    assert plan_arg.route == PlanRoute.RETRIEVE
+    plan_mock.assert_awaited_once()
+    plan_args = plan_mock.call_args[0][0]
+    assert plan_args["question"] == "What is PanDA?"
+    assert plan_args["execute"] is True
+    assert plan_args["plugin_id"] == "atlas"
     assert result[0]["type"] == "text"
     assert "PanDA is a workload manager." in result[0]["text"]
 
@@ -204,9 +220,9 @@ async def test_bypass_routing_skips_guard_and_execute():
 
 
 @pytest.mark.asyncio
-async def test_history_threaded_into_execute_plan():
-    """Prior conversation turns are forwarded to execute_plan as the history arg."""
-    exec_mock = AsyncMock(return_value=_exec_result("follow-up answer"))
+async def test_history_threaded_into_planner_messages():
+    """Prior conversation turns are forwarded to the LLM planner via messages."""
+    plan_mock = AsyncMock(return_value=_exec_result("follow-up answer"))
     guard_mock = AsyncMock(return_value=_mock_guard(allowed=True))
     messages = [
         {"role": "user", "content": "What is PanDA?"},
@@ -216,14 +232,14 @@ async def test_history_threaded_into_execute_plan():
     tool = BambooAnswerTool()
     with (
         patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-        patch("bamboo.tools.bamboo_answer.execute_plan", exec_mock),
+        patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
     ):
+        mock_plan_tool.call = plan_mock
         await tool.call({"messages": messages})
-    exec_mock.assert_awaited_once()
-    # execute_plan(plan, question, history) — history is positional arg 2
-    _, question_arg, history_arg = exec_mock.call_args[0]
-    assert question_arg == "How do I submit a job?"
-    assert any(m.get("role") == "assistant" for m in history_arg)
+    plan_mock.assert_awaited_once()
+    plan_args = plan_mock.call_args[0][0]
+    assert plan_args["question"] == "How do I submit a job?"
+    assert any(m.get("role") == "assistant" for m in plan_args["messages"])
 
 
 # ---------------------------------------------------------------------------
@@ -323,47 +339,9 @@ def test_topic_epic_plugin_always_returns_epic():
 
 
 # ---------------------------------------------------------------------------
-# _build_deterministic_plan topic injection tests
+# Topic injection for RETRIEVE plans has moved to _inject_doc_topics in
+# bamboo_executor.py (see test_bamboo_executor.py), since RETRIEVE plans for
+# unmatched questions are now built by the LLM planner rather than here.
+# _topic_for_question itself (tested above) is unchanged and still the
+# source of truth for topic resolution.
 # ---------------------------------------------------------------------------
-
-def test_retrieve_plan_includes_topic_in_arguments():
-    """RETRIEVE plan injects 'topic' into both RAG tool call arguments."""
-    plan = _build_deterministic_plan("What is PanDA?", None, None, plugin_id="atlas")
-    assert plan is not None
-    for tc in plan.tool_calls:
-        assert "topic" in tc.arguments, f"tool {tc.tool!r} missing 'topic' in arguments"
-
-
-def test_retrieve_plan_topic_is_atlas_for_atlas_plugin():
-    """Atlas plugin RETRIEVE plan uses topic='atlas'."""
-    plan = _build_deterministic_plan("What is PanDA?", None, None, plugin_id="atlas")
-    assert plan is not None
-    for tc in plan.tool_calls:
-        assert tc.arguments["topic"] == "atlas"
-
-
-def test_retrieve_plan_topic_is_rucio_for_rucio_question():
-    """A Rucio question in the atlas plugin yields topic='rucio'."""
-    plan = _build_deterministic_plan(
-        "How does rucio manage data replicas?", None, None, plugin_id="atlas"
-    )
-    assert plan is not None
-    for tc in plan.tool_calls:
-        assert tc.arguments["topic"] == "rucio"
-
-
-def test_retrieve_plan_topic_is_root_for_root_question():
-    """A ROOT framework question yields topic='root'."""
-    plan = _build_deterministic_plan(
-        "What is the TFile class in ROOT for data storage?", None, None, plugin_id="atlas"
-    )
-    assert plan is not None
-    for tc in plan.tool_calls:
-        assert tc.arguments["topic"] == "root"
-
-
-def test_retrieve_plan_explain_includes_topic():
-    """The plan explain string includes the resolved topic for debuggability."""
-    plan = _build_deterministic_plan("What is PanDA?", None, None, plugin_id="atlas")
-    assert plan is not None
-    assert "topic=" in plan.explain

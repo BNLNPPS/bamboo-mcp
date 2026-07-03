@@ -217,6 +217,32 @@ class TestIsJobStatsQuestion:
         """A question with no job-stats signal phrase returns False."""
         assert _is_job_stats_question("What is the weather today?") is False
 
+    def test_queue_time_phrase(self) -> None:
+        """'queue time' is a signal (pre-existing)."""
+        assert _is_job_stats_question("What is the average queue time at CERN?") is True
+
+    def test_queuing_time_phrase(self) -> None:
+        """'queuing time' (-ing form) is a signal.
+
+        Regression test: this phrasing does not contain the substring
+        'queue time' or 'queuetime', so it previously fell through every
+        fast-path signal set to the deterministic RAG-retrieval fallback in
+        _build_deterministic_plan, which never returns None to defer to the
+        LLM planner. Reported live as: "What was the average queuing time
+        at CERN yesterday?" answered with an RAG "excerpts do not contain
+        this information" response instead of routing to atlas.job_stats.
+        """
+        assert _is_job_stats_question("What was the average queuing time at CERN yesterday?") is True
+
+    def test_queueing_time_phrase(self) -> None:
+        """'queueing time' (British -eing spelling) is a signal."""
+        assert _is_job_stats_question("What is the average queueing time at BNL?") is True
+
+    def test_queue_wait_time_phrase(self) -> None:
+        """'queue wait time' (the exact phrase used in planner.py's own
+        routing examples) is a signal."""
+        assert _is_job_stats_question("What is the maximum queue wait time for failed jobs?") is True
+
 
 class TestCompactJson:
     """JSON serialisation with length capping (executor helper)."""
@@ -579,7 +605,14 @@ class TestContextualFollowupRouting:
 
     @pytest.mark.asyncio
     async def test_genuine_doc_question_still_routes_to_rag(self) -> None:
-        """A question with no back-reference and no ID still goes to RAG."""
+        """A question with no back-reference and no ID defers to the LLM
+        planner, which is itself capable of choosing RAG tools.
+
+        Since the "always build a deterministic RAG plan" fallback in
+        _build_deterministic_plan was removed (see test_bamboo_answer_rag.py
+        for the rationale), this now asserts that _route() defers to
+        bamboo_plan_tool rather than calling execute_plan directly.
+        """
         import bamboo.tools.bamboo_answer as ba_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
@@ -587,19 +620,19 @@ class TestContextualFollowupRouting:
         guard_mock = AsyncMock(return_value=GuardResult(
             allowed=True, reason="keyword_allow", llm_used=False
         ))
-        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA info."}])
+        plan_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA info."}])
         tool = BambooAnswerTool()
 
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
-            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "bamboo_plan_tool") as mock_plan_tool,
         ):
+            mock_plan_tool.call = plan_mock
             await tool.call({"question": "How does brokerage work?"})
 
-        execute_mock.assert_awaited_once()
-        plan = execute_mock.call_args[0][0]
-        tool_names = [tc.tool for tc in plan.tool_calls]
-        assert "panda_doc_search" in tool_names or "panda_doc_bm25" in tool_names
+        plan_mock.assert_awaited_once()
+        plan_args = plan_mock.call_args[0][0]
+        assert plan_args["question"] == "How does brokerage work?"
 
 
 # ---------------------------------------------------------------------------
@@ -855,27 +888,31 @@ class TestConceptualQuestionRouting:
         guard_mock = AsyncMock(return_value=GuardResult(
             allowed=True, reason="keyword_allow", llm_used=False
         ))
-        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "explanation"}])
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "should not be called"}])
+        plan_mock = AsyncMock(return_value=[{"type": "text", "text": "explanation"}])
         tool = BambooAnswerTool()
 
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "bamboo_plan_tool") as mock_plan_tool,
             patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
                          return_value=None),
         ):
+            mock_plan_tool.call = plan_mock
             await tool.call({
                 "question": (
                     "what does it mean that job 7103770630 is looping?"
                 ),
             })
 
-        execute_mock.assert_awaited_once()
-        plan = execute_mock.call_args[0][0]
-        assert plan.tool_calls[0].tool != "panda_job_status", (
-            "A conceptual follow-up must not route to panda_job_status. "
-            f"Got tool={plan.tool_calls[0].tool!r}"
-        )
+        # The deterministic fast-path must never call execute_plan directly
+        # for this question — that would mean panda_job_status (or some
+        # other FAST_PATH tool) ran with the stale job_id as evidence.
+        execute_mock.assert_not_called()
+        plan_mock.assert_awaited_once()
+        plan_args = plan_mock.call_args[0][0]
+        assert plan_args["question"] == "what does it mean that job 7103770630 is looping?"
 
     @pytest.mark.asyncio
     async def test_operational_job_id_question_still_routes_to_job_status(self) -> None:

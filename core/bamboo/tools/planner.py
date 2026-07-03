@@ -228,14 +228,19 @@ def _build_atlas_planner_prompt(schema_compact: str) -> str:
         "- If the question asks about job performance metrics from the "
         "historical OpenSearch index — stage-in time, stage-out time, wall-clock "
         "time, queue wait time, payload execution time, pilot setup time, "
-        "memory usage (RSS/PSS/vmem/swap), CPU efficiency, HS06 accounting, "
-        "I/O throughput or data volume, pilot/execution/DDM error codes, "
-        "task campaign context, carbon footprint, or "
+        "memory usage (RSS/PSS/vmem/swap), memory-leak rate/diagnostics, "
+        "CPU efficiency, HS06 accounting, I/O throughput or data volume, "
+        "pilot/execution/DDM error codes, task campaign context, carbon "
+        "footprint, software environment (ATLAS release, cmtconfig, "
+        "lsetup time, OS version, Python version), or "
         "any pilottiming sub-field "
         "(e.g. 'average stage-in time at BNL', 'maximum queue time for failed jobs', "
         "'total wall-clock time at CERN today', 'average RSS memory at BNL', "
         "'CPU efficiency at IN2P3', 'total HS06-seconds at TRIUMF', "
-        "'average write throughput at CERN', 'CO2 footprint per job'): "
+        "'average write throughput at CERN', 'CO2 footprint per job', "
+        "'average memory leak rate at CERN', 'which Python versions are used', "
+        "'show me all Python versions used by jobs this week', "
+        "'OS version breakdown at BNL', 'average lsetup time at CERN'): "
         "use atlas.job_stats. Pass site= if a site is mentioned. route=FAST_PATH.\n"
         "- If the question asks about a site's queue configuration: "
         "use panda_queue_info. route=FAST_PATH.\n"
@@ -623,7 +628,7 @@ class BambooPlannerTool:
         chat_messages = coerce_messages(messages_raw) if messages_raw else []
         history = _extract_history(chat_messages, question) if chat_messages else []
 
-        return await execute_plan(plan, question, history)
+        return await execute_plan(plan, question, history, plugin_id=plugin_id or "atlas")
 
 
 async def _call_default_llm(messages: list[Message], temperature: float, max_tokens: int) -> str:

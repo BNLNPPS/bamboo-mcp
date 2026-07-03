@@ -237,8 +237,9 @@ async def test_bamboo_answer_passes_ontopic_through_guard():
     tool = BambooAnswerTool()
     with (
         patch.object(ba_mod, "check_topic", guard_mock),
-        patch("bamboo.tools.bamboo_answer.execute_plan", plan_mock),
+        patch.object(ba_mod, "bamboo_plan_tool") as mock_plan_tool,
     ):
+        mock_plan_tool.call = plan_mock
         result = await tool.call({"question": "What is PanDA?"})
 
     guard_mock.assert_awaited_once()

@@ -32,6 +32,59 @@ All notable changes to Bamboo are documented here.
   and `test_bamboo_answer_helpers.py` (`TestIsJobStatsQuestion`).
 
 ### Fixed
+- **Deterministic fast-path silently defaulted every unmatched question to
+  RAG, never reaching the LLM planner** (`core/bamboo/tools/bamboo_answer.py`,
+  `core/bamboo/tools/bamboo_executor.py`, `core/bamboo/tools/planner.py`):
+  Reported live as "What was the average queuing time at CERN yesterday?"
+  and "Which python versions are used on the sites?" both answering with a
+  RAG "documentation doesn't cover this" response instead of routing to
+  `atlas.job_stats`.
+  Immediate trigger for the first report: `_JOB_STATS_SIGNALS` had
+  `"queue time"`/`"queuetime"` but not the `-ing` form — fixed by adding
+  `"queuing time"`, `"queueing time"`, `"queue wait time"`, `"queue wait"`.
+  Immediate trigger for the second report: `python_version`/`os_version`/
+  `lsetup_time`/the memory-leak fit fields were added to
+  `job_stats_schema.py` and `bamboo_answer.py`'s fast-path signals in an
+  earlier change, but the LLM planner's own `atlas.job_stats` routing
+  description in `planner.py` — the third file in the "three-file edit
+  problem" — was never updated to mention them, so even when a question
+  reached the planner it had no guidance to route on. Fixed by extending
+  the ATLAS routing prompt with explicit mentions and example phrasing
+  (e.g. "which python versions are used").
+  Root cause underneath both: `_build_deterministic_plan`'s final fallback
+  (reached whenever no ID and no fast-path domain signal matched, across
+  every plugin — job_stats, jobs_db, cric, pilot, promptlog, code_query)
+  unconditionally built a RETRIEVE plan; it never returned `None` to defer
+  to `bamboo_plan_tool` (the LLM planner), despite its own docstring and
+  `_route()`'s comments claiming it did. This was previously intentional
+  (see the old `test_bamboo_answer_rag.py` docstring) as a zero-LLM-cost
+  optimization, but meant any phrasing gap in any signal set was a
+  guaranteed wrong answer with no chance for the planner's broader semantic
+  understanding to help — even where the planner's own prompt already
+  documented the correct routing (e.g. "queue wait time" for
+  `atlas.job_stats`). Fixed by returning `None` from that branch. The
+  planner is already fully capable of choosing `route=RETRIEVE` with
+  `doc_search`/`doc_bm25` itself for genuine documentation questions (see
+  `_build_atlas_planner_prompt` / `_build_cgsim_planner_prompt`), so no RAG
+  capability is lost — it's now reached via the planner instead of
+  guaranteed deterministically.
+  Two companion fixes found while implementing this: (1) `execute_plan` now
+  auto-injects a `topic` argument (via `_inject_doc_topics`, a new helper)
+  into any doc-search tool call that omits one, since the planner's routing
+  prompt has no concept of ChromaDB-collection topic routing and previously
+  would have silently used the default collection for every deferred
+  question. (2) `PlannerTool.call` never threaded `plugin_id` through to
+  `execute_plan` when executing its own plan (`execute=True`), so synthesis
+  always used the "atlas" default regardless of the active plugin — a
+  latent bug that matters more now that this path sees far more traffic.
+  Test impact: rewrote `tests/test_bamboo_answer_rag.py` (its docstring
+  documented the old always-RAG behavior as intentional) plus ripple
+  effects in `test_bamboo_answer_helpers.py`, `test_context_memory.py`,
+  `test_llm_error_handling.py`, and `test_topic_guard.py` — each had tests
+  mocking `execute_plan` directly for no-ID questions that now defer to
+  `bamboo_plan_tool` instead. Added new coverage in `test_bamboo_executor.py`
+  (topic injection) and `test_planner.py` (plugin_id threading, routing
+  prompt content). Full suite: 2014 tests pass across core + all plugins.
 - **`panda_jobs_query` histogram returns 0 rows for multi-hour time windows**
   (`packages/askpanda_atlas/askpanda_atlas/jobs_query_schema.py`,
   `core/bamboo/tools/bamboo_executor.py`):
