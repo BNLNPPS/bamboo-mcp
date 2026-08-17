@@ -53,10 +53,32 @@ _SYSTEM_LOG_ANALYSIS: str = (
     "You are AskPanDA for the ATLAS experiment.\n"
     "Given a user's question and a JSON evidence object containing PanDA job "
     "log analysis, write a concise diagnostic answer.\n"
+    "Key evidence fields:\n"
+    "- failure_type: Bamboo's classification of the failure.\n"
+    "- exception_type / exception_message: the exception parsed from the log's "
+    "Python traceback, when one was present.\n"
+    "- deepest_pilot_frame: {pilot_path, lineno, func} — the innermost pilot3 "
+    "frame in the traceback, i.e. the pilot code that was running when the "
+    "exception surfaced.\n"
+    "- exception_frames: the full call chain, including standard library frames.\n"
+    "- log_excerpt: the extracted section of the log.\n"
     "Rules:\n"
     "- State the failure classification clearly.\n"
+    "- When exception_type is present, it is authoritative: build the diagnosis "
+    "around it and around the call chain in exception_frames.\n"
+    "- piloterrordiag is a summary written elsewhere in the pilot and can "
+    "contradict the traceback. When they disagree, trust the traceback and say "
+    "so explicitly. In particular, a diag mentioning 'payload execution' does "
+    "NOT mean the payload ran — check where in the call chain the exception was "
+    "actually raised.\n"
+    "- Name the pilot file, line and function from deepest_pilot_frame.\n"
+    "- Never infer a root cause from a directory listing or from file sizes in "
+    "the log excerpt. If the evidence does not identify the cause, say that "
+    "rather than guessing from which files exist or how large they are.\n"
     "- Quote relevant log excerpts if present.\n"
     "- Suggest concrete next steps based on the failure type.\n"
+    "- Do not offer to fetch the pilot source code; that offer is appended "
+    "automatically when applicable.\n"
     "- Do not include a Links section; links are appended automatically.\n"
     "- Keep it under ~10 bullet points.\n"
 )
@@ -73,8 +95,24 @@ _SYSTEM_PILOT_SOURCE: str = (
     "- github_urls: dict keyed by pilot path with links to the GitHub source.\n"
     "- missing_functions: functions named in the traceback but not found in source.\n"
     "- fetch_errors: any GitHub fetch failures.\n"
+    "- github_repo / github_ref / pilot_version / ref_kind / ref_resolution: "
+    "which pilot3 repository and ref the source was read from, and why.\n"
+    "- line_verification: {checked, mismatches, version_skew} — whether the "
+    "traceback line numbers agree with the fetched source.\n"
     "Rules:\n"
     "- Explain exactly which line in the deepest frame caused the exception and why.\n"
+    "- ref_kind tells you how far to trust line numbers:\n"
+    "  * 'release_tag' — the source is exactly what ran; quote line numbers freely.\n"
+    "  * 'development_branch' — the job ran an unreleased pilot, so the source "
+    "comes from a moving development branch. Describe functions by name, treat "
+    "line numbers as approximate even when line_verification reports no skew, "
+    "and state plainly that the code shown may differ from what ran.\n"
+    "  * 'unknown_version' — the pilot version could not be determined; caveat "
+    "line numbers the same way.\n"
+    "- If line_verification.version_skew is true, the fetched source definitely "
+    "does not match the build that ran the job: describe the function by name "
+    "rather than by line number and say so. Mention ref_resolution so the "
+    "reader knows what was read.\n"
     "- Quote the relevant source lines from source_snippets.\n"
     "- Describe whether this is a pilot infrastructure bug or a site configuration "
     "issue (e.g. missing UID in passwd/LDAP vs. a code defect).\n"
@@ -1308,6 +1346,7 @@ async def _execute_one_tool(
         _last_evidence_store["last_tool"] = tool_name
         _LLM_STRIP = {"raw_payload", "pandaid_list"}
         llm_evidence = {k: v for k, v in unpacked.items() if k not in _LLM_STRIP}
+        llm_evidence = _strip_presentation_keys(llm_evidence)
 
         if tool_name == "code_query":
             # code_query source can be up to 150K chars — _compact_json would
@@ -1329,6 +1368,45 @@ async def _execute_one_tool(
         raw_text = raw_result[0].get("text", "") if raw_result else ""
         if raw_text:
             evidence_parts.append(f"[{tool_name}]\n{raw_text}")
+
+
+# Evidence keys that hold pre-rendered Markdown for the *user*, not facts for
+# the LLM.  They are appended to the answer programmatically after synthesis, so
+# showing them to the LLM only invites it to reproduce them — and an instruction
+# not to ("Do not include a Links section") reliably loses to a ready-made
+# string sitting in the input.  That is what happened to
+# ``code_analysis_offer_md``: the LLM copied it verbatim and the canonical copy
+# was then appended, so the offer appeared twice.
+#
+# These are stripped from the LLM's view only.  ``_last_evidence_store`` must
+# keep them, because ``_log_analysis_links_md`` and ``_log_analysis_offer_md``
+# read them back from there.
+_PRESENTATION_KEYS: frozenset[str] = frozenset({
+    "links_md",
+    "code_analysis_offer_md",
+})
+
+
+def _strip_presentation_keys(unpacked: dict[str, Any]) -> dict[str, Any]:
+    """Remove pre-rendered Markdown keys from a tool result before LLM synthesis.
+
+    Operates on the nested ``evidence`` sub-dict as well as the top level, since
+    tools place these keys inside ``evidence``.  The input is not mutated.
+
+    Args:
+        unpacked: Tool result dict, typically with ``evidence`` and ``text``
+            keys.
+
+    Returns:
+        A shallow copy with :data:`_PRESENTATION_KEYS` removed from both levels.
+    """
+    cleaned = {k: v for k, v in unpacked.items() if k not in _PRESENTATION_KEYS}
+    inner = cleaned.get("evidence")
+    if isinstance(inner, dict):
+        cleaned["evidence"] = {
+            k: v for k, v in inner.items() if k not in _PRESENTATION_KEYS
+        }
+    return cleaned
 
 
 def _log_analysis_links_md() -> str:
@@ -1543,10 +1621,17 @@ async def execute_plan(
             raw_question=original_question if original_question else question,
         )
 
-    # For log analysis: strip any LLM-invented Links section and append the
-    # canonical one built from programmatic URLs in log_analysis_impl.
+    # For log analysis: strip any LLM-invented Links section, then append the
+    # code-analysis offer and the canonical links block, both built from
+    # programmatic values in log_analysis_impl.  Order matters: links stay last
+    # so the TUI renders them as the closing block.
     if "panda_log_analysis" in called_tool_names:
         body = _strip_llm_links_section(body)
+        offer = _log_analysis_offer_md()
+        # Belt and braces alongside _strip_presentation_keys: if the LLM
+        # produced the offer anyway, do not append a second copy.
+        if offer and offer.strip() not in body:
+            body += offer
         body += _log_analysis_links_md()
 
     return text_content(body + _db_footnote(called_tool_names))
@@ -1596,27 +1681,67 @@ def _db_footnote(tool_names: list[str]) -> str:
     return ""
 
 
-def get_last_pilot_monitoring_evidence() -> dict[str, Any] | None:
-    """Return the stored panda_log_analysis evidence if the last failure was a pilot_monitoring_error.
+def get_last_traceback_evidence() -> dict[str, Any] | None:
+    """Return the stored panda_log_analysis evidence if it contains a pilot traceback.
 
     Used by ``bamboo_answer._build_deterministic_plan`` to detect whether a
     follow-up question should be routed to ``pilot_source_analysis`` rather
     than the default job-status path.
 
+    The gate is ``traceback_available`` plus a resolved ``deepest_pilot_frame``,
+    not a specific ``failure_type``.  It used to require
+    ``failure_type == "pilot_monitoring_error"``, which made source analysis
+    unreachable for every other kind of pilot exception — including the
+    transform-download timeouts that motivated the traceback-first extractor.
+    Requiring ``deepest_pilot_frame`` matters because ``pilot_source_analysis``
+    fetches pilot3 modules from GitHub: a traceback with no pilot frames (a pure
+    Athena payload traceback) gives it nothing to fetch.
+
+    ``failure_type == "pilot_monitoring_error"`` with a ``log_excerpt`` is still
+    accepted so that evidence produced by an older deployment, which predates
+    the ``traceback_available`` key, continues to route correctly.
+
     Returns:
-        The ``evidence`` sub-dict from the last ``panda_log_analysis`` call
-        when ``failure_type == "pilot_monitoring_error"`` and a non-empty
-        ``log_excerpt`` is present; ``None`` otherwise.
+        The ``evidence`` sub-dict from the last ``panda_log_analysis`` call when
+        source-level analysis is possible; ``None`` otherwise.
     """
     stored = _last_evidence_store.get("panda_log_analysis", {})
     evidence = stored.get("evidence", stored)
+    if not isinstance(evidence, dict):
+        return None
+    if evidence.get("traceback_available") and evidence.get("deepest_pilot_frame"):
+        return evidence
+    # Legacy path: evidence from a deployment without traceback_available.
     if (
-        isinstance(evidence, dict)
-        and evidence.get("failure_type") == "pilot_monitoring_error"
+        evidence.get("failure_type") == "pilot_monitoring_error"
         and evidence.get("log_excerpt")
     ):
         return evidence
     return None
+
+
+# Backwards-compatible alias for the pre-widening name.  Retained so external
+# callers and tests that import the old symbol keep working.
+get_last_pilot_monitoring_evidence = get_last_traceback_evidence
+
+
+def _log_analysis_offer_md() -> str:
+    """Return the pre-built code-analysis follow-up offer from the last log analysis.
+
+    Like ``links_md``, the offer is built deterministically in
+    ``log_analysis_impl.fetch_and_analyse`` from the parsed traceback frame, so
+    the pilot path, line number and function name reaching the user are always
+    the real ones rather than whatever the LLM reproduced from memory.
+
+    Returns:
+        Markdown offer string, or an empty string when the last failure had no
+        pilot traceback to analyse.
+    """
+    stored = _last_evidence_store.get("panda_log_analysis", {})
+    evidence = stored.get("evidence", stored)
+    if not isinstance(evidence, dict):
+        return ""
+    return str(evidence.get("code_analysis_offer_md", ""))
 
 
 def _compact_json(obj: Any, limit: int = 12000) -> str:

@@ -1,4 +1,14 @@
-"""Tests for panda_log_analysis tool (askpanda_atlas plugin implementation).
+"""Tests for panda_log_analysis — canonical suite (askpanda_atlas plugin).
+
+This is the authoritative test suite for the ATLAS log analysis implementation:
+excerpt extraction (traceback-first and the pattern/tail fallbacks), failure
+classification, the setup.stdout / payload.stdout / payload.stderr fetch paths,
+exception evidence keys, and the job 7261310898 regression fixture.
+
+A smaller, largely duplicated suite exists at ``tests/test_log_analysis.py`` in
+the repo root, which exercises the same tool through the
+``bamboo.tools.log_analysis`` core shim.  New tests belong here; changes to
+behaviour covered by both files must be applied to both.
 
 All external HTTP calls are patched; no network access is required.
 """
@@ -483,9 +493,21 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
     The context window must include both the WARNING anchor line and the
     traceback lines that follow it.  With standard preceding-context extraction
     the function would return at the WARNING line and miss the File/KeyError
-    lines entirely; _extract_context_window_with_trailing fixes this.
+    lines entirely.
+
+    Since the traceback-first extractor was introduced this no longer depends on
+    1354 appearing in _TRAILING_CONTEXT_CODES — the traceback is located by its
+    own format.  A bounded trailing window of _TRACEBACK_TRAILING_LINES lines is
+    deliberately included after the traceback (the pilot logs the resulting
+    error code and state transition there), so the assertion below checks that
+    the tail is *bounded*, not that it is absent.  The failure mode being
+    guarded against is the excerpt degenerating into a tail extraction that
+    contains no traceback at all.
     """
-    from askpanda_atlas.log_analysis_impl import _CONTEXT_LINES
+    from askpanda_atlas.log_analysis_impl import (
+        _CONTEXT_LINES,
+        _TRACEBACK_TRAILING_LINES,
+    )
 
     preamble = "INFO | some startup line\n" * 50
     traceback_block = (
@@ -497,8 +519,9 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
         "KeyError: 'getpwuid(): uid not found: 6435'\n"
         "\n"  # blank line terminates the traceback block — mirrors real pilot logs
     )
-    # Append unrelated tail lines that would be chosen if the anchor missed
-    tail = "INFO | some unrelated pilot cleanup line\n" * _CONTEXT_LINES
+    # Append unrelated tail lines that would dominate if the anchor missed
+    tail_line = "INFO | some unrelated pilot cleanup line"
+    tail = (tail_line + "\n") * _CONTEXT_LINES
     log_text = preamble + traceback_block + tail
 
     excerpt = extract_log_excerpt(
@@ -509,13 +532,20 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
     )
     assert "getpwuid" in excerpt, "Excerpt must contain the getpwuid error line."
     assert "list_processes_and_threads" in excerpt, (
-        "Excerpt must contain the traceback File line that follows the WARNING. "
-        "If this fails, _extract_context_window_with_trailing is not being used "
-        "for code 1354."
+        "Excerpt must contain the traceback File line that follows the WARNING."
     )
     assert "KeyError" in excerpt, "Excerpt must contain the final KeyError line."
-    assert "unrelated pilot cleanup" not in excerpt, (
-        "Excerpt must not bleed into the unrelated tail lines."
+
+    # The traceback must come before the cleanup tail, i.e. the excerpt is
+    # anchored on the traceback rather than being a tail extraction.
+    assert excerpt.index("KeyError") < excerpt.index(tail_line), (
+        "The traceback must precede the trailing context; if it does not, the "
+        "excerpt degenerated into tail extraction."
+    )
+    # Only the bounded trailing window may bleed through, never all 40 lines.
+    assert excerpt.count(tail_line) <= _TRACEBACK_TRAILING_LINES, (
+        f"At most {_TRACEBACK_TRAILING_LINES} trailing lines may be included; "
+        f"got {excerpt.count(tail_line)}."
     )
 
 
@@ -1036,3 +1066,412 @@ def test_setup_log_url_absent_when_not_fetched(
     ev = _unpack(result)["evidence"]
 
     assert ev.get("setup_log_url") is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: job 7261310898 — transform download timeout (pilot error 1310)
+#
+# Before the traceback-first extractor, this job produced a wholly wrong
+# diagnosis.  Pilot error code 1310 has no useful entry in _PILOT_CODE_PATTERNS,
+# so extraction fell back to using piloterrordiag as a literal regex.  The
+# metadata reads "Exception caught during payload execution" while the log
+# record reads "execute payloads caught an exception (cannot recover)" — no
+# match — so the excerpt degraded to the tail of pilotlog.txt, which for a
+# failed job is stage-out and log-archiving boilerplate: 'removed /tmp/...'
+# lines, an `ls -lF` directory listing and a `tar cvfz` command.
+#
+# The LLM, given only that, inferred a cause from the *file sizes* in the
+# directory listing and reported a "remote file open failure / stage-in"
+# problem.  The real cause was a TimeoutError fetching the runGen transform
+# over HTTP — the payload never started at all.
+#
+# failure_type also came out as "timeout", but only because the boilerplate
+# contained the substring "using timeout=90 s" from the tar command.  Right
+# answer, no evidence.
+# ---------------------------------------------------------------------------
+
+_JOB_7261310898: dict = {
+    "pandaid": 7261310898,
+    "jobstatus": "failed",
+    "jobsubstatus": "",
+    "computingsite": "DESY-HH",
+    "cloud": "DE",
+    "atlasrelease": "Atlas-25.2.7",
+    "jeditaskid": None,
+    "attemptnr": 1,
+    "maxattempt": 3,
+    "transformation": "runGen-00-00-02",
+    "piloterrorcode": 1310,
+    "piloterrordiag": "Exception caught during payload execution",
+    "exeerrorcode": 0,
+    "exeerrordiag": "",
+    "taskbuffererrorcode": 0,
+    "taskbuffererrordiag": "",
+    "ddmerrorcode": 0,
+    "ddmerrordiag": "",
+    "starttime": "2026-08-17 08:37:05",
+    "endtime": "2026-08-17 08:40:33",
+    "duration": "0:0:03:28",
+    "commandtopilot": "",
+    "pilotid": "https://aipanda100.cern.ch/log.tgz|PR|3.14.0.22",
+}
+
+_JOB_7261310898_TRACEBACK: str = (
+    "2026-08-17 08:38:24,986 | CRITICAL | pilot.control.payload            | "
+    "execute_payloads          | execute payloads caught an exception "
+    "(cannot recover): timed out, Traceback (most recent call last):\n"
+    '  File "/tmp/atlas_QCSsk3r1/pilot3/pilot/control/payload.py", line 308, '
+    "in execute_payloads\n"
+    "    exit_code, diagnostics = payload_executor.run()\n"
+    '  File "/tmp/atlas_QCSsk3r1/pilot3/pilot/control/payloads/generic.py", '
+    "line 755, in get_payload_command\n"
+    "    cmd = user.get_payload_command(self.__job, args=self.__args)\n"
+    '  File "/tmp/atlas_QCSsk3r1/pilot3/pilot/user/atlas/common.py", line 911, '
+    "in get_normal_payload_command\n"
+    "    exitcode, diagnostics, trf_name = get_analysis_trf(job.transformation)\n"
+    '  File "/tmp/atlas_QCSsk3r1/pilot3/pilot/user/atlas/setup.py", line 294, '
+    "in get_analysis_trf\n"
+    "    status, diagnostics = download_transform(trf, transform_name, workdir)\n"
+    '  File "/tmp/atlas_QCSsk3r1/pilot3/pilot/user/atlas/setup.py", line 347, '
+    "in download_transform\n"
+    "    content = download_file(url)\n"
+    '  File "/tmp/atlas_QCSsk3r1/pilot3/pilot/util/https.py", line 2301, '
+    "in download_file\n"
+    "    with urllib.request.urlopen(req, timeout=timeout) as response:\n"
+    '  File "/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase/x86_64/python/'
+    '3.14.6-x86_64-el9/lib/python3.14/socket.py", line 729, in readinto\n'
+    "    return self._sock.recv_into(b)\n"
+    "TimeoutError: timed out\n"
+)
+
+# The stage-out boilerplate that used to be returned as the whole excerpt.
+_JOB_7261310898_TAIL: str = "".join([
+    "2026-08-17 08:38:25,821 | DEBUG    | pilot.util.filehandling          | "
+    "remove                    | removed /tmp/atlas_QCSsk3r1/PILOTVERSION\n",
+    "2026-08-17 08:38:26,004 | DEBUG    | pilot.user.atlas.common          | "
+    "list_work_dir             | total 72\n",
+    "-rw-r--r--. 1 atlasprd000 atlasprd     0 Aug 17 10:37 payload.stderr\n",
+    "-rw-r--r--. 1 atlasprd000 atlasprd     0 Aug 17 10:37 payload.stdout\n",
+    "-rw-r--r--. 1 atlasprd000 atlasprd 28218 Aug 17 10:37 remote_open.stderr\n",
+    "2026-08-17 08:38:26,005 | INFO     | pilot.control.data               | "
+    "create_log                | will create archive /tmp/x.job.log.tgz using "
+    "timeout=90 s for directory size=0.035 MB\n",
+    "2026-08-17 08:38:26,005 | INFO     | pilot.util.container             | "
+    "print_executable          | executing command: pwd;tar cvfz "
+    "/tmp/x.job.log.tgz tarball_PandaJob_7261310898_DESY-HH; echo $?\n",
+] * 8)
+
+_JOB_7261310898_PILOTLOG: str = (
+    "2026-08-17 08:36:41,102 | INFO     | pilot | main | pilot version: 3.14.0.22\n"
+    + (
+        "2026-08-17 08:37:00,000 | DEBUG    | pilot.util.something          | "
+        "doing_work                | routine start-up chatter\n"
+    ) * 150
+    + _JOB_7261310898_TRACEBACK
+    + _JOB_7261310898_TAIL
+)
+
+
+def _analyse_job_7261310898(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Run the tool against the job 7261310898 fixture and return its evidence.
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture.
+
+    Returns:
+        The ``evidence`` sub-dict from the tool result.
+    """
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_JOB_7261310898),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: _JOB_7261310898_PILOTLOG,
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {"pilotlog.txt": len(_JOB_7261310898_PILOTLOG)},
+    )
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 7261310898}))
+    return _unpack(result)["evidence"]
+
+
+def test_job_7261310898_excerpt_contains_the_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The excerpt must contain the traceback, not the stage-out boilerplate."""
+    ev = _analyse_job_7261310898(monkeypatch)
+    excerpt = ev["log_excerpt"]
+    assert "TimeoutError: timed out" in excerpt
+    assert "download_transform" in excerpt
+    assert "get_analysis_trf" in excerpt
+
+
+def test_job_7261310898_excerpt_excludes_stageout_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The excerpt must not be dominated by the log-archiving boilerplate.
+
+    The `tar cvfz` command and the `ls -lF` listing are what the old tail
+    extraction returned; an excerpt built around them invites the LLM to invent
+    a cause from file sizes.
+    """
+    ev = _analyse_job_7261310898(monkeypatch)
+    excerpt = ev["log_excerpt"]
+    assert "tar cvfz" not in excerpt
+    assert "remote_open.stderr" not in excerpt
+
+
+def test_job_7261310898_classified_as_transform_download_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure is a transform download timeout, not a generic timeout.
+
+    The old classification of "timeout" came from the substring "timeout=90 s"
+    in the tar command, not from any evidence about the failure.
+    """
+    ev = _analyse_job_7261310898(monkeypatch)
+    assert ev["failure_type"] == "transform_download_timeout"
+
+
+def test_job_7261310898_exception_evidence_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parsed exception is promoted to first-class evidence keys."""
+    ev = _analyse_job_7261310898(monkeypatch)
+    assert ev["traceback_available"] is True
+    assert ev["exception_type"] == "TimeoutError"
+    assert ev["exception_message"] == "timed out"
+    deepest = ev["deepest_pilot_frame"]
+    assert deepest["pilot_path"] == "pilot/util/https.py"
+    assert deepest["lineno"] == 2301
+    assert deepest["func"] == "download_file"
+
+
+def test_job_7261310898_pilot_version_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pilot version is parsed from the full log for GitHub tag pinning."""
+    ev = _analyse_job_7261310898(monkeypatch)
+    assert ev["pilot_version"] == "3.14.0.22"
+
+
+def test_job_7261310898_code_analysis_offer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The follow-up offer names the real pilot frame from the traceback."""
+    ev = _analyse_job_7261310898(monkeypatch)
+    offer = ev["code_analysis_offer_md"]
+    assert "pilot/util/https.py:2301" in offer
+    assert "download_file" in offer
+
+
+def test_job_7261310898_summary_mentions_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The text summary reports the exception rather than the misleading diag.
+
+    piloterrordiag says "during payload execution" but the traceback shows the
+    failure happened while *building* the payload command, so the payload never
+    ran.  The summary must not repeat the diag as the headline.
+    """
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(_JOB_7261310898),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: _JOB_7261310898_PILOTLOG,
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {"pilotlog.txt": 5000},
+    )
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 7261310898}))
+    text = _unpack(result)["text"]
+    assert "TimeoutError" in text
+    assert "pilot/util/https.py:2301" in text
+
+
+def test_pilot_version_falls_back_to_pilotid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the pilot log is unavailable the version comes from pilotid.
+
+    Pilot error 1305 reads payload.stdout, so pilotlog.txt is never downloaded
+    and the start-up version line is not seen.
+    """
+    job = {**_JOB_7261310898, "piloterrorcode": 1305}
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(job),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: "payload output\n",
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {"payload.stdout": 20},
+    )
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 7261310898}))
+    ev = _unpack(result)["evidence"]
+    assert ev["pilot_version"] == "3.14.0.22"
+
+
+# ---------------------------------------------------------------------------
+# Exception-driven classification
+# ---------------------------------------------------------------------------
+
+def _exc(traceback_text: str, level: str = "CRITICAL"):
+    """Parse traceback text into an ExceptionInfo for classification tests.
+
+    Args:
+        traceback_text: Traceback text to parse.
+        level: Log level to attribute to the traceback.
+
+    Returns:
+        Parsed ``ExceptionInfo``.
+    """
+    from askpanda_atlas._traceback_parse import parse_exception
+    return parse_exception(traceback_text, level)
+
+
+def test_classify_from_exception_beats_substring_noise() -> None:
+    """A parsed exception overrides misleading substrings in the excerpt.
+
+    The excerpt here contains "timeout=90 s" (from the pilot's tar command),
+    which the substring table would classify as a plain timeout.
+    """
+    noisy_excerpt = "will create archive using timeout=90 s for directory size"
+    result = classify_failure(
+        _JOB_7261310898, noisy_excerpt, _exc(_JOB_7261310898_TRACEBACK),
+    )
+    assert result == "transform_download_timeout"
+
+
+def test_classify_failure_without_exception_uses_substring_table() -> None:
+    """Omitting the exception preserves the original substring behaviour."""
+    job = {**_JOB_7261310898, "piloterrordiag": "Segmentation fault"}
+    assert classify_failure(job, "") == "segfault"
+
+
+def test_classify_from_exception_pilot_exception_for_unknown() -> None:
+    """An unrecognised exception in pilot code is not blamed on the payload.
+
+    The substring table would match "traceback" and report payload_error, which
+    is misleading when the payload never ran.
+    """
+    traceback_text = (
+        "2026-08-17 08:00:00,000 | CRITICAL | pilot.x | f | boom, "
+        "Traceback (most recent call last):\n"
+        '  File "/tmp/p/pilot3/pilot/util/mystery.py", line 5, in weird\n'
+        "    x()\n"
+        "ZeroDivisionError: division by zero\n"
+    )
+    result = classify_failure(_JOB_7261310898, traceback_text, _exc(traceback_text))
+    assert result == "pilot_exception"
+
+
+def test_classify_from_exception_preserves_monitoring_category() -> None:
+    """The getpwuid failure keeps its pilot_monitoring_error category.
+
+    bamboo_answer and planner routing reference that category by name, so the
+    exception-driven classifier must not rename it.
+    """
+    traceback_text = (
+        "2026-04-17 02:05:23,077 | WARNING  | pilot.x | f | "
+        "Traceback (most recent call last):\n"
+        '  File "/tmp/p/pilot3/pilot/util/psutils.py", line 428, '
+        "in list_processes_and_threads\n"
+        "    current_user = getpass.getuser()\n"
+        "KeyError: 'getpwuid(): uid not found: 6435'\n"
+    )
+    result = classify_failure({}, traceback_text, _exc(traceback_text, "WARNING"))
+    assert result == "pilot_monitoring_error"
+
+
+def test_classify_reassigned_wins_over_exception() -> None:
+    """JEDI reassignment outranks any incidental exception in the log."""
+    job = {
+        "taskbuffererrordiag": "reassigned by JEDI",
+        "commandtopilot": "tobekilled",
+    }
+    result = classify_failure(job, "", _exc(_JOB_7261310898_TRACEBACK))
+    assert result == "reassigned_by_jedi"
+
+
+def test_no_traceback_yields_false_evidence_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exception evidence keys are always present, even with no traceback."""
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(
+            _SAMPLE_JOB_STAGEIN_TIMEOUT
+        ),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {"pilotlog.txt": 500},
+    )
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
+    ev = _unpack(result)["evidence"]
+    assert ev["traceback_available"] is False
+    assert ev["exception_type"] is None
+    assert ev["deepest_pilot_frame"] is None
+    assert ev["code_analysis_offer_md"] == ""
+
+
+def test_payload_stderr_traceback_wins_over_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When both payload files have a traceback, stderr's exception is reported.
+
+    Python tracebacks and abort messages go to stderr, so that is where the
+    exception that actually terminated the payload lives.
+    """
+    job = {**_SAMPLE_JOB_STAGEIN_TIMEOUT, "piloterrorcode": 1305}
+    stdout_text = (
+        "Traceback (most recent call last):\n"
+        '  File "/x/warmup.py", line 1, in <module>\n'
+        "    warn()\n"
+        "UserWarning: harmless\n"
+    )
+    stderr_text = (
+        "Traceback (most recent call last):\n"
+        '  File "/x/analysis.py", line 9, in <module>\n'
+        "    main()\n"
+        "MemoryError: cannot allocate\n"
+    )
+
+    def _fetch(job_id: int, filename: str, base_url: str, timeout: int):
+        if filename == "payload.stderr":
+            return stderr_text
+        if filename == "payload.stdout":
+            return stdout_text
+        return None
+
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(job),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text", _fetch
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_index",
+        lambda job_id, base_url, timeout: {
+            "payload.stdout": len(stdout_text),
+            "payload.stderr": len(stderr_text),
+        },
+    )
+    result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
+    ev = _unpack(result)["evidence"]
+    assert ev["exception_type"] == "MemoryError"
+    assert ev["failure_type"] == "memory"

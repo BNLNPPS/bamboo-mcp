@@ -6,6 +6,318 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **ePIC plugin copies had drifted from their ATLAS originals**
+  (`packages/askpanda_epic/askpanda_epic/log_analysis_impl.py`,
+  `packages/askpanda_epic/askpanda_epic/_traceback_parse.py`). Surfaced as a
+  pyright `reportAttributeAccessIssue` on `_TRACEBACK_TRAILING_LINES` in
+  `test_log_analysis_epic.py`.
+
+  Root cause: both ePIC files were mirrored from their ATLAS counterparts at a
+  point in the session, and both ATLAS files were then changed again without
+  re-mirroring. Two fixes never reached ePIC:
+  `_strip_directory_listing`/`_LISTING_LINE_RES` (so the ePIC excerpt builder
+  went on pulling `ls -l` directory listings into the LLM context — the very
+  artifact that caused the original misdiagnosis), and the chained-traceback fix
+  in `find_traceback_blocks` (so the ePIC copy still split
+  `During handling of the above exception...` chains into two blocks and
+  reported the first exception rather than the one that propagated).
+
+  Neither plugin's own test suite could catch this, because each suite passes
+  against its own copy; only a cross-package comparison can. Both copies are
+  regenerated, and drift is now a test failure rather than a downstream
+  type-check error — see Tests.
+
+### Added
+- **`tests/plugin_mirror_spec.py` and `tests/test_plugin_mirror_parity.py`.**
+  The atlas→epic naming substitutions are now recorded as data in
+  `plugin_mirror_spec.MIRRORS`, so the ePIC copies can be regenerated
+  mechanically instead of by hand. Three guards: the ePIC copy must equal the
+  ATLAS source with substitutions applied (failing with a unified diff and
+  regeneration instructions); the ePIC copy must not `import` from
+  `askpanda_atlas`, checked via `ast` rather than substring search because the
+  docstrings legitimately mention `askpanda_atlas` in prose; and every
+  substitution must still match the ATLAS source, so the table cannot rot
+  silently while hiding a real unrecorded difference.
+
+- **Code-analysis offer rendered twice** (`core/bamboo/tools/bamboo_executor.py`).
+  Observed on job 7261310898: the answer ended with the "Ask me to show the
+  pilot source" offer two times over, the LLM's copy without its backticks.
+
+  Root cause: `_LLM_STRIP` filters only the *top level* of the unpacked tool
+  result (`evidence`, `text`), but `code_analysis_offer_md` and `links_md` sit
+  inside the nested `evidence` dict. Both were therefore handed to the synthesis
+  LLM as literal Markdown strings; the LLM copied the offer into its answer and
+  `bamboo_executor` then appended the canonical copy. The prompt instruction
+  "Do not offer to fetch the pilot source code; that offer is appended
+  automatically" lost to a ready-made string sitting in the input — the same
+  reason `_strip_llm_links_section` exists rather than trusting the parallel
+  "Do not include a Links section" instruction.
+
+  New `_strip_presentation_keys()` removes `_PRESENTATION_KEYS` from both the
+  top level and the nested `evidence` dict before synthesis, without mutating
+  the input. The strip applies to the LLM's view only: `_last_evidence_store`
+  must retain these keys because `_log_analysis_offer_md` and
+  `_log_analysis_links_md` read them back from there. The append site also gains
+  an idempotence guard. Removing `links_md` from the LLM's view should
+  additionally reduce the invented `Links:` sections that
+  `_strip_llm_links_section` currently mops up.
+
+- **Duplicate fetch of the probed pilot3 module.** `resolve_github_ref` fetched
+  `unique_paths[0]` to test a candidate ref and discarded the content, after
+  which the main loop downloaded the same file again. The probe response is now
+  retained in `SourceRef.probe_text` and seeds the source cache.
+
+### Changed
+- **Pilot3 source selection distinguishes released from unreleased builds**
+  (`packages/askpanda_atlas/askpanda_atlas/pilot_source_analysis_impl.py`,
+  `core/bamboo/tools/bamboo_executor.py`).
+
+  Job 7261310898 ran pilot 3.14.1.27, which has no release tag. The previous
+  resolver fell back to `PanDAWMS/pilot3@master` — which by definition is *not*
+  what an unreleased build ran, so it would have presented released code as the
+  source of a development-build traceback.
+
+  Released and unreleased pilots live in different places and the two paths are
+  now mutually exclusive:
+  - A version with a matching tag is a released build: read the tag in
+    `PanDAWMS/pilot3`. The development branch is never consulted.
+  - A version with no tag is an unreleased build: read `PalNilsson/pilot3@next`.
+    `master` is never consulted.
+  - `master` is used only when `pilot_version` is unknown, since the build then
+    cannot be classified at all and reaching into the development fork on a
+    guess would be worse.
+
+  `resolve_github_ref` becomes `resolve_source_ref` returning a `SourceRef`
+  (repo, ref, kind, resolution, probe_text, reachable); `_raw_url`/`_browse_url`
+  and `fetch_pilot_module` gain a `repo` parameter. New evidence keys
+  `github_repo` and `ref_kind`. Because `next` is a *moving* branch, line
+  numbers are indicative even when `verify_frame_lines` detects no skew — a
+  function can shift lines without changing name — so `ref_resolution`, the text
+  summary and `_SYSTEM_PILOT_SOURCE` all say so, and the prompt now branches on
+  `ref_kind` rather than parsing prose. Locations are overridable via
+  `BAMBOO_PILOT3_REPO`, `BAMBOO_PILOT3_BRANCH`, `BAMBOO_PILOT3_DEV_REPO` and
+  `BAMBOO_PILOT3_DEV_BRANCH`, following the `BAMBOO_CODE_QUERY_*` convention;
+  the development fork is expected to move to a BNLNPPS organisation.
+
+### Tests
+- Presentation-key stripping tests in `tests/test_log_analysis.py`, including
+  that the input is not mutated (the evidence store depends on it).
+- `TestResolveGithubRef` replaced by `TestResolveSourceRef`, asserting the
+  mutual exclusivity directly: a released version never probes `PalNilsson` or
+  `next`, and an untagged version never probes `master`. Plus dev-branch
+  resolution, unreachable-candidate reporting, env overrides, probe reuse, and
+  an end-to-end unreleased-version case built from job 7261310898.
+- **New autouse `_no_raw_github_fetch` fixture** in
+  `test_pilot_source_analysis.py`. Seeding the cache from the probe means a test
+  that patches only `fetch_pilot_module` now reaches the real
+  `raw.githubusercontent.com` through `_fetch_raw` — `test_fetch_error_recorded`
+  did exactly that and passed for the wrong reason, extracting a snippet from
+  live GitHub source while asserting all fetches had failed. The fixture makes
+  "no network" the default so no future test can leak silently; tests needing a
+  successful probe patch `_fetch_raw` explicitly.
+
+### Added
+- **Traceback-first log excerpt extraction and pilot exception evidence**
+  (`packages/askpanda_atlas/askpanda_atlas/_traceback_parse.py` — new,
+  `packages/askpanda_epic/askpanda_epic/_traceback_parse.py` — new,
+  `log_analysis_impl.py` in both plugins, `core/bamboo/tools/log_analysis.py`,
+  `core/bamboo/tools/bamboo_executor.py`, `core/bamboo/tools/bamboo_answer.py`,
+  `core/bamboo/tools/planner.py`,
+  `packages/askpanda_atlas/askpanda_atlas/pilot_source_analysis_impl.py`).
+
+  **Root cause.** `extract_log_excerpt()` anchored its context window on a
+  per-error-code search string from `_PILOT_CODE_PATTERNS`, falling back to
+  `re.escape(piloterrordiag[:40])` used as a literal regex. `piloterrordiag`
+  is a summary written by a different pilot code path than the log record, so
+  the wordings routinely differ. For pilot error code 1310 the metadata reads
+  `"Exception caught during payload execution"` while the log record reads
+  `"execute payloads caught an exception (cannot recover): timed out,
+  Traceback ..."` — no match. Extraction then fell back to
+  `_extract_tail(log_text, 40)`, and the last 40 lines of a failed job's
+  `pilotlog.txt` are stage-out and log-archiving boilerplate: `removed
+  /tmp/...` lines, an `ls -lF` directory listing and a `tar cvfz` command.
+
+  Given only that, the synthesis LLM inferred a root cause from the *file
+  sizes* in the directory listing and reported job 7261310898 as a "remote
+  file open failure / stage-in problem". The actual cause was a
+  `TimeoutError` fetching the runGen transform over HTTP inside
+  `get_analysis_trf` → `download_transform` → `download_file`: the payload
+  never started. `failure_type` also came out as `"timeout"` — correct by
+  accident, matched from the substring `"using timeout=90 s"` in the pilot's
+  own `tar` command.
+
+  Adding `1310` to `_PILOT_CODE_PATTERNS` would have fixed that one job and
+  left the next unmatched code broken, so extraction was re-anchored on two
+  format-level invariants that hold regardless of error code, pilot version or
+  experiment: the `YYYY-MM-DD HH:MM:SS,mmm | LEVEL |` pilot log record prefix
+  (whose *absence* identifies continuation lines, making the record — not a
+  line count — the right extraction unit), and the `Traceback (most recent
+  call last):` → indented `File "...", line N, in func` frames → unindented
+  `ExceptionType: message` shape.
+
+  - New `_traceback_parse.py` provides `find_traceback_blocks`,
+    `select_primary_traceback`, `parse_exception`, `find_primary_exception`,
+    `parse_pilot_version`, `parse_pilot_version_from_pilotid` and
+    `truncate_traceback`. Handles chained (`During handling of the above
+    exception...`) tracebacks as a single block, Python 3.11+ `~~~^^^` column
+    markers, and both prefixed pilot logs and unprefixed payload logs through
+    one code path. `Frame` carries `file`, `lineno`, `func`, `pilot_path` and
+    `is_pilot`, so CVMFS/stdlib frames are retained for diagnosis while
+    `deepest_pilot_frame` still resolves the pilot-owned failure locus.
+  - New `extract_failure_context()` returns a `FailureContext` (excerpt +
+    parsed exception + traceback count); `extract_log_excerpt()` retained as a
+    thin wrapper so existing callers and tests are unaffected.
+  - Traceback-first extraction applies to `pilotlog.txt`, `payload.stdout`,
+    `payload.stderr` and `setup.stdout` — the traceback format is identical in
+    all four, so Athena payload failures benefit as much as pilot failures.
+    When both payload files contain a traceback, stderr's wins (that is where
+    Python tracebacks and abort reports are written).
+  - New evidence keys: `traceback_available`, `exception_type`,
+    `exception_message`, `exception_frames`, `deepest_pilot_frame`,
+    `traceback_count`, `pilot_version`, `code_analysis_offer_md`. All keys are
+    always present (`None`/`False` when absent) so consumers can rely on the
+    shape rather than probing with `in`.
+  - New `_classify_from_exception()` runs *before* the `_FAILURE_PATTERNS`
+    substring table, keyed on exception type and the pilot call chain rather
+    than substring presence anywhere in the excerpt. New categories:
+    `transform_download_timeout`, `transform_download_failed` and
+    `pilot_exception` — the last preferred over `payload_error`, which
+    actively misleads when the exception was raised while *building* the
+    payload command and the payload never ran. `pilot_monitoring_error` is
+    preserved by name because `bamboo_answer` and `planner` route on it.
+  - `_SYSTEM_LOG_ANALYSIS` now states that the parsed exception is
+    authoritative over `piloterrordiag`, instructs the LLM to say so
+    explicitly when they disagree, and forbids inferring a root cause from
+    directory listings or file sizes — the exact failure mode above.
+
+- **Pilot source analysis pinned to the job's pilot release tag**
+  (`packages/askpanda_atlas/askpanda_atlas/pilot_source_analysis_impl.py`).
+  Pilot releases are tagged after release (e.g. tag `3.14.0.22`), so a
+  traceback's line numbers are only meaningful against the tag the job ran;
+  fetching `master` silently misreports them for any module changed since,
+  which for an actively developed file like `pilot/util/https.py` is most of
+  the time. `resolve_github_ref()` probes the bare tag then a `v`-prefixed
+  variant with a real content fetch, falling back to `master` and recording
+  why in `ref_resolution`. `function_at_line()` and `verify_frame_lines()` use
+  `ast` to confirm the function at each traceback line matches the frame's
+  name, reporting `line_verification.version_skew`; `_SYSTEM_PILOT_SOURCE`
+  instructs the LLM to describe functions by name rather than line number when
+  skew is detected. `pilot_version` added to the tool input schema and
+  threaded through from `panda_log_analysis` evidence via `bamboo_answer`.
+
+### Changed
+- **`pilot_source_analysis` is reachable for any pilot traceback, not only
+  `pilot_monitoring_error`** (`core/bamboo/tools/bamboo_executor.py`,
+  `core/bamboo/tools/bamboo_answer.py`, `core/bamboo/tools/planner.py`).
+  `get_last_pilot_monitoring_evidence()` gated on `failure_type ==
+  "pilot_monitoring_error"`, which made source-level analysis unreachable for
+  every other kind of pilot exception — including the transform-download
+  timeouts above. Renamed to `get_last_traceback_evidence()` and re-gated on
+  `traceback_available` plus a non-null `deepest_pilot_frame` (required
+  because the tool fetches pilot3 modules from GitHub: a pure Athena payload
+  traceback gives it nothing to fetch). The old `pilot_monitoring_error` +
+  `log_excerpt` path is still accepted so evidence produced by a deployment
+  predating `traceback_available` continues to route correctly, and the old
+  symbol is kept as an alias. Planner hint and tool description updated to
+  match.
+- **Deterministic code-analysis follow-up offer.** When a traceback reaches
+  pilot3 code, `panda_log_analysis` evidence now carries
+  `code_analysis_offer_md` naming the exact frame
+  (`pilot/util/https.py:2301 (download_file)`), appended verbatim by
+  `bamboo_executor` before the links block — like `links_md`, built from
+  programmatic values so the LLM cannot garble the path or line number.
+  `_PILOT_SOURCE_SIGNALS` extended to cover the offer's own wording so a user
+  who accepts it by echoing it routes to `pilot_source_analysis`. Chaining is
+  deliberately *not* automatic: the offer keeps the extra 5 GitHub fetches
+  opt-in.
+- **`_MAX_EXCERPT_CHARS` raised from 6000 to 8000**, with
+  `_TRACEBACK_RESERVED_CHARS = 5000` allocated to the traceback *first* and
+  surrounding context taking the remainder. `truncate_traceback()` keeps the
+  head and tail with an elision marker rather than slicing from the front,
+  because a plain `text[:n]` discards the terminal `ExceptionType: message`
+  line — the single most diagnostic line in the traceback. Budgets are now
+  passed *into* `extract_failure_context()` rather than applied as a
+  post-hoc slice by the caller: `_fetch_logs_payload` previously sliced the
+  stdout excerpt to `stdout_budget` after extraction, which could decapitate a
+  traceback. `_STDOUT_CHAR_TAIL` is retained but documented as vestigial.
+- **Directory-listing lines stripped from traceback context windows**
+  (`_strip_directory_listing`). `ls -l` entries, `total N` headers and the
+  pilot's `list_work_dir`/`print_executable` records are removed from the
+  context either side of a traceback. They are never diagnostic and are
+  actively harmful: a listing plus no real error is what led the LLM to
+  diagnose job 7261310898 from the fact that `remote_open.stderr` was 28 kB.
+
+### Fixed
+- **Chained-traceback detection** (`_traceback_parse.find_traceback_blocks`).
+  The first implementation closed a block at the terminal exception line, so a
+  following `During handling of the above exception, another exception
+  occurred:` marker was never seen and the chain was split into two blocks —
+  reporting the *first* exception as the failure when the last one is what
+  actually propagated. Now looks ahead past the exception line for a chain
+  marker and absorbs the chained traceback into the same block.
+
+### Tests
+- New `packages/askpanda_atlas/tests/test_traceback_parse.py` (35 tests):
+  record-prefix parsing, block boundaries, chained and truncated tracebacks,
+  severity-based selection, pilot-vs-stdlib frame discrimination (including
+  that the `pilot3/` scratch directory is not mistaken for the `pilot/`
+  package), dotted custom exception types, colons in indented source lines,
+  version detection and budget-aware truncation.
+- Job 7261310898 regression fixture added to
+  `packages/askpanda_atlas/tests/test_log_analysis.py`: asserts the excerpt
+  contains `TimeoutError`/`download_transform`, contains no `tar cvfz` or
+  `ls` listing lines, classifies as `transform_download_timeout`, exposes the
+  correct `deepest_pilot_frame`, detects `pilot_version` (and falls back to
+  `pilotid` on the 1305 path), and reports the exception rather than the
+  misleading diag in the text summary. Plus exception-driven classification
+  tests, including that a parsed exception overrides the `timeout=90 s`
+  substring noise.
+- Ref-resolution and version-skew tests added to
+  `test_pilot_source_analysis.py`. Note these must patch `_fetch_raw`, not
+  `fetch_pilot_module`, since `resolve_github_ref` probes through the former.
+- **Docstrings of the two `test_log_analysis.py` files disambiguated.** The
+  repo-root `tests/test_log_analysis.py` and
+  `packages/askpanda_atlas/tests/test_log_analysis.py` carried identical
+  docstrings, which made them indistinguishable when opened side by side. They
+  are near-duplicates: 20 of the root file's 21 tests share names with the
+  package file and 18 of those bodies are byte-identical. Each docstring now
+  states what its file actually covers (core-shim reachability vs. the canonical
+  implementation suite) and warns that shared behaviour must be changed in both
+  places. The duplication itself is left in place — see Notes.
+- Two existing fixtures updated because they encoded the old budgets, not
+  because behaviour regressed: the root payload-tail test now derives its log
+  size from the live `_MAX_EXCERPT_CHARS` (at 8000 its hardcoded 700-line log
+  fit entirely in budget, so the "beginning absent" assertion was passing
+  vacuously), and the 1354 test's blanket "no tail lines" assertion became a
+  bounded one (the traceback must precede the trailing window, and at most
+  `_TRACEBACK_TRAILING_LINES` lines may follow) because a bounded trailing
+  window is now included by design — the pilot logs the resulting error code
+  and state transition there. Mirrored into the ePIC copy.
+
+### Notes
+- `_traceback_parse.py` is duplicated in `askpanda_atlas` and `askpanda_epic`
+  rather than shared. Plugin packages must stay independently installable and
+  must not import each other or bamboo core at module scope, and
+  `log_analysis_impl.py` is already duplicated the same way. The two copies
+  differ only in the module docstring and the `askpanda_*` import prefix; any
+  change to one must be mirrored to the other.
+- **Unresolved duplication:** `tests/test_log_analysis.py` (root) is a 95%
+  duplicate of `packages/askpanda_atlas/tests/test_log_analysis.py`. This work
+  required fixing the same excerpt-budget fixture in both files independently,
+  and the root file lacks the 1354 traceback test entirely, so the two have
+  already drifted. Only one test in the root file is unique
+  (`test_extract_log_excerpt_uses_tail_for_payload`), and its sole distinct
+  value is proving the tool is reachable through the `bamboo.tools.log_analysis`
+  shim. Reducing the root file to just that assertion would remove a standing
+  maintenance trap, but deleting tests is a judgement call and was left for
+  review rather than done here.
+- `resolve_github_ref`, `function_at_line` and `verify_frame_lines` are
+  deliberately *not* re-exported through the `pilot_source_analysis` shims:
+  they are internal helpers, and exporting them would force matching stub
+  definitions into `_fallback_pilot_source_analysis.py` in both packages for
+  no benefit.
+
 ### Added
 - **`atlas.job_stats`: memory-leak diagnostics and software-environment
   fields** (`packages/askpanda_atlas/askpanda_atlas/job_stats_schema.py`,

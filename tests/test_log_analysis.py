@@ -1,4 +1,15 @@
-"""Tests for panda_log_analysis tool (askpanda_atlas plugin implementation).
+"""Core-level tests for panda_log_analysis via the bamboo.tools.log_analysis shim.
+
+Exercises the tool as core sees it — through the ``bamboo.tools.log_analysis``
+re-export rather than by importing the plugin package directly — so a broken or
+incomplete shim is caught here rather than at runtime.
+
+NOTE: this file substantially overlaps
+``packages/askpanda_atlas/tests/test_log_analysis.py``: 20 of its 21 tests share
+names with that file and 18 of those bodies are byte-identical.  The canonical
+tests for the extraction and classification logic live in the package file; only
+the shim-reachability aspect is unique here.  Changes to shared behaviour must be
+applied to both files until the duplication is resolved.
 
 All external HTTP calls are patched; no network access is required.
 """
@@ -195,19 +206,27 @@ def test_extract_log_excerpt_uses_pattern_for_pilotlog() -> None:
 def test_extract_log_excerpt_uses_tail_for_payload() -> None:
     """extract_log_excerpt returns char-tail for payload.stdout (code 1305).
 
-    Uses 700 lines so the total length (~5 500 chars) exceeds the
-    _STDOUT_CHAR_TAIL budget (4 000 chars), ensuring early lines are
-    genuinely truncated from the tail.
+    The log is sized from the live ``_MAX_EXCERPT_CHARS`` value rather than a
+    hardcoded line count, so raising the budget cannot silently turn this into
+    a test that asserts nothing (a fixture that fits entirely in the budget is
+    never truncated, so the "beginning absent" assertion would pass vacuously
+    only because the whole log is present).
     """
-    long_log = "\n".join(f"line{i}" for i in range(700))
+    from askpanda_atlas.log_analysis_impl import _MAX_EXCERPT_CHARS
+
+    # ~7 chars per line; use double the budget so truncation is guaranteed.
+    n_lines = (_MAX_EXCERPT_CHARS * 2) // 7
+    long_log = "\n".join(f"line{i}" for i in range(n_lines))
+    assert len(long_log) > _MAX_EXCERPT_CHARS, "Fixture must exceed the excerpt budget."
+
     excerpt = extract_log_excerpt(
         long_log, "payload.stdout",
         pilot_error_code=1305,
         pilot_error_diag="",
     )
     # Tail should contain the end of the log but not the very beginning.
-    assert "line699" in excerpt
-    assert "line0" not in excerpt
+    assert f"line{n_lines - 1}" in excerpt
+    assert not excerpt.startswith("line0")
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +376,63 @@ def test_get_definition() -> None:
     assert "job_id" in d["inputSchema"]["properties"]
     assert d["inputSchema"]["required"] == ["job_id"]
     assert d["inputSchema"]["additionalProperties"] is False
+
+
+# ---------------------------------------------------------------------------
+# Presentation keys must not reach the synthesis LLM
+#
+# code_analysis_offer_md and links_md hold Markdown rendered for the *user*;
+# bamboo_executor appends them programmatically after synthesis.  They used to
+# be visible to the LLM inside the nested evidence dict, and the LLM copied the
+# offer verbatim into its answer — so the rendered reply carried the offer
+# twice, once from the model and once appended.  A prompt instruction not to
+# reproduce it loses to a ready-made string sitting in the input, which is why
+# they are now stripped from the LLM's view.
+#
+# They must still be present in _last_evidence_store, because
+# _log_analysis_offer_md and _log_analysis_links_md read them back from there.
+# ---------------------------------------------------------------------------
+
+def test_strip_presentation_keys_removes_nested_markdown() -> None:
+    """Presentation keys are removed from the nested evidence dict."""
+    from bamboo.tools.bamboo_executor import _strip_presentation_keys
+
+    unpacked = {
+        "evidence": {
+            "job_id": 7261310898,
+            "exception_type": "TimeoutError",
+            "links_md": "\n\nLinks:\n- [BigPanDA Monitor](https://example)",
+            "code_analysis_offer_md": "\n\nAsk me to show the pilot source.",
+        },
+        "text": "Job failed.",
+    }
+    cleaned = _strip_presentation_keys(unpacked)
+
+    assert "links_md" not in cleaned["evidence"]
+    assert "code_analysis_offer_md" not in cleaned["evidence"]
+    # Real evidence survives untouched.
+    assert cleaned["evidence"]["exception_type"] == "TimeoutError"
+    assert cleaned["text"] == "Job failed."
+
+
+def test_strip_presentation_keys_does_not_mutate_input() -> None:
+    """The caller's dict is left intact so the evidence store keeps the keys."""
+    from bamboo.tools.bamboo_executor import _strip_presentation_keys
+
+    unpacked = {
+        "evidence": {"job_id": 1, "code_analysis_offer_md": "offer"},
+    }
+    _strip_presentation_keys(unpacked)
+
+    assert unpacked["evidence"]["code_analysis_offer_md"] == "offer", (
+        "Stripping for the LLM must not remove the key from the original dict; "
+        "_log_analysis_offer_md reads it back from the evidence store."
+    )
+
+
+def test_strip_presentation_keys_tolerates_missing_evidence() -> None:
+    """A result with no nested evidence dict is handled without raising."""
+    from bamboo.tools.bamboo_executor import _strip_presentation_keys
+
+    assert _strip_presentation_keys({"text": "hi"}) == {"text": "hi"}
+    assert _strip_presentation_keys({"evidence": None}) == {"evidence": None}

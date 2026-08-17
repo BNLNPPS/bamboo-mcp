@@ -27,7 +27,7 @@ from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
-from bamboo.tools.bamboo_executor import execute_plan, get_last_pilot_monitoring_evidence
+from bamboo.tools.bamboo_executor import execute_plan, get_last_traceback_evidence
 from bamboo.tools.planner import (
     bamboo_plan_tool,
     Plan,
@@ -81,9 +81,13 @@ _CONCEPTUAL_RE: re.Pattern[str] = re.compile(
 )
 # Matches PanDA server liveness questions — \"is panda alive\", \"is the panda server ok\", etc.
 # Deliberately avoids matching task/job/site questions that mention \"panda\" incidentally.
-# Signal phrases that indicate the user wants source-level analysis of a
-# pilot_monitoring_error.  Only consulted after confirming the last tool call
-# was panda_log_analysis with failure_type='pilot_monitoring_error'.
+# Signal phrases that indicate the user wants source-level analysis of a pilot
+# exception.  Only consulted after confirming the last panda_log_analysis call
+# found a Python traceback reaching pilot3 code (get_last_traceback_evidence).
+#
+# The phrases below must cover the wording of the offer that panda_log_analysis
+# appends to its own answer ("Ask me to show the pilot source for a code-level
+# diagnosis") — a user who accepts an offer by echoing it must route correctly.
 _PILOT_SOURCE_SIGNALS: frozenset[str] = frozenset({
     "pilot code",
     "pilot source",
@@ -116,16 +120,26 @@ _PILOT_SOURCE_SIGNALS: frozenset[str] = frozenset({
     "list_processes",
     "getpwuid",
     "psutils",
+    # Wording of the appended code-analysis offer, so accepting it routes here.
+    "show the pilot source",
+    "show me the pilot source",
+    "code-level",
+    "code level",
+    "code analysis",
+    "analyse the code",
+    "analyze the code",
+    "show me the code",
+    "traceback",
 })
 
 
 def _is_pilot_source_request(question: str) -> bool:
     """Return True if the question is asking for pilot source-level analysis.
 
-    Only meaningful when the last panda_log_analysis call returned
-    failure_type='pilot_monitoring_error'.  The function is intentionally
-    permissive — it is always guarded by the evidence check so false positives
-    cannot misfire when there is no prior pilot_monitoring_error in context.
+    Only meaningful when the last panda_log_analysis call found a pilot
+    traceback.  The function is intentionally permissive — it is always guarded
+    by the evidence check in get_last_traceback_evidence, so false positives
+    cannot misfire when there is no prior pilot traceback in context.
 
     Args:
         question: User question text.
@@ -1710,15 +1724,21 @@ def _build_deterministic_plan(  # noqa: C901
     _PANDA_PLUGINS: frozenset[str] = frozenset({"atlas", "epic"})
     if plugin_id in _PANDA_PLUGINS:
         # Rule 1b: follow-up pilot source analysis — checked FIRST.
-        # If the last panda_log_analysis returned pilot_monitoring_error and the
-        # question contains pilot-source signals, route to pilot_source_analysis
-        # using the stored log_excerpt.  This must come before rule 1 (log analysis)
-        # because questions like "Why did the pilot code raise that? job 7099503721"
-        # match _is_log_analysis_request ("why" + job ID) and would otherwise
-        # re-run panda_log_analysis instead of fetching the pilot source.
+        # If the last panda_log_analysis found a Python traceback reaching into
+        # pilot3 code and the question contains pilot-source signals, route to
+        # pilot_source_analysis using the stored log_excerpt.  This must come
+        # before rule 1 (log analysis) because questions like "Why did the pilot
+        # code raise that? job 7099503721" match _is_log_analysis_request
+        # ("why" + job ID) and would otherwise re-run panda_log_analysis instead
+        # of fetching the pilot source.
+        #
+        # The gate is any pilot traceback, not failure_type ==
+        # 'pilot_monitoring_error' — see get_last_traceback_evidence.  Narrowing
+        # it to one failure type made source analysis unreachable for every
+        # other pilot exception.
         if job_id and _is_pilot_source_request(question):
-            monitoring_evidence = get_last_pilot_monitoring_evidence()
-            if monitoring_evidence is not None:
+            traceback_evidence = get_last_traceback_evidence()
+            if traceback_evidence is not None:
                 return Plan(
                     route=PlanRoute.FAST_PATH,
                     confidence=1.0,
@@ -1726,14 +1746,17 @@ def _build_deterministic_plan(  # noqa: C901
                         tool="pilot_source_analysis",
                         arguments={
                             "job_id": job_id,
-                            "log_excerpt": monitoring_evidence.get("log_excerpt", ""),
-                            "pilot_error_diag": monitoring_evidence.get("piloterrordiag", ""),
+                            "log_excerpt": traceback_evidence.get("log_excerpt", ""),
+                            "pilot_error_diag": traceback_evidence.get("piloterrordiag", ""),
+                            # Pins the GitHub fetch to the release tag the job
+                            # ran, so traceback line numbers match the source.
+                            "pilot_version": traceback_evidence.get("pilot_version") or "",
                         },
                     )],
                     reuse_policy=reuse,
                     explain=(
                         "Deterministic: job ID + pilot-source keywords + prior "
-                        "pilot_monitoring_error evidence → pilot source analysis."
+                        "pilot traceback evidence → pilot source analysis."
                     ),
                 )
 

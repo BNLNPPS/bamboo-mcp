@@ -15,24 +15,30 @@ _logger = logging.getLogger(__name__)
 
 try:
     from askpanda_atlas.log_analysis_impl import (  # noqa: F401
+        FailureContext,
         PandaLogAnalysisTool,
         classify_failure,
+        extract_failure_context,
         extract_log_excerpt,
         get_definition,
         panda_log_analysis_tool,
     )
 except ImportError:
     from askpanda_atlas._fallback_log_analysis import (  # type: ignore[no-redef]  # noqa: F401,F811
+        FailureContext,
         PandaLogAnalysisTool,
         classify_failure,
+        extract_failure_context,
         extract_log_excerpt,
         get_definition,
     )
     panda_log_analysis_tool = PandaLogAnalysisTool()  # type: ignore[assignment]  # noqa: F811
 
 __all__ = [
+    "FailureContext",
     "PandaLogAnalysisTool",
     "classify_failure",
+    "extract_failure_context",
     "extract_log_excerpt",
     "get_definition",
     "panda_log_analysis_tool",

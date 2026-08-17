@@ -479,9 +479,21 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
     The context window must include both the WARNING anchor line and the
     traceback lines that follow it.  With standard preceding-context extraction
     the function would return at the WARNING line and miss the File/KeyError
-    lines entirely; _extract_context_window_with_trailing fixes this.
+    lines entirely.
+
+    Since the traceback-first extractor was introduced this no longer depends on
+    1354 appearing in _TRAILING_CONTEXT_CODES — the traceback is located by its
+    own format.  A bounded trailing window of _TRACEBACK_TRAILING_LINES lines is
+    deliberately included after the traceback (the pilot logs the resulting
+    error code and state transition there), so the assertion below checks that
+    the tail is *bounded*, not that it is absent.  The failure mode being
+    guarded against is the excerpt degenerating into a tail extraction that
+    contains no traceback at all.
     """
-    from askpanda_epic.log_analysis_impl import _CONTEXT_LINES
+    from askpanda_epic.log_analysis_impl import (
+        _CONTEXT_LINES,
+        _TRACEBACK_TRAILING_LINES,
+    )
 
     preamble = "INFO | some startup line\n" * 50
     traceback_block = (
@@ -493,8 +505,9 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
         "KeyError: 'getpwuid(): uid not found: 6435'\n"
         "\n"  # blank line terminates the traceback block — mirrors real pilot logs
     )
-    # Append unrelated tail lines that would be chosen if the anchor missed
-    tail = "INFO | some unrelated pilot cleanup line\n" * _CONTEXT_LINES
+    # Append unrelated tail lines that would dominate if the anchor missed
+    tail_line = "INFO | some unrelated pilot cleanup line"
+    tail = (tail_line + "\n") * _CONTEXT_LINES
     log_text = preamble + traceback_block + tail
 
     excerpt = extract_log_excerpt(
@@ -505,13 +518,20 @@ def test_extract_log_excerpt_pilot_error_1354() -> None:
     )
     assert "getpwuid" in excerpt, "Excerpt must contain the getpwuid error line."
     assert "list_processes_and_threads" in excerpt, (
-        "Excerpt must contain the traceback File line that follows the WARNING. "
-        "If this fails, _extract_context_window_with_trailing is not being used "
-        "for code 1354."
+        "Excerpt must contain the traceback File line that follows the WARNING."
     )
     assert "KeyError" in excerpt, "Excerpt must contain the final KeyError line."
-    assert "unrelated pilot cleanup" not in excerpt, (
-        "Excerpt must not bleed into the unrelated tail lines."
+
+    # The traceback must come before the cleanup tail, i.e. the excerpt is
+    # anchored on the traceback rather than being a tail extraction.
+    assert excerpt.index("KeyError") < excerpt.index(tail_line), (
+        "The traceback must precede the trailing context; if it does not, the "
+        "excerpt degenerated into tail extraction."
+    )
+    # Only the bounded trailing window may bleed through, never all 40 lines.
+    assert excerpt.count(tail_line) <= _TRACEBACK_TRAILING_LINES, (
+        f"At most {_TRACEBACK_TRAILING_LINES} trailing lines may be included; "
+        f"got {excerpt.count(tail_line)}."
     )
 
 
