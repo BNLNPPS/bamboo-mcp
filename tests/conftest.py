@@ -60,8 +60,17 @@ def pytest_configure() -> None:
 
     # Install minimal mcp sub-module stubs so that interfaces/agent/agent.py
     # and interfaces/shared/mcp_client.py can be imported in environments where
-    # the real mcp SDK is not installed.  setdefault is a no-op when the real
-    # package is already present, so a genuine mcp installation always wins.
+    # the real mcp SDK is not installed.
+    #
+    # CAUTION: these stubs shadow a genuine mcp installation too. sys.modules
+    # .setdefault only no-ops when the module has already been *imported*, not
+    # merely installed, and in a fresh session nothing has imported mcp yet — so
+    # the empty ModuleType wins and Server below becomes a MagicMock regardless
+    # of which mcp version is present. Consequently no test in this suite
+    # exercises the real mcp API, which is how the mcp 2.0.0 removal of the
+    # low-level Server decorator API stayed invisible behind 1132 passing tests.
+    # tests/test_mcp_server_api_compat.py covers that gap by checking
+    # distribution metadata and a clean subprocess instead of importing mcp.
     _mcp_sub_modules = (
         "mcp",
         "mcp.client",

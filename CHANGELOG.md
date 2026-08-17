@@ -38,11 +38,33 @@ All notable changes to Bamboo are documented here.
   `AttributeError` was the correct outcome.
 
 ### Added
-- **`tests/test_mcp_server_api_compat.py`.** Asserts the installed mcp exposes
-  each `Server` decorator `build_server()` registers with, so lifting the
-  `mcp<2.0.0` pin without porting `core.py` fails a test instead of failing at
-  server start-up. Confirmed to pass under mcp 1.29.0 and fail under 2.0.0 in a
-  pristine virtualenv.
+- **`tests/test_mcp_server_api_compat.py`.** Verifies the installed mcp is one
+  whose `Server` API `core.build_server()` can use, so lifting the `mcp<2.0.0`
+  pin without porting `core.py` fails a test instead of failing at server
+  start-up.
+
+  The check deliberately does not `import mcp`. `tests/conftest.py` assigns
+  `MagicMock` to `mcp.server.Server`, so an in-process import inside the test
+  session returns the stub and the attribute assertions fail for the wrong
+  reason — the first version of this test did exactly that. Instead it reads the
+  version from distribution metadata and probes the real API in a subprocess with
+  a clean interpreter, matching the conditions under which `build_server()`
+  actually runs. Both checks earn their place: on a half-upgraded install the
+  metadata reported 1.29.0 while the subprocess correctly found all four
+  decorators missing.
+
+  Confirmed to pass under mcp 1.29.0 and fail under 2.0.0 *with conftest's stub
+  active*, which is the condition that matters.
+
+- **Corrected the mcp stubbing comment in `tests/conftest.py`.** It claimed
+  "setdefault is a no-op when the real package is already present, so a genuine
+  mcp installation always wins". That is wrong: `sys.modules.setdefault` only
+  no-ops if the module has already been *imported*, not merely installed, so in a
+  fresh session the stub shadows a real mcp too. No test in the suite exercises
+  the real mcp API, which is the second half of why the 2.0.0 breakage stayed
+  invisible behind 1132 passing tests. The stubbing behaviour itself is left
+  unchanged — altering it would change the import environment for the whole suite
+  — but the comment now describes what actually happens.
 - **Routing coverage for the widened gate**
   (`tests/test_bamboo_answer_helpers.py`): a case using the modern evidence shape
   (`traceback_available` + `deepest_pilot_frame` with an unrelated
