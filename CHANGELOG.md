@@ -7,6 +7,52 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **mcp pinned below 2.0.0 — the low-level Server decorator API was removed**
+  (`requirements.txt`, `requirements-ui.txt`, `pyproject.toml`). Surfaced as four
+  pyright `reportAttributeAccessIssue` errors in CI on
+  `core/bamboo/core.py:280,318,370,393` (`list_tools`, `call_tool`,
+  `list_prompts`, `get_prompt` unknown on `Server[Any]`).
+
+  This was a true positive, not type-checker noise. `core.build_server()`
+  registers handlers with the low-level decorator API; mcp 2.0.0 removed it.
+  Verified directly: under mcp 1.29.0 all four attributes exist and pyright is
+  clean, under 2.0.0 none exist.
+
+  The requirement was `mcp>=0.9.0` with no upper bound, so a fresh CI install
+  resolved 2.0.0 while developer machines kept an older 1.x — which is why the
+  error appeared only in CI. Worse, the failure is near-silent: those decorators
+  run inside `build_server()`, which the test suite never calls, so all 1125
+  tests passed against an mcp version that cannot start the server at all. Only
+  pyright caught it. Suppressing the errors inline would have hidden a
+  production start-up failure, so the fix is the pin.
+
+- **Renamed routing gate left five tests patching a nonexistent attribute**
+  (`tests/test_bamboo_answer_helpers.py`). `get_last_pilot_monitoring_evidence`
+  → `get_last_traceback_evidence` was applied to `bamboo_answer`'s import but not
+  to the tests that `patch.object` it, so all five raised `AttributeError`.
+  Repointed at the new name.
+
+  Deliberately *not* fixed by re-importing the old alias into `bamboo_answer`:
+  the routing code calls the new name, so a patched alias would be silently
+  ineffective and the tests would pass while intercepting nothing. The
+  `AttributeError` was the correct outcome.
+
+### Added
+- **`tests/test_mcp_server_api_compat.py`.** Asserts the installed mcp exposes
+  each `Server` decorator `build_server()` registers with, so lifting the
+  `mcp<2.0.0` pin without porting `core.py` fails a test instead of failing at
+  server start-up. Confirmed to pass under mcp 1.29.0 and fail under 2.0.0 in a
+  pristine virtualenv.
+- **Routing coverage for the widened gate**
+  (`tests/test_bamboo_answer_helpers.py`): a case using the modern evidence shape
+  (`traceback_available` + `deepest_pilot_frame` with an unrelated
+  `failure_type`) that would not have routed under the old
+  `pilot_monitoring_error` gate, asserting `pilot_version` is threaded through to
+  `pilot_source_analysis`; and a case confirming `_PILOT_SOURCE_SIGNALS` covers
+  the wording of the offer `panda_log_analysis` appends, so accepting the offer
+  by echoing it is not a dead end. Neither the widened gate nor the
+  `pilot_version` argument had any test coverage before.
+
 - **ePIC plugin copies had drifted from their ATLAS originals**
   (`packages/askpanda_epic/askpanda_epic/log_analysis_impl.py`,
   `packages/askpanda_epic/askpanda_epic/_traceback_parse.py`). Surfaced as a

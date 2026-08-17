@@ -740,11 +740,18 @@ class TestIsPilotSourceRequest:
 
 
 class TestPilotSourceAnalysisFastPath:
-    """Integration tests: pilot_source_analysis fast-path routing."""
+    """Integration tests: pilot_source_analysis fast-path routing.
+
+    The gate is get_last_traceback_evidence, which fires for any pilot traceback
+    rather than only for failure_type == 'pilot_monitoring_error'.  The fake
+    evidence below keeps the legacy monitoring-error shape because that shape is
+    still accepted (evidence from a deployment predating traceback_available);
+    the modern shape is covered by test_routes_to_pilot_source_for_any_traceback.
+    """
 
     @pytest.mark.asyncio
-    async def test_routes_to_pilot_source_when_prior_monitoring_error(self) -> None:
-        """After pilot_monitoring_error, a source-question routes to pilot_source_analysis.
+    async def test_routes_to_pilot_source_when_prior_traceback(self) -> None:
+        """After a pilot traceback, a source-question routes to pilot_source_analysis.
 
         The question intentionally contains 'why' + job ID so it would normally
         match _is_log_analysis_request (rule 1).  Rule 1b must win because
@@ -770,7 +777,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=fake_evidence),
         ):
             await tool.call({
@@ -786,8 +793,79 @@ class TestPilotSourceAnalysisFastPath:
         assert "getpwuid" in args["log_excerpt"]
 
     @pytest.mark.asyncio
+    async def test_routes_to_pilot_source_for_any_traceback(self) -> None:
+        """Any pilot traceback routes to source analysis, not just monitoring errors.
+
+        The gate used to require failure_type == 'pilot_monitoring_error', which
+        made source-level analysis unreachable for every other kind of pilot
+        exception — including the transform-download timeouts that motivated the
+        traceback-first extractor. This evidence carries the modern shape
+        (traceback_available + deepest_pilot_frame) and an unrelated
+        failure_type, so it would not have routed under the old gate.
+        """
+        import bamboo.tools.bamboo_answer as ba_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        fake_evidence = {
+            "failure_type": "transform_download_timeout",
+            "traceback_available": True,
+            "exception_type": "TimeoutError",
+            "deepest_pilot_frame": {
+                "pilot_path": "pilot/util/https.py",
+                "lineno": 2301,
+                "func": "download_file",
+                "is_pilot": True,
+            },
+            "log_excerpt": 'File "/tmp/x/pilot3/pilot/util/https.py", line 2301, '
+                           "in download_file\nTimeoutError: timed out",
+            "piloterrordiag": "Exception caught during payload execution",
+            "pilot_version": "3.14.1.27",
+        }
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "done"}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "get_last_traceback_evidence",
+                         return_value=fake_evidence),
+        ):
+            await tool.call({
+                "question": "Show me the pilot source for a code-level "
+                            "diagnosis. job 7261310898",
+            })
+
+        execute_mock.assert_awaited_once()
+        args = execute_mock.call_args[0][0].tool_calls[0].arguments
+        assert execute_mock.call_args[0][0].tool_calls[0].tool == "pilot_source_analysis"
+        # pilot_version must be threaded through so the GitHub fetch can be
+        # pinned to the release the job actually ran (or, for an unreleased
+        # version like this one, to the development branch).
+        assert args["pilot_version"] == "3.14.1.27"
+
+    @pytest.mark.asyncio
+    async def test_offer_wording_routes_to_pilot_source(self) -> None:
+        """Accepting the appended offer by echoing its wording must route correctly.
+
+        panda_log_analysis appends "Ask me to show the pilot source for a
+        code-level diagnosis"; _PILOT_SOURCE_SIGNALS has to cover that phrasing
+        or the offer is a dead end.
+        """
+        from bamboo.tools.bamboo_answer import _is_pilot_source_request
+
+        assert _is_pilot_source_request(
+            "show me the pilot source for a code-level diagnosis"
+        )
+        assert _is_pilot_source_request("can you do a code analysis of that?")
+
+    @pytest.mark.asyncio
     async def test_does_not_route_to_pilot_source_without_prior_evidence(self) -> None:
-        """Without prior pilot_monitoring_error evidence, falls through to panda_job_status."""
+        """Without prior pilot traceback evidence, falls through to panda_job_status."""
         import bamboo.tools.bamboo_answer as ba_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
@@ -801,7 +879,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=None),
         ):
             await tool.call({
@@ -837,7 +915,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=fake_evidence),
         ):
             await tool.call({
@@ -957,7 +1035,7 @@ class TestConceptualQuestionRouting:
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
             patch.object(ba_mod, "bamboo_plan_tool") as mock_plan_tool,
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=None),
         ):
             mock_plan_tool.call = plan_mock
@@ -995,7 +1073,7 @@ class TestConceptualQuestionRouting:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=None),
         ):
             await tool.call({
