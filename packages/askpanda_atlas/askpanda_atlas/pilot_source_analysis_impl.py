@@ -585,10 +585,11 @@ def fetch_and_analyse_pilot_source(
 
     Orchestrates the full analysis:
     1. Parse traceback frames (path, function, line number) from the excerpt.
-    2. Resolve the GitHub ref — the job's pilot release tag when known,
-       otherwise ``master`` (see :func:`resolve_github_ref`).
+    2. Resolve the repository and ref — the release tag for a released build, the
+       development branch for an unreleased one (see :func:`resolve_source_ref`).
     3. Group unique file paths to minimise HTTP requests.
-    4. Fetch each unique module from GitHub at the resolved ref.
+    4. Fetch each unique module, reusing the ref probe's response for the module
+       it already downloaded.
     5. Extract each function named in the traceback from its module.
     6. Verify each traceback line number against the fetched source and flag
        version skew.

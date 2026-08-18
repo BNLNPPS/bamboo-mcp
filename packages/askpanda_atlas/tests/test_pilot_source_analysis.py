@@ -371,7 +371,7 @@ class TestPilotSourceAnalysisToolCall:
 # Fetching master instead silently misreports line numbers for any module that
 # has changed since — which for an actively developed file is most of the time.
 #
-# resolve_github_ref probes candidate refs through _fetch_raw, so these tests
+# resolve_source_ref probes candidate refs through _fetch_raw, so these tests
 # patch _fetch_raw rather than fetch_pilot_module.
 # ---------------------------------------------------------------------------
 

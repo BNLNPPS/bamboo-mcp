@@ -7,6 +7,33 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **ePIC delegation test's fetch mock had the pre-`repo` signature**
+  (`packages/askpanda_epic/tests/test_pilot_source_analysis_epic.py`).
+  `TypeError: _fetch() takes 2 positional arguments but 4 were given` — the ATLAS
+  mocks were updated when `fetch_pilot_module` gained `ref` and `repo`, but the
+  ePIC delegation test's was not.
+
+  It slipped through because the ePIC suite cannot run this test unless
+  `askpanda_atlas` is importable; without it the delegation falls back to a stub
+  and the test is already failing for an unrelated reason. Verification that
+  compared *failure lists* therefore treated a genuinely broken test as
+  pre-existing noise. Confirmed fixed with `askpanda_atlas` on the path, where the
+  full ePIC suite is 89/89 in both this tree and a pristine baseline.
+
+- **`test_pilot_source_analysis_epic.py` reached the real GitHub.** The module
+  docstring claims "All external HTTP calls are patched; no network access is
+  required", but three tests patched only `fetch_pilot_module`, leaving
+  `resolve_source_ref`'s probe to hit `raw.githubusercontent.com` — and because
+  the probe seeds the source cache, a test could pass on live source while
+  asserting fetches had failed. Added the same autouse `_no_raw_github_fetch`
+  fixture already guarding the ATLAS suite.
+
+- **Stale `resolve_github_ref` references** in the
+  `fetch_and_analyse_pilot_source` docstring and a comment in
+  `test_pilot_source_analysis.py`, left by the rename to `resolve_source_ref`.
+  The docstring also still described the old master-fallback behaviour rather than
+  release-tag vs development-branch selection.
+
 - **mcp pinned below 2.0.0 — the low-level Server decorator API was removed**
   (`requirements.txt`, `requirements-ui.txt`, `pyproject.toml`). Surfaced as four
   pyright `reportAttributeAccessIssue` errors in CI on

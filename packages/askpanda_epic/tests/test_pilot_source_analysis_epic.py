@@ -56,6 +56,25 @@ def list_processes_and_threads():
 # Delegation smoke tests
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _no_raw_github_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail every raw GitHub fetch unless a test patches _fetch_raw itself.
+
+    resolve_source_ref probes candidate refs through _fetch_raw and keeps the
+    response to seed the source cache, so patching only fetch_pilot_module leaves
+    the probe reaching the real raw.githubusercontent.com. That would make these
+    tests network-dependent and able to pass for the wrong reason, contradicting
+    this module's "no network access is required" contract.
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        "askpanda_atlas.pilot_source_analysis_impl._fetch_raw",
+        lambda url, timeout: (0, None),
+    )
+
+
 class TestEpicPilotSourceDelegation:
     """Verify ePIC re-export delegates correctly to the atlas implementation."""
 
@@ -88,8 +107,27 @@ class TestEpicPilotSourceDelegation:
             "pilot/util/monitoring.py": "def set_cpu_consumption_time(job): pass\n",
         }
 
-        def _fetch(pilot_path, timeout):
-            return source_map.get(pilot_path, ""), "" if pilot_path in source_map else f"404 {pilot_path}"
+        def _fetch(
+            pilot_path: str,
+            timeout: int,
+            ref: str = "master",
+            repo: str = "PanDAWMS/pilot3",
+        ) -> tuple[str | None, str]:
+            """Serve source from source_map, ignoring the ref and repo.
+
+            Args:
+                pilot_path: Repo-relative module path being fetched.
+                timeout: Unused.
+                ref: Unused; which ref would have been fetched is covered by the
+                    ATLAS resolve_source_ref tests.
+                repo: Unused, for the same reason.
+
+            Returns:
+                Tuple of (source or None, error message).
+            """
+            if pilot_path in source_map:
+                return source_map[pilot_path], ""
+            return None, f"404 {pilot_path}"
 
         with patch(
             "askpanda_atlas.pilot_source_analysis_impl.fetch_pilot_module",
