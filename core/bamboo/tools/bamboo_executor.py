@@ -997,7 +997,7 @@ def _pick_synthesis_prompt(tool_names: list[str], plugin_id: str = "atlas") -> s
     # Single-tool priority lookup (ordered highest → lowest priority).
     _TOOL_PROMPT: list[tuple[str, str]] = [
         ("panda_log_analysis", _SYSTEM_LOG_ANALYSIS),
-        ("pilot_source_analysis", _SYSTEM_PILOT_SOURCE),
+        ("atlas.pilot_source_analysis", _SYSTEM_PILOT_SOURCE),
         ("pilot_code_query", _SYSTEM_CODE_QUERY),
         ("panda_job_status", _SYSTEM_JOB),
         ("panda_task_status", _SYSTEM_TASK),

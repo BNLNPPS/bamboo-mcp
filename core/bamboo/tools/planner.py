@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from bamboo.llm.runtime import get_llm_manager, get_llm_selector
 from bamboo.llm.types import GenerateParams, Message
 from bamboo.tools.base import MCPContent, text_content
-from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
+from bamboo.tools._tool_names import wire_tool_definitions
 from bamboo.tracing import EVENT_LLM_CALL, span
 
 
@@ -197,7 +197,7 @@ def _build_atlas_planner_prompt(schema_compact: str) -> str:
         "traceback_available=true with a non-null deepest_pilot_frame, AND the "
         "user wants to understand the pilot code or why the exception was raised "
         "(e.g. 'why did the pilot code fail', 'show me the source', 'what is "
-        "wrong with the pilot', 'can this be fixed'): use pilot_source_analysis, "
+        "wrong with the pilot', 'can this be fixed'): use atlas.pilot_source_analysis, "
         "passing job_id, the log_excerpt and the pilot_version from the prior "
         "evidence. route=PLAN.\n"
         "- If the question asks what a job was actually doing when it was "
@@ -434,8 +434,12 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
         "panda_doc_bm25",
         "panda_queue_info",
         "cric_query",
-        "pilot_source_analysis",
     })
+    # pilot_source_analysis is deliberately absent: this set filters the
+    # built-in TOOLS dict, and pilot source analysis is a plugin entry point
+    # (wire name atlas.pilot_source_analysis), so the namespace filter below
+    # already excludes it for non-PanDA plugins.  Listing it here matched
+    # nothing.
 
     # Determine whether to exclude PanDA core tools.
     # "atlas" and "epic" are PanDA-family plugins; all others are not.
@@ -457,22 +461,33 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
-    # 2) Plugin tools discovered via entry points.
-    for ep in list_tool_entry_points():
-        name = ep.get("name", "")
+    # 2) Plugin tools discovered via entry points, named as clients see them.
+    #
+    # wire_tool_definitions() applies bamboo.core's own registration rules, so
+    # a name in this catalog is a name the planner can actually propose.  The
+    # previous loop passed the entry-point key only as a *fallback* and let
+    # get_definition()["name"] win, which advertised internal names the server
+    # does not expose: the catalog said "core_dump_analysis" while the routing
+    # guidance above says "atlas.core_dump_analysis" and the hard rule says to
+    # propose only catalogued tools.  Faced with that contradiction the planner
+    # dropped the guidance and fell back to panda_log_analysis, so an explicit
+    # request to analyse a core dump was answered with a log analysis.
+    for defn in wire_tool_definitions():
+        name = str(defn.get("name") or "")
         if not name:
             continue
         if namespaces:
             ns = name.split(".", 1)[0] if "." in name else ""
             if ns not in namespaces:
                 continue
-        if "." in name:
-            ns, _, tool_name = name.partition(".")
-            resolved = find_tool_by_name(tool_name, namespace=ns)
-        else:
-            resolved = find_tool_by_name(name)
-        if resolved:
-            _add(resolved.obj, fallback_name=name)
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "description": str(defn.get("description", "")),
+            "inputSchema": defn.get("inputSchema", {}),
+        })
 
     return out
 

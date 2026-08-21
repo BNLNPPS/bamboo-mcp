@@ -4,6 +4,70 @@ All notable changes to Bamboo are documented here.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **The planner catalog advertised tool names the server does not expose**
+  (`core/bamboo/tools/_tool_names.py`, new; `core/bamboo/core.py`,
+  `core/bamboo/tools/planner.py`). `_collect_tool_catalog` took a plugin tool's
+  name from its own `get_definition()["name"]`, passing the entry-point key only
+  as a fallback. `bamboo.core` does the opposite: it *overwrites* the definition
+  name with the entry-point key, unless the advertised name is already a
+  built-in `TOOLS` registration, in which case the entry point is dropped
+  entirely. The two rules disagreed for four of the five plugin tools on the
+  wire.
+
+  The user-visible consequence was on `atlas.core_dump_analysis`. The planner's
+  routing guidance names it correctly, but the catalog offered
+  `core_dump_analysis` and the prompt's hard rule is to propose only catalogued
+  tools. Faced with a contradiction the planner discarded the guidance and fell
+  back to `panda_log_analysis` — which is catalogued, and which independently
+  matches "diagnose/why a job failed" — so an explicit request to analyse a core
+  dump was answered with a log analysis.
+
+  The near miss is worse than the miss. Had the planner instead proposed the
+  catalogued `core_dump_analysis`, `_resolve_tool` would have resolved it and
+  the tool would have run, but `_execute_one_tool` keys `_last_evidence_store`
+  and `called_tool_names` on the literal string the plan used. `_CORE_DUMP_TOOL
+  in called_tool_names` would have been False, `_synthesise_core_dump` would
+  have been skipped, and the analyzer's JSON would have gone to generic prose
+  synthesis with `reconcile_llm_analysis` never called — the one step that stops
+  a model reading EventLoop completion markers as evidence that a looping
+  payload exited normally. Step 2 of this change closes that path directly.
+
+  `wire_tool_definitions()` is now the single implementation of the naming and
+  de-duplication rules; `bamboo.core` and the planner both call it, so the
+  catalog equals the wire surface by construction rather than by agreement.
+  Definitions are copied before renaming — a tool whose `get_definition`
+  returned a module-level constant was previously renamed in place by the first
+  call.
+
+- **`pilot_source_analysis` was named inconsistently against the wire**
+  (`core/bamboo/tools/bamboo_answer.py`, `core/bamboo/tools/bamboo_executor.py`,
+  `core/bamboo/tools/planner.py`, `interfaces/streamlit/chat.py`). Rule 1b, the
+  `_pick_synthesis_prompt` table, the planner guidance and the Streamlit
+  plot-exclusion set all used the unqualified name, which is what the tool
+  advertises but not what clients can call: it is not in built-in `TOOLS`, so
+  its wire name is `atlas.pilot_source_analysis`. Internally self-consistent, so
+  nothing failed — but an external MCP client calling the tool by the name
+  `list_tools` gave it got generic synthesis instead of `_SYSTEM_PILOT_SOURCE`.
+  All four sites now use the wire name.
+
+  This was scheduled as a later step and pulled forward because it stopped being
+  separable: once the catalog reports wire names, leaving the other sites on the
+  advertised name would have broken planner-routed pilot source analysis at the
+  commit boundary.
+
+  The tool's own `get_definition()["name"]` is deliberately unchanged. It is the
+  input to the rename, not a duplicate of it, and the ePIC mirror pins it.
+
+- Removed a dead `pilot_source_analysis` entry from planner
+  `_PANDA_CORE_TOOLS`. That set filters the built-in `TOOLS` dict, which has
+  never contained the key, so the entry matched nothing; non-PanDA plugins are
+  excluded from the tool by the namespace filter instead.
+
+---
+
 ## v1.0.8 — 2026-08-20
 
 ### Added

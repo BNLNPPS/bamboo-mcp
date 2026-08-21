@@ -1882,7 +1882,12 @@ def _build_deterministic_plan(  # noqa: C901
                     route=PlanRoute.FAST_PATH,
                     confidence=1.0,
                     tool_calls=[ToolCall(
-                        tool="pilot_source_analysis",
+                        # Wire name, as for atlas.core_dump_analysis: the
+                        # server exposes this plugin tool under its
+                        # entry-point key, and bamboo_executor keys both
+                        # _last_evidence_store and the _SYSTEM_PILOT_SOURCE
+                        # prompt selection on the name written here.
+                        tool="atlas.pilot_source_analysis",
                         arguments={
                             "job_id": job_id,
                             "log_excerpt": traceback_evidence.get("log_excerpt", ""),

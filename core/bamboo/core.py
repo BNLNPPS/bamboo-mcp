@@ -85,7 +85,8 @@ from bamboo.tools.bamboo_executor import bamboo_last_evidence_tool, bamboo_promp
 from bamboo.tools.code_query import code_query_tool
 from bamboo.tools.opensearch_query import opensearch_query_tool
 from bamboo.tools.opensearch_promptlog_query import opensearch_promptlog_query_tool
-from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
+from bamboo.tools.loader import find_tool_by_name
+from bamboo.tools._tool_names import wire_tool_definitions
 from bamboo.tracing import EVENT_TOOL_CALL, span
 from bamboo.prompts.templates import (
     get_bamboo_system_prompt,
@@ -128,63 +129,17 @@ def _load_entrypoint_tool_definitions() -> list[dict[str, Any]]:
     Python entry points (group: ``bamboo.tools`` and legacy ``askpanda.tools``).
     This helper discovers those tools and returns their MCP tool definitions.
 
+    Thin wrapper over :func:`bamboo.tools._tool_names.wire_tool_definitions`,
+    which owns the naming and de-duplication rules.  They used to live here,
+    where they were the *de facto* definition of a tool's wire name while the
+    planner catalog reimplemented them differently — the planner advertised
+    ``core_dump_analysis`` while clients could only call
+    ``atlas.core_dump_analysis``.  Both now read the same function.
+
     Returns:
         A list of tool definition dicts compatible with the MCP server.
     """
-    # Build the set of MCP tool names already covered by the built-in TOOLS
-    # dict so we can skip entry-point tools that would produce duplicates.
-    # TOOLS keys are internal identifiers (e.g. "panda_task_status"); the MCP
-    # name exposed to clients comes from get_definition()["name"] and may differ
-    # (e.g. the entry-point "atlas.task_status" resolves to the same singleton).
-    covered_mcp_names: set[str] = set()
-    for tool in TOOLS.values():
-        get_def_fn = getattr(tool, "get_definition", None)
-        if callable(get_def_fn):
-            try:
-                defn = get_def_fn()
-                if isinstance(defn, dict) and defn.get("name"):
-                    covered_mcp_names.add(str(defn["name"]))
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
-
-    defs: list[dict[str, Any]] = []
-    for ep in list_tool_entry_points():
-        full_name = ep.get("name", "")
-        # Skip if the entry-point key itself matches a built-in TOOLS key.
-        if not full_name or full_name in TOOLS:
-            continue
-
-        # Entry point names are expected to be "<namespace>.<tool_name>".
-        if "." not in full_name:
-            continue
-        namespace, tool_name = full_name.split(".", 1)
-
-        resolved = find_tool_by_name(tool_name, namespace=namespace)
-        if resolved is None:
-            continue
-
-        obj = resolved.obj
-        get_def = getattr(obj, "get_definition", None)
-        if not callable(get_def):
-            continue
-        try:
-            raw = get_def()
-            if not isinstance(raw, dict):
-                continue
-            d: dict[str, Any] = cast(dict[str, Any], raw)
-        except Exception:  # pylint: disable=broad-exception-caught
-            continue
-
-        # Skip if this entry point resolves to the same MCP tool name as one
-        # already registered in TOOLS (avoids listing e.g. atlas.task_status
-        # twice when panda_task_status is already in the built-in dict).
-        if d.get("name", "") in covered_mcp_names:
-            continue
-
-        # Ensure tool name is the fully-qualified entry point name.
-        d["name"] = full_name
-        defs.append(d)
-    return defs
+    return wire_tool_definitions()
 
 
 def _validate_arguments(

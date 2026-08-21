@@ -787,7 +787,7 @@ class TestPilotSourceAnalysisFastPath:
 
         execute_mock.assert_awaited_once()
         plan = execute_mock.call_args[0][0]
-        assert plan.tool_calls[0].tool == "pilot_source_analysis"
+        assert plan.tool_calls[0].tool == "atlas.pilot_source_analysis"
         args = plan.tool_calls[0].arguments
         assert args["job_id"] == 7099503721
         assert "getpwuid" in args["log_excerpt"]
@@ -842,7 +842,7 @@ class TestPilotSourceAnalysisFastPath:
 
         execute_mock.assert_awaited_once()
         args = execute_mock.call_args[0][0].tool_calls[0].arguments
-        assert execute_mock.call_args[0][0].tool_calls[0].tool == "pilot_source_analysis"
+        assert execute_mock.call_args[0][0].tool_calls[0].tool == "atlas.pilot_source_analysis"
         # pilot_version must be threaded through so the GitHub fetch can be
         # pinned to the release the job actually ran (or, for an unreleased
         # version like this one, to the development branch).
@@ -889,7 +889,7 @@ class TestPilotSourceAnalysisFastPath:
         execute_mock.assert_awaited_once()
         plan = execute_mock.call_args[0][0]
         # Should fall through to panda_job_status, not pilot_source_analysis
-        assert plan.tool_calls[0].tool != "pilot_source_analysis"
+        assert plan.tool_calls[0].tool != "atlas.pilot_source_analysis"
 
     @pytest.mark.asyncio
     async def test_log_analysis_question_still_routes_to_log_analysis(self) -> None:
