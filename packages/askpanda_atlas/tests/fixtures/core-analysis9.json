@@ -1,0 +1,1045 @@
+{
+  "schema_version": 1,
+  "tool_version": "0.2.8",
+  "evidence": {
+    "core_file": {
+      "path": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/core.20115",
+      "size_bytes": 948356824,
+      "size_human": "904.4 MiB",
+      "modified": "2026-08-19T08:18:14Z",
+      "container_path": "/srv/core.20115"
+    },
+    "executable": {
+      "path": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python3.13",
+      "resolved": true,
+      "source": "command-line",
+      "recorded": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python",
+      "notes": [],
+      "attempts": [
+        {
+          "source": "AT_EXECFN",
+          "recorded": "/cvmfs/atlas.cern.ch/repo/sw/software/25",
+          "resolved": false,
+          "reason": "missing"
+        },
+        {
+          "source": "NT_FILE",
+          "recorded": null,
+          "resolved": false,
+          "reason": "not-found-in-core"
+        },
+        {
+          "source": "command-line",
+          "recorded": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python",
+          "resolved": true,
+          "path": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python3.13",
+          "searched": false
+        }
+      ]
+    },
+    "gdb": {
+      "path": "/usr/bin/gdb",
+      "version": "GNU gdb (AlmaLinux) 16.3-2.el9"
+    },
+    "signal": null,
+    "mode": "hang",
+    "mode_source": "explicitly supplied via --mode",
+    "generated_by": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python /srv/workDir/usr/UserAnalysis/1.0.0/InstallArea/x86_64-el9-gcc15-opt/bin/EWRun.py --input-list in.txt --output-name output --max-events -1 --merge-output-files --analysis SUSYSS3L",
+    "thread_count": 15,
+    "warnings": [
+      "Build-ID coverage is insufficient: eu-unstrip enumerated 1 module(s), but no executable or critical system-library Build IDs could be verified.",
+      "gdb reports the core may not match the executable. Symbols may be misleading."
+    ],
+    "primary_thread": {
+      "backtrace": "#0  0x00007f8bed67f37a in __futex_abstimed_wait_common () from /lib64/libc.so.6\n#1  0x00007f8bed6818d2 in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libc.so.6\n#2  0x00007f8bc7b5f0ff in XrdSysCondVar::Wait() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#3  0x00007f8bc7d40702 in XrdCl::StreamMutex::Lock() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#4  0x00007f8bc7d45495 in XrdCl::Stream::Send(XrdCl::Message*, XrdCl::MsgHandler*, bool, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#5  0x00007f8bc7d3e5a4 in XrdCl::Channel::Send(XrdCl::Message*, XrdCl::MsgHandler*, bool, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#6  0x00007f8bc7d3ab62 in XrdCl::PostMaster::Send(XrdCl::URL const&, XrdCl::Message*, XrdCl::MsgHandler*, bool, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#7  0x00007f8bc7d86d56 in XrdCl::MessageUtils::SendMessage(XrdCl::URL const&, XrdCl::Message*, XrdCl::ResponseHandler*, XrdCl::MessageSendParams&, XrdCl::LocalFileHandler*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#8  0x00007f8bc7d9be20 in XrdCl::FileStateHandler::IssueRequest(XrdCl::URL const&, XrdCl::Message*, XrdCl::ResponseHandler*, XrdCl::MessageSendParams&) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#9  0x00007f8bc7da0537 in XrdCl::FileStateHandler::Close(std::shared_ptr<XrdCl::FileStateHandler>&, XrdCl::ResponseHandler*, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#10 0x00007f8bc7d920f6 in XrdCl::File::Close(XrdCl::ResponseHandler*, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#11 0x00007f8bc7d921a0 in XrdCl::File::Close(long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#12 0x00007f8bd3424600 in TNetXNGFile::Close(char const*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libNetxNG.so\n#13 0x00007f8bec1fc320 in TROOT::CloseFiles() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/cppyy/.././libCore.so\n#14 0x00007f8bed638e7d in __run_exit_handlers () from /lib64/libc.so.6\n#15 0x00007f8bed638fd0 in exit () from /lib64/libc.so.6\n#16 0x00007f8bedaaebf4 in Py_Exit (sts=0) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pylifecycle.c:3523\n#17 0x00007f8bedab5066 in handle_system_exit () at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:679\n#18 _PyErr_PrintEx (tstate=0x7f8bedd93590 <_PyRuntime+283024>, set_sys_last_vars=set_sys_last_vars@entry=1) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:688\n#19 0x00007f8bedab509e in PyErr_PrintEx (set_sys_last_vars=set_sys_last_vars@entry=1) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:768\n#20 0x00007f8bedab50aa in PyErr_Print () at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:774\n#21 0x00007f8bedab5827 in _PyRun_SimpleFileObject (fp=fp@entry=0x4a50940, filename=filename@entry=0x7f8bed39bc30, closeit=closeit@entry=1, flags=flags@entry=0x7ffce88e51b8) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:523\n#22 0x00007f8bedab5acc in _PyRun_AnyFileObject (fp=fp@entry=0x4a50940, filename=filename@entry=0x7f8bed39bc30, closeit=closeit@entry=1, flags=flags@entry=0x7ffce88e51b8) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:77\n#23 0x00007f8bedadffa6 in pymain_run_file_obj (program_name=0x7f8bed3e48a0, filename=0x7f8bed39bc30, skip_source_first_line=0) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:410\n#24 pymain_run_file (config=0x7f8bedd65c88 <_PyRuntime+96392>) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:429\n#25 pymain_run_python (exitcode=0x7ffce88e51ac) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:696\n#26 Py_RunMain () at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:775\n#27 0x00007f8bedae078f in pymain_main (args=0x7ffce88e52c0) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:805\n#28 Py_BytesMain (argc=<optimized out>, argv=<optimized out>) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:829\n#29 0x00007f8bed621610 in __libc_start_call_main () from /lib64/libc.so.6\n#30 0x00007f8bed6216c0 in __libc_start_main_impl () from /lib64/libc.so.6\n#31 0x0000000000401075 in _start ()",
+      "frame": "Stack level 0, frame at 0x7ffce88e4600:\n rip = 0x7f8bed67f37a in __futex_abstimed_wait_common; saved rip = 0x7f8bed6818d2\n called by frame at 0x7ffce88e46b0\n Arglist at 0x7ffce88e45b8, args: \n Locals at 0x7ffce88e45b8, Previous frame's sp is 0x7ffce88e4600\n Saved registers:\n  rbp at 0x7ffce88e45e8, r12 at 0x7ffce88e45f0, rip at 0x7ffce88e45f8",
+      "args": "No symbol table info available.",
+      "locals": "No symbol table info available.",
+      "registers": "rax            0xfffffffffffffe00  -512\nrbx            0x0                 0\nrcx            0x7f8bed67f37a      140238960194426\nrdx            0x0                 0\nrsi            0x189               393\nrdi            0x1234c25c          305447516\nrbp            0x0                 0x0\nrsp            0x7ffce88e45c0      0x7ffce88e45c0\nr8             0x0                 0\nr9             0xffffffff          4294967295\nr10            0x0                 0\nr11            0x246               582\nr12            0x0                 0\nr13            0x1234c25c          305447516\nr14            0x7ffce88e4620      140724210124320\nr15            0x0                 0\nrip            0x7f8bed67f37a      0x7f8bed67f37a <__futex_abstimed_wait_common+202>\neflags         0x246               [ PF ZF IF ]\ncs             0x33                51\nss             0x2b                43\nds             0x0                 0\nes             0x0                 0\nfs             0x0                 0\ngs             0x0                 0\nk0             0x0                 0\nk1             0x0                 0\nk2             0x0                 0\nk3             0x0                 0\nk4             0x0                 0\nk5             0x0                 0\nk6             0x0                 0\nk7             0x0                 0\nfs_base        0x7f8bede0c740      140238968112960\ngs_base        0x0                 0"
+    },
+    "thread_groups": [
+      {
+        "count": 1,
+        "thread_ids": [
+          "12"
+        ],
+        "names": [],
+        "backtrace": "#0  0x00007f8bed67f37a in __futex_abstimed_wait_common () from /lib64/libc.so.6\n#1  0x00007f8bed6818d2 in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libc.so.6\n#2  0x00007f8bc7b5f0ff in XrdSysCondVar::Wait() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#3  0x00007f8bc7d40702 in XrdCl::StreamMutex::Lock() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#4  0x00007f8bc7d41503 in XrdCl::Stream::Tick(long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#5  0x00007f8bc7d3eb9f in XrdCl::TickGeneratorTask::Run(long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#6  0x00007f8bc7d5a74f in XrdCl::TaskManager::RunTasks() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#7  0x00007f8bc7d5aa39 in RunRunnerThread () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#8  0x00007f8bed6822ea in start_thread () from /lib64/libc.so.6\n#9  0x00007f8bed7073c0 in clone3 () from /lib64/libc.so.6",
+        "idle": false,
+        "state": "blocked"
+      },
+      {
+        "count": 1,
+        "thread_ids": [
+          "2"
+        ],
+        "names": [],
+        "backtrace": "#0  0x00007f8bed67f37a in __futex_abstimed_wait_common () from /lib64/libc.so.6\n#1  0x00007f8bed6818d2 in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libc.so.6\n#2  0x00007f8bc7b5f0ff in XrdSysCondVar::Wait() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#3  0x00007f8bc7d35760 in XrdCl::PollerBuiltIn::ShutdownEvents(XrdCl::Socket*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#4  0x00007f8bc7de54a9 in XrdCl::AsyncSocketHandler::PreClose() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#5  0x00007f8bc7d4576f in XrdCl::Stream::SockHandlerClose(unsigned short) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#6  0x00007f8bc7d483e0 in XrdCl::Stream::OnError(unsigned short, XrdCl::XRootDStatus) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#7  0x00007f8bc7de55a7 in XrdCl::AsyncSocketHandler::OnFault(XrdCl::XRootDStatus) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#8  0x00007f8bc7deaedd in XrdCl::AsyncSocketHandler::OnRead() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#9  0x00007f8bc7deb828 in XrdCl::AsyncSocketHandler::Event(unsigned char, XrdCl::Socket*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#10 0x00007f8bc7d35866 in (anonymous namespace)::SocketCallBack::Event(XrdSys::IOEvents::Channel*, void*, int) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#11 0x00007f8bc7b58349 in XrdSys::IOEvents::Poller::CbkXeq(XrdSys::IOEvents::Channel*, int, int, char const*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#12 0x00007f8bc7b59940 in XrdSys::IOEvents::PollE::Dispatch(XrdSys::IOEvents::Channel*, unsigned int) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#13 0x00007f8bc7b59b51 in XrdSys::IOEvents::PollE::Begin(XrdSysSemaphore*, int&, char const**) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#14 0x00007f8bc7b5590d in XrdSys::IOEvents::BootStrap::Start(void*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#15 0x00007f8bc7b5f0b6 in XrdSysThread_Xeq () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#16 0x00007f8bed6822ea in start_thread () from /lib64/libc.so.6\n#17 0x00007f8bed7073c0 in clone3 () from /lib64/libc.so.6",
+        "idle": false,
+        "state": "blocked"
+      },
+      {
+        "count": 1,
+        "thread_ids": [
+          "1"
+        ],
+        "names": [],
+        "backtrace": "#0  0x00007f8bed67f37a in __futex_abstimed_wait_common () from /lib64/libc.so.6\n#1  0x00007f8bed6818d2 in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libc.so.6\n#2  0x00007f8bc7b5f0ff in XrdSysCondVar::Wait() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#3  0x00007f8bc7d40702 in XrdCl::StreamMutex::Lock() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#4  0x00007f8bc7d45495 in XrdCl::Stream::Send(XrdCl::Message*, XrdCl::MsgHandler*, bool, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#5  0x00007f8bc7d3e5a4 in XrdCl::Channel::Send(XrdCl::Message*, XrdCl::MsgHandler*, bool, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#6  0x00007f8bc7d3ab62 in XrdCl::PostMaster::Send(XrdCl::URL const&, XrdCl::Message*, XrdCl::MsgHandler*, bool, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#7  0x00007f8bc7d86d56 in XrdCl::MessageUtils::SendMessage(XrdCl::URL const&, XrdCl::Message*, XrdCl::ResponseHandler*, XrdCl::MessageSendParams&, XrdCl::LocalFileHandler*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#8  0x00007f8bc7d9be20 in XrdCl::FileStateHandler::IssueRequest(XrdCl::URL const&, XrdCl::Message*, XrdCl::ResponseHandler*, XrdCl::MessageSendParams&) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#9  0x00007f8bc7da0537 in XrdCl::FileStateHandler::Close(std::shared_ptr<XrdCl::FileStateHandler>&, XrdCl::ResponseHandler*, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#10 0x00007f8bc7d920f6 in XrdCl::File::Close(XrdCl::ResponseHandler*, long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#11 0x00007f8bc7d921a0 in XrdCl::File::Close(long) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#12 0x00007f8bd3424600 in TNetXNGFile::Close(char const*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libNetxNG.so\n#13 0x00007f8bec1fc320 in TROOT::CloseFiles() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/cppyy/.././libCore.so\n#14 0x00007f8bed638e7d in __run_exit_handlers () from /lib64/libc.so.6\n#15 0x00007f8bed638fd0 in exit () from /lib64/libc.so.6\n#16 0x00007f8bedaaebf4 in Py_Exit (sts=0) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pylifecycle.c:3523\n#17 0x00007f8bedab5066 in handle_system_exit () at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:679\n#18 _PyErr_PrintEx (tstate=0x7f8bedd93590 <_PyRuntime+283024>, set_sys_last_vars=set_sys_last_vars@entry=1) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:688\n#19 0x00007f8bedab509e in PyErr_PrintEx (set_sys_last_vars=set_sys_last_vars@entry=1) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:768\n#20 0x00007f8bedab50aa in PyErr_Print () at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:774\n#21 0x00007f8bedab5827 in _PyRun_SimpleFileObject (fp=fp@entry=0x4a50940, filename=filename@entry=0x7f8bed39bc30, closeit=closeit@entry=1, flags=flags@entry=0x7ffce88e51b8) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:523\n#22 0x00007f8bedab5acc in _PyRun_AnyFileObject (fp=fp@entry=0x4a50940, filename=filename@entry=0x7f8bed39bc30, closeit=closeit@entry=1, flags=flags@entry=0x7ffce88e51b8) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Python/pythonrun.c:77\n#23 0x00007f8bedadffa6 in pymain_run_file_obj (program_name=0x7f8bed3e48a0, filename=0x7f8bed39bc30, skip_source_first_line=0) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:410\n#24 pymain_run_file (config=0x7f8bedd65c88 <_PyRuntime+96392>) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:429\n#25 pymain_run_python (exitcode=0x7ffce88e51ac) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:696\n#26 Py_RunMain () at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:775\n#27 0x00007f8bedae078f in pymain_main (args=0x7ffce88e52c0) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:805\n#28 Py_BytesMain (argc=<optimized out>, argv=<optimized out>) at /build/atnight/localbuilds/nightlies/AnalysisBase/main/build/build/AnalysisBaseExternals/src/Python/Modules/main.c:829\n#29 0x00007f8bed621610 in __libc_start_call_main () from /lib64/libc.so.6\n#30 0x00007f8bed6216c0 in __libc_start_main_impl () from /lib64/libc.so.6\n#31 0x0000000000401075 in _start ()",
+        "idle": false,
+        "state": "blocked"
+      },
+      {
+        "count": 9,
+        "thread_ids": [
+          "11",
+          "10",
+          "9",
+          "8",
+          "7",
+          "6",
+          "5",
+          "4",
+          "3"
+        ],
+        "names": [],
+        "backtrace": "#0  0x00007f8bed7069fe in epoll_wait () from /lib64/libc.so.6\n#1  0x00007f8bc7b59af2 in XrdSys::IOEvents::PollE::Begin(XrdSysSemaphore*, int&, char const**) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#2  0x00007f8bc7b5590d in XrdSys::IOEvents::BootStrap::Start(void*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#3  0x00007f8bc7b5f0b6 in XrdSysThread_Xeq () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdUtils.so.6\n#4  0x00007f8bed6822ea in start_thread () from /lib64/libc.so.6\n#5  0x00007f8bed7073c0 in clone3 () from /lib64/libc.so.6",
+        "idle": true,
+        "state": "idle"
+      },
+      {
+        "count": 3,
+        "thread_ids": [
+          "15",
+          "14",
+          "13"
+        ],
+        "names": [],
+        "backtrace": "#0  0x00007f8bed67f37a in __futex_abstimed_wait_common () from /lib64/libc.so.6\n#1  0x00007f8bed68a328 in __new_sem_wait_slow64.constprop.0 () from /lib64/libc.so.6\n#2  0x00007f8bc7df1906 in XrdCl::JobManager::RunJobs() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#3  0x00007f8bc7df19b9 in RunRunnerThread () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6\n#4  0x00007f8bed6822ea in start_thread () from /lib64/libc.so.6\n#5  0x00007f8bed7073c0 in clone3 () from /lib64/libc.so.6",
+        "idle": true,
+        "state": "idle"
+      }
+    ],
+    "targeted_threads": [
+      {
+        "thread_id": "12",
+        "state": "blocked",
+        "frame": 3,
+        "context": "#3  0x00007f8bc7d40702 in XrdCl::StreamMutex::Lock() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6",
+        "frame_info": "Stack level 3, frame at 0x7f8bc3146c60:\n rip = 0x7f8bc7d40702 in XrdCl::StreamMutex::Lock(); saved rip = 0x7f8bc7d41503\n called by frame at 0x7f8bc3146cf0, caller of frame at 0x7f8bc3146c10\n Arglist at 0x7f8bc3146c08, args: \n Locals at 0x7f8bc3146c08, Previous frame's sp is 0x7f8bc3146c60\n Saved registers:\n  rbx at 0x7f8bc3146c28, rbp at 0x7f8bc3146c30, r12 at 0x7f8bc3146c38, r13 at 0x7f8bc3146c40, r14 at 0x7f8bc3146c48, r15 at 0x7f8bc3146c50, rip at 0x7f8bc3146c58",
+        "args": "No symbol table info available.",
+        "locals": "No symbol table info available.",
+        "frame_details_available": false
+      },
+      {
+        "thread_id": "2",
+        "state": "blocked",
+        "frame": 3,
+        "context": "#3  0x00007f8bc7d35760 in XrdCl::PollerBuiltIn::ShutdownEvents(XrdCl::Socket*) () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6",
+        "frame_info": "Stack level 3, frame at 0x7f8bc29459d0:\n rip = 0x7f8bc7d35760 in XrdCl::PollerBuiltIn::ShutdownEvents(XrdCl::Socket*); saved rip = 0x7f8bc7de54a9\n called by frame at 0x7f8bc29459f0, caller of frame at 0x7f8bc29459a0\n Arglist at 0x7f8bc2945998, args: \n Locals at 0x7f8bc2945998, Previous frame's sp is 0x7f8bc29459d0\n Saved registers:\n  rbx at 0x7f8bc29459a8, rbp at 0x7f8bc29459b0, r12 at 0x7f8bc29459b8, r14 at 0x7f8bc29459c0, rip at 0x7f8bc29459c8",
+        "args": "No symbol table info available.",
+        "locals": "No symbol table info available.",
+        "frame_details_available": false
+      },
+      {
+        "thread_id": "1",
+        "state": "blocked",
+        "frame": 3,
+        "context": "#3  0x00007f8bc7d40702 in XrdCl::StreamMutex::Lock() () from /cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libXrdCl.so.6",
+        "frame_info": "Stack level 3, frame at 0x7ffce88e4730:\n rip = 0x7f8bc7d40702 in XrdCl::StreamMutex::Lock(); saved rip = 0x7f8bc7d45495\n called by frame at 0x7ffce88e47d0, caller of frame at 0x7ffce88e46e0\n Arglist at 0x7ffce88e46d8, args: \n Locals at 0x7ffce88e46d8, Previous frame's sp is 0x7ffce88e4730\n Saved registers:\n  rbx at 0x7ffce88e46f8, rbp at 0x7ffce88e4700, r12 at 0x7ffce88e4708, r13 at 0x7ffce88e4710, r14 at 0x7ffce88e4718, r15 at 0x7ffce88e4720, rip at 0x7ffce88e4728",
+        "args": "No symbol table info available.",
+        "locals": "No symbol table info available.",
+        "frame_details_available": false
+      }
+    ],
+    "observations": [
+      "Process is already in Py_Exit(sts=0) and is blocked while ROOT/XRootD closes a remote file.",
+      "Another XRootD thread is waiting in StreamMutex::Lock while processing Stream::Tick.",
+      "payload.stdout was last modified 2h 03m 18s before the core capture; its last non-empty line was: Py:CPBaseRunner      INFO renaming the hist-output.root to output.root; latest retained progress: seq1_TrigEventSelectio...INFO    accepted 1512193 out of 1512193 events for filter TriggerEventSelection (trigger event selection).",
+      "Payload EventLoop reported that the worker finished successfully and the batch job status was successful before process exit.",
+      "Payload output continued into post-processing/output-file handling after EventLoop completion; the last payload line was: Py:CPBaseRunner      INFO renaming the hist-output.root to output.root."
+    ],
+    "job_logs": {
+      "available": true,
+      "job_dir": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL",
+      "profile": "payload-centric",
+      "pilotlog_default_excluded": true,
+      "files": [
+        {
+          "path": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_path": "payload.stdout",
+          "role": "payload-stdout",
+          "size_bytes": 209524,
+          "scanned_bytes": 209524,
+          "window": "full",
+          "truncated": false,
+          "modified": "2026-08-19T06:14:56Z",
+          "mtime_delta_from_core_s": -7398.0,
+          "tail": [
+            {
+              "line": 2201,
+              "text": "seq1_geq3lep_SAVE_geq3lepINFO    Events passing selection for all systematics: 1512193 / 1512193 for events passing < geq3lep >"
+            },
+            {
+              "line": 2202,
+              "text": "seq1_EventSelectionMer...INFO    Events passing selection for at least one systematic: 2670 / 1512193 for events passing at least one EventSelection"
+            },
+            {
+              "line": 2203,
+              "text": "seq1_EventSelectionMer...INFO    Events passing selection for at nominal: 2670 / 1512193 for events passing at least one EventSelection"
+            },
+            {
+              "line": 2204,
+              "text": "seq1_EventSelectionMer...INFO    Events passing selection for all systematics: 2670 / 1512193 for events passing at least one EventSelection"
+            },
+            {
+              "line": 2205,
+              "text": "ELModule.LeakCheckModule INFO    Memory increase/change during the job:"
+            },
+            {
+              "line": 2206,
+              "text": "ELModule.LeakCheckModule INFO      - resident: -0.275023 kB/event (-435700 kB total)"
+            },
+            {
+              "line": 2207,
+              "text": "ELModule.LeakCheckModule INFO      - virtual : 0.0395195 kB/event (62608 kB total)"
+            },
+            {
+              "line": 2208,
+              "text": "Real time 2:29:57, CP time 8271.170"
+            },
+            {
+              "line": 2209,
+              "text": "Package.EventLoop        INFO    worker finished successfully"
+            },
+            {
+              "line": 2210,
+              "text": "xAOD::TFileAccessTracer   INFO    Sending file access statistics to http://rucio-lb-prod.cern.ch:18762/traces/"
+            },
+            {
+              "line": 2211,
+              "text": "Package.EventLoop        INFO    retrieving batch job in location /srv/workDir/workDir-2026-08-19-0344-9bc2"
+            },
+            {
+              "line": 2212,
+              "text": "Package.EventLoop        INFO    current job status: 1 success, 0 failure, 0 running/unknown"
+            },
+            {
+              "line": 2213,
+              "text": "Package.EventLoop        INFO    done"
+            },
+            {
+              "line": 2214,
+              "text": "Package.EventLoop        INFO    retrieving batch job in location workDir"
+            },
+            {
+              "line": 2215,
+              "text": "Package.EventLoop        INFO    current job status: 1 success, 0 failure, 0 running/unknown"
+            },
+            {
+              "line": 2216,
+              "text": "Package.EventLoop        INFO    done"
+            },
+            {
+              "line": 2217,
+              "text": "Py:CPBaseRunner      INFO Moving the analysis root file and the hist file to the top level."
+            },
+            {
+              "line": 2218,
+              "text": "Py:CPBaseRunner   WARNING Root file /srv/workDir/workDir-2026-08-19-0344-9bc2/data-ANALYSIS/output.root does not exist or merging is enabled, skipping move."
+            },
+            {
+              "line": 2219,
+              "text": "Py:CPBaseRunner      INFO Moving /srv/workDir/workDir-2026-08-19-0344-9bc2/fetch/hist-output-0.root to /srv/workDir/hist-output.root"
+            },
+            {
+              "line": 2220,
+              "text": "Py:CPBaseRunner      INFO renaming the hist-output.root to output.root"
+            }
+          ]
+        },
+        {
+          "path": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stderr",
+          "relative_path": "payload.stderr",
+          "role": "payload-stderr",
+          "size_bytes": 0,
+          "scanned_bytes": 0,
+          "window": "full",
+          "truncated": false,
+          "modified": "2026-08-19T03:43:39Z",
+          "mtime_delta_from_core_s": -16475.0
+        },
+        {
+          "path": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_path": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "size_bytes": 90959,
+          "scanned_bytes": 90959,
+          "window": "full",
+          "truncated": false,
+          "modified": "2026-08-19T06:11:36Z",
+          "mtime_delta_from_core_s": -7598.0,
+          "tail": [
+            {
+              "line": 934,
+              "text": "Package.EventLoop        INFO    Processed 1410000 events"
+            },
+            {
+              "line": 935,
+              "text": "Package.EventLoop        INFO    Processed 1420000 events"
+            },
+            {
+              "line": 936,
+              "text": "seq1_MuonPtCutAlg_AnaM...WARNING invalid pt value, setting object to fail pt-cut: -3.71056e+06"
+            },
+            {
+              "line": 937,
+              "text": "Package.EventLoop        INFO    Processed 1430000 events"
+            },
+            {
+              "line": 938,
+              "text": "Package.EventLoop        INFO    Processed 1440000 events"
+            },
+            {
+              "line": 939,
+              "text": "Package.EventLoop        INFO    Processed 1450000 events"
+            },
+            {
+              "line": 940,
+              "text": "Package.EventLoop        INFO    Processed 1460000 events"
+            },
+            {
+              "line": 941,
+              "text": "Package.EventLoop        INFO    Processed 1470000 events"
+            },
+            {
+              "line": 942,
+              "text": "Package.EventLoop        INFO    Opening file root://xrootd.echo.stfc.ac.uk:1094/atlas:datadisk/rucio/data24_13p6TeV/1e/cb/DAOD_PHYS.43637641._000851.pool.root.1"
+            },
+            {
+              "line": 943,
+              "text": "ToolSvc.TrigDecisionTool INFO    Updating config in slot 0 with SMK: 3389 and L1PSK: 15721 and HLTPSK: 11621 and BGSK: 2861 getForceConfigUpdate()=1 HLT Chains: 2155"
+            },
+            {
+              "line": 944,
+              "text": "Package.EventLoop        INFO    Processing events 0-109983 in file root://xrootd.echo.stfc.ac.uk:1094/atlas:datadisk/rucio/data24_13p6TeV/1e/cb/DAOD_PHYS.43637641._000851.pool.root.1"
+            },
+            {
+              "line": 945,
+              "text": "Package.EventLoop        INFO    Processed 1480000 events"
+            },
+            {
+              "line": 946,
+              "text": "Package.EventLoop        INFO    Processed 1490000 events"
+            },
+            {
+              "line": 947,
+              "text": "Package.EventLoop        INFO    Processed 1500000 events"
+            },
+            {
+              "line": 948,
+              "text": "Package.EventLoop        INFO    Processed 1510000 events"
+            },
+            {
+              "line": 949,
+              "text": "seq1_MuonPtCutAlg_AnaM...WARNING invalid pt value, setting object to fail pt-cut: -1.01044e+07"
+            },
+            {
+              "line": 950,
+              "text": "Package.EventLoop        INFO    Processed 1520000 events"
+            },
+            {
+              "line": 951,
+              "text": "Package.EventLoop        INFO    Processed 1530000 events"
+            },
+            {
+              "line": 952,
+              "text": "Package.EventLoop        INFO    Processed 1540000 events"
+            },
+            {
+              "line": 953,
+              "text": "seq1_MuonPtCutAlg_AnaM...WARNING invalid pt value, setting object to fail pt-cut: -1.06105e+08"
+            }
+          ]
+        }
+      ],
+      "matches": [
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2173,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1490000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2174,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1500000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2175,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1510000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2177,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1520000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2178,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1530000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2179,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1540000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2181,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1550000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2182,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1560000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2183,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1570000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2184,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1580000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2188,
+          "category": "progress",
+          "text": "seq1_GRLSelectorAlg      INFO    accepted 1584232 out of 1584232 events for filter GoodRunsList (Good Runs Lists selection)"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2189,
+          "category": "progress",
+          "text": "seq1_PrimaryVertexSele...INFO    accepted 1580722 out of 1584232 events for filter VertexSelection (vertex selection)"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2190,
+          "category": "progress",
+          "text": "seq1_EventStatusSelect...INFO    accepted 1580603 out of 1580722 events for filter EventErrorState (selecting events without any error state set)"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2191,
+          "category": "progress",
+          "text": "seq1_EventFlagSelectio...INFO    accepted 1512193 out of 1580603 events for filter JetCleaning (selecting events passing: DFCommonJets_eventClean_LooseBad,as_char)"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2192,
+          "category": "progress",
+          "text": "seq1_TrigEventSelectio...INFO    accepted 1512193 out of 1512193 events for filter TriggerEventSelection (trigger event selection)"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2209,
+          "category": "completion",
+          "text": "Package.EventLoop        INFO    worker finished successfully"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2212,
+          "category": "completion",
+          "text": "Package.EventLoop        INFO    current job status: 1 success, 0 failure, 0 running/unknown"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2215,
+          "category": "completion",
+          "text": "Package.EventLoop        INFO    current job status: 1 success, 0 failure, 0 running/unknown"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2217,
+          "category": "completion",
+          "text": "Py:CPBaseRunner      INFO Moving the analysis root file and the hist file to the top level."
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2220,
+          "category": "completion",
+          "text": "Py:CPBaseRunner      INFO renaming the hist-output.root to output.root"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 924,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1350000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 925,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1360000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 930,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1370000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 931,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1380000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 932,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1390000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 933,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1400000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 934,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1410000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 935,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1420000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 937,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1430000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 938,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1440000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 939,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1450000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 940,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1460000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 941,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1470000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 945,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1480000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 946,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1490000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 947,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1500000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 948,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1510000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 950,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1520000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 951,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1530000 events"
+        },
+        {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "relative_file": "workDir/tmp.stdout.66a94425-9fde-4302-b2c5-86a833c2e006",
+          "role": "workdir-log",
+          "line": 952,
+          "category": "progress",
+          "text": "Package.EventLoop        INFO    Processed 1540000 events"
+        }
+      ],
+      "category_counts": {
+        "progress": 35,
+        "completion": 5
+      },
+      "category_counts_found": {
+        "progress": 317,
+        "completion": 5
+      },
+      "tail_lines_per_file": 20,
+      "workdir_recency_window_s": 7200,
+      "matched_lines_found": 322,
+      "match_limit_reached": true,
+      "payload_activity": {
+        "latest_payload_file": "payload.stdout",
+        "last_write_before_core_s": 7398.0,
+        "last_write_before_core_human": "2h 03m 18s",
+        "last_nonempty_line": {
+          "line": 2220,
+          "text": "Py:CPBaseRunner      INFO renaming the hist-output.root to output.root"
+        },
+        "tail": [
+          {
+            "line": 2201,
+            "text": "seq1_geq3lep_SAVE_geq3lepINFO    Events passing selection for all systematics: 1512193 / 1512193 for events passing < geq3lep >"
+          },
+          {
+            "line": 2202,
+            "text": "seq1_EventSelectionMer...INFO    Events passing selection for at least one systematic: 2670 / 1512193 for events passing at least one EventSelection"
+          },
+          {
+            "line": 2203,
+            "text": "seq1_EventSelectionMer...INFO    Events passing selection for at nominal: 2670 / 1512193 for events passing at least one EventSelection"
+          },
+          {
+            "line": 2204,
+            "text": "seq1_EventSelectionMer...INFO    Events passing selection for all systematics: 2670 / 1512193 for events passing at least one EventSelection"
+          },
+          {
+            "line": 2205,
+            "text": "ELModule.LeakCheckModule INFO    Memory increase/change during the job:"
+          },
+          {
+            "line": 2206,
+            "text": "ELModule.LeakCheckModule INFO      - resident: -0.275023 kB/event (-435700 kB total)"
+          },
+          {
+            "line": 2207,
+            "text": "ELModule.LeakCheckModule INFO      - virtual : 0.0395195 kB/event (62608 kB total)"
+          },
+          {
+            "line": 2208,
+            "text": "Real time 2:29:57, CP time 8271.170"
+          },
+          {
+            "line": 2209,
+            "text": "Package.EventLoop        INFO    worker finished successfully"
+          },
+          {
+            "line": 2210,
+            "text": "xAOD::TFileAccessTracer   INFO    Sending file access statistics to http://rucio-lb-prod.cern.ch:18762/traces/"
+          },
+          {
+            "line": 2211,
+            "text": "Package.EventLoop        INFO    retrieving batch job in location /srv/workDir/workDir-2026-08-19-0344-9bc2"
+          },
+          {
+            "line": 2212,
+            "text": "Package.EventLoop        INFO    current job status: 1 success, 0 failure, 0 running/unknown"
+          },
+          {
+            "line": 2213,
+            "text": "Package.EventLoop        INFO    done"
+          },
+          {
+            "line": 2214,
+            "text": "Package.EventLoop        INFO    retrieving batch job in location workDir"
+          },
+          {
+            "line": 2215,
+            "text": "Package.EventLoop        INFO    current job status: 1 success, 0 failure, 0 running/unknown"
+          },
+          {
+            "line": 2216,
+            "text": "Package.EventLoop        INFO    done"
+          },
+          {
+            "line": 2217,
+            "text": "Py:CPBaseRunner      INFO Moving the analysis root file and the hist file to the top level."
+          },
+          {
+            "line": 2218,
+            "text": "Py:CPBaseRunner   WARNING Root file /srv/workDir/workDir-2026-08-19-0344-9bc2/data-ANALYSIS/output.root does not exist or merging is enabled, skipping move."
+          },
+          {
+            "line": 2219,
+            "text": "Py:CPBaseRunner      INFO Moving /srv/workDir/workDir-2026-08-19-0344-9bc2/fetch/hist-output-0.root to /srv/workDir/hist-output.root"
+          },
+          {
+            "line": 2220,
+            "text": "Py:CPBaseRunner      INFO renaming the hist-output.root to output.root"
+          }
+        ],
+        "latest_progress": {
+          "file": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/payload.stdout",
+          "relative_file": "payload.stdout",
+          "role": "payload-stdout",
+          "line": 2192,
+          "category": "progress",
+          "text": "seq1_TrigEventSelectio...INFO    accepted 1512193 out of 1512193 events for filter TriggerEventSelection (trigger event selection)"
+        }
+      }
+    },
+    "process_identity": {
+      "kind": "payload",
+      "confidence": "high",
+      "signals": {
+        "generated_by": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python /srv/workDir/usr/UserAnalysis/1.0.0/InstallArea/x86_64-el9-gcc15-opt/bin/EWRun.py --input-list in.txt --output-name output --max-events -1 --merge-output-files --analysis SUSYSS3L",
+        "command_mentions_prmon": false,
+        "command_looks_like_payload": true,
+        "python_runtime_stack": true,
+        "root_runtime_stack": true,
+        "xrootd_runtime_stack": true,
+        "stack_mentions_prmon": false
+      },
+      "reason": "The core-recorded command line identifies the payload and the captured runtime stack is consistent with it."
+    },
+    "diagnosis": {
+      "available": true,
+      "classification": "post-event-processing-remote-file-close-hang",
+      "phase": "process-shutdown",
+      "component": "ROOT/XRootD",
+      "confidence": "medium",
+      "root_cause_established": false,
+      "summary": "Event processing completed successfully and the process later hung while ROOT/XRootD was closing a remote file during process shutdown.",
+      "process_identity": {
+        "kind": "payload",
+        "confidence": "high",
+        "signals": {
+          "generated_by": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python /srv/workDir/usr/UserAnalysis/1.0.0/InstallArea/x86_64-el9-gcc15-opt/bin/EWRun.py --input-list in.txt --output-name output --max-events -1 --merge-output-files --analysis SUSYSS3L",
+          "command_mentions_prmon": false,
+          "command_looks_like_payload": true,
+          "python_runtime_stack": true,
+          "root_runtime_stack": true,
+          "xrootd_runtime_stack": true,
+          "stack_mentions_prmon": false
+        },
+        "reason": "The core-recorded command line identifies the payload and the captured runtime stack is consistent with it."
+      },
+      "symbol_evidence_quality": {
+        "level": "degraded",
+        "gdb_executable_match_warning": true,
+        "key_build_ids_checked": 0,
+        "build_id_mismatch_count": 0,
+        "eu_unstrip_module_count": 1,
+        "verified": false
+      },
+      "signals": {
+        "clean_python_exit": true,
+        "xrootd_finalization": false,
+        "xrootd_poller_stop_wait": false,
+        "root_close_files": true,
+        "xrootd_remote_file_close": true,
+        "xrootd_close_stream_mutex_wait": true,
+        "xrootd_shutdown_events": true,
+        "xrootd_socket_fault": true,
+        "xrootd_read_timeout_force_disconnect": false,
+        "xrootd_stream_mutex_wait": true,
+        "eventloop_worker_success": true,
+        "batch_status_success": true,
+        "output_postprocessing": true,
+        "captured_process": "payload",
+        "payload_silence_before_core_s": 7398.0
+      },
+      "supporting_evidence": [
+        "Payload reports that the EventLoop worker finished successfully.",
+        "Payload reports a successful batch status with zero failures.",
+        "Payload reached output-file post-processing before becoming silent.",
+        "Primary thread is in Py_Exit(sts=0) -> TROOT::CloseFiles -> TNetXNGFile::Close -> XrdCl::File::Close -> StreamMutex::Lock.",
+        "A concurrent XRootD poller thread is in ShutdownEvents during socket close/error handling.",
+        "A concurrent XRootD task thread waits in StreamMutex::Lock while running Stream::Tick."
+      ],
+      "limitations": [
+        "A single core snapshot does not prove the exact lock cycle.",
+        "Concurrent XRootD socket fault/error handling is observed, but causality is not established.",
+        "GDB warns that the core may not match the supplied executable; key Build IDs could not verify the executable/system-library identity.",
+        "Selected XRootD frames lack usable argument/local DWARF in this optimized build."
+      ]
+    },
+    "python": {
+      "available": false,
+      "reason": "py-bt is not available because the libpython/CPython GDB helper (python-gdb.py) is not loaded. This is separate from native Python symbol availability or full DWARF debug information."
+    },
+    "shared_libraries": {
+      "total_loaded": 171,
+      "with_symbols_count": 171,
+      "without_symbols": [],
+      "without_symbols_count": 0,
+      "without_full_debug_info": [
+        "/srv/workDir/2c69e22d-9c1b-44a2-b7be-ee61ad90a94d/lib64/wrapper.so",
+        "/lib64/libm.so.6",
+        "/lib64/libc.so.6",
+        "/lib64/libz.so.1",
+        "/lib64/libbz2.so.1",
+        "/lib64/liblzma.so.5",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/../lib/libffi.so.8",
+        "/cvmfs/sft.cern.ch/lcg/releases/gcc/15.2.0-35657/x86_64-el9/lib64/libstdc++.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/cppyy/libcppyy.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/cppyy/../libCPyCppyy.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/cppyy/.././libCore.so",
+        "/lib64/libpcre2-8.so.0",
+        "/lib64/libzstd.so.1",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libRIO.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/./libThread.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/././libtbb.so.12",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/././libtbbmalloc.so.2",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libCling.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/ROOT/libROOTPythonizations.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/ROOT/../libTree.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/ROOT/../libMathCore.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/ROOT/../libImt.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/ROOT/../libMultiProc.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/ROOT/../libNet.so",
+        "/lib64/libssl.so.3",
+        "/lib64/libcrypto.so.3",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libEventLoopGrid.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libEventLoop.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/../lib/libROOTTPython.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libSampleHandler.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libPathResolver.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libRootCoreUtils.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libAsgMessagingLib.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/../lib/libHist.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libAnaAlgorithmLib.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libAsgServicesLib.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libAsgTools.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libxAODRootAccess.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libxAODCore.so",
+        "/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBase/25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/libRootUtils.so"
+      ],
+      "without_full_debug_info_count": 40
+    },
+    "build_ids": {
+      "available": true,
+      "tool": "/usr/bin/eu-unstrip",
+      "module_count": 1,
+      "checked": [],
+      "mismatch_count": 0,
+      "unverified_count": 0,
+      "coverage": "unverified",
+      "raw_excerpt": "0x7f8bedf02000+0x2000 82946deb83869259a9c6bcd063f92e2773333b0b@0x7f8bedf02610 . - linux-vdso.so.1\n"
+    },
+    "environment": {
+      "execution_backend": "atlas-container",
+      "os": "AlmaLinux 9.7 (Moss Jungle Cat)",
+      "os_id": "almalinux",
+      "os_version": "9.7",
+      "glibc": "ldd (GNU libc) 2.34",
+      "atlas_platform": "el9",
+      "release_setup": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL/my_release_setup.sh",
+      "job_dir": "/tmp/nilspal/panda/tarball_PandaJob_7263015032_RAL"
+    },
+    "gdb_metadata": {
+      "debug_file_directory": "The directory where separate debug symbols are searched for is \"/usr/lib/debug\".",
+      "auto_load_python_scripts": "Loaded  Script                                                                 \nYes     /cvmfs/sft.cern.ch/lcg/releases/gcc/15.2.0-35657/x86_64-el9/lib64/libstdc++.so.6.0.34-gdb.py",
+      "info_files_excerpt": "Symbols from \"/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/25.2.103/InstallArea/x86_64-el9-gcc15-opt/bin/python3.13\".\nLocal core dump file:\n\t`/srv/core.20115', file type elf64-x86-64.\n\t0x0000000000403000 - 0x0000000000404000 is load1\n\t0x0000000000404000 - 0x0000000000405000 is load2\n\t0x00000000049f7000 - 0x000000001ee53000 is load3\n\t0x00007f8ba8000000 - 0x00007f8ba8021000 is load4\n\t0x00007f8ba8021000 - 0x00007f8bac000000 is load5\n\t0x00007f8bac000000 - 0x00007f8bac021000 is load6\n\t0x00007f8bac021000 - 0x00007f8bb0000000 is load7\n\t0x00007f8bb11ff000 - 0x00007f8bb1a00000 is load8\n\t0x00007f8bb1a00000 - 0x00007f8bb2000000 is load9\n\t0x00007f8bb2134000 - 0x00007f8bb2335000 is load10\n\t0x00007f8bb2922000 - 0x00007f8bb2927000 is load11\n\t0x00007f8bb2927000 - 0x00007f8bb2928000 is load12\n\t0x00007f8bb2928000 - 0x00007f8bb292c000 is load13\n\t0x00007f8bb29e4000 - 0x00007f8bb29e9000 is load14\n\t0x00007f8bb29e9000 - 0x00007f8bb29ea000 is load15\n\t0x00007f8bb29ea000 - 0x00007f8bb29f2000 is load16\n\t0x00007f8bb2a34000 - 0x00007f8bb2a37000 is load17\n\t0x00007f8bb2a37000 - 0x00007f8bb2a38000 is load18\n\t0x00007f8bb2ab4000 - 0x00007f8bb2ab8000 is load19\n\t0x00007f8bb2ab8000 - 0x00007f8bb2ab9000 is load20\n\t0x00007f8bb2ab9000 - 0x00007f8bb2aba000 is load21\n\t0x00007f8bb2b1c000 - 0x00007f8bb2b1f000 is load22\n\t0x00007f8bb2b1f000 - 0x00007f8bb2b20000 is load23\n\t0x00007f8bb2b20000 - 0x00007f8bb2b24000 is load24\n\t0x00007f8bb2c2c000 - 0x00007f8bb2c33000 is load25\n\t0x00007f8bb2c33000 - 0x00007f8bb2c35000 is load26\n\t0x00007f8bb2c35000 - 0x00007f8bb3041000 is load27\n\t0x00007f8bb3095000 - 0x00007f8bb3098000 is load28\n\t0x00007f8bb3098000 - 0x00007f8bb3099000 is load29\n\t0x00007f8bb30d8000 - 0x00007f8bb30da000 is load30\n\t0x00007f8bb30da000 - 0x00007f8bb30db000 is load31\n\t0x00007f8bb3176000 - 0x00007f8bb317a000 is load32\n\t0x00007f8bb317a000 - 0x00007f8bb317b000 is load33\n\t0x00007f8bb317b000 - 0x00007f8bb3182000 is load34\n\t0x00007f8bb32eb000 - 0x00007f8bb32f5000 is load35\n\t0x00007f8bb32f5000 - 0x00007f8bb32f7000 is load36\n\t0x00007f8bb32f7000 - 0x00007f8bb32f9000 is load37\n\t0x00007f8bb33f6000 - 0x00007f8bb33fd000 is load38\n\t0x00007f8bb33fd000 - 0x00007f8bb33fe000 is load39\n\t0x00007f8bb33fe000 - 0x00007f8bb3400000 is load40\n\t0x00007f8bb364a000 - 0x00007f8bb3659000 is load41\n\t0x00007f8bb3659000 - 0x00007f8bb365c000 is load42\n\t0x00007f8bb365c000 - 0x00007f8bb3678000 is load43\n\t0x00007f8bb36e6000 - 0x00007f8bb36e9000 is load44\n\t0x00007f8bb36e9000 - 0x00007f8bb36ea000 is load45\n\t0x00007f8bb36ea000 - 0x00007f8bb36ee000 is load46\n\t0x00007f8bb3759000 - 0x00007f8bb375c000 is load47\n\t0x00007f8bb375c000 - 0x00007f8bb375d000 is load48\n\t0x00007f8bb375d000 - 0x00007f8bb3762000 is load49\n\t0x00007f8bb37f2000 - 0x00007f8bb37f7000 is load50\n\t0x00007f8bb37f7000 - 0x00007f8bb37f8000 is load51\n\t0x00007f8bb37f8000 - 0x00007f8bb37ff000 is load52\n\t0x00007f8bb38ba000 - 0x00007f8bb38bf000 is load53\n\t0x00007f8bb38bf000 - 0x00007f8bb38c0000 is load54\n\t0x00007f8bb38c0000 - 0x00007f8bb38c2000 is load55\n\n... [truncated] ...ed DSO at 0x7f8bedf02000\n\t0x00007f8bedf02430 - 0x00007f8bedf02468 is .gnu.version_d in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf02468 - 0x00007f8bedf02588 is .dynamic in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf02590 - 0x00007f8bedf025a0 is .rodata in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf025a0 - 0x00007f8bedf025d0 is .note.gnu.property in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf025d0 - 0x00007f8bedf02624 is .note in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf02624 - 0x00007f8bedf02680 is .eh_frame_hdr in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf02680 - 0x00007f8bedf027f0 is .eh_frame in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf027f0 - 0x00007f8bedf034ec is .text in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf034ec - 0x00007f8bedf035a2 is .altinstructions in system-supplied DSO at 0x7f8bedf02000\n\t0x00007f8bedf035a2 - 0x00007f8bedf035d6 is .altinstr_replacement in system-supplied DSO at 0x7f8bedf02000",
+      "info_files_truncated": true,
+      "startup_warnings": [
+        "warning: core file may not match specified executable file."
+      ]
+    },
+    "phases": [
+      {
+        "name": "metadata",
+        "commands": [
+          "info program",
+          "info threads",
+          "info files",
+          "show debug-file-directory",
+          "info auto-load python-scripts"
+        ],
+        "returncode": 0,
+        "timed_out": false,
+        "duration_s": 7.28,
+        "stderr_excerpt": "\nwarning: core file may not match specified executable file.\n"
+      },
+      {
+        "name": "primary_thread",
+        "commands": [
+          "bt 40",
+          "info frame",
+          "info args",
+          "info locals",
+          "info registers"
+        ],
+        "returncode": 0,
+        "timed_out": false,
+        "duration_s": 1.17,
+        "stderr_excerpt": "\nwarning: core file may not match specified executable file.\n"
+      },
+      {
+        "name": "all_threads",
+        "commands": [
+          "thread apply all bt 40"
+        ],
+        "returncode": 0,
+        "timed_out": false,
+        "duration_s": 1.13,
+        "stderr_excerpt": "\nwarning: core file may not match specified executable file.\n"
+      },
+      {
+        "name": "python",
+        "commands": [
+          "py-bt",
+          "py-list"
+        ],
+        "returncode": 1,
+        "timed_out": false,
+        "duration_s": 1.2,
+        "stderr_excerpt": "\nwarning: core file may not match specified executable file.\nUndefined command: \"py-bt\".  Try \"help\".\nUndefined command: \"py-list\".  Try \"help\".\n"
+      },
+      {
+        "name": "libraries",
+        "commands": [
+          "info sharedlibrary"
+        ],
+        "returncode": 0,
+        "timed_out": false,
+        "duration_s": 1.2,
+        "stderr_excerpt": "\nwarning: core file may not match specified executable file.\n"
+      },
+      {
+        "name": "targeted_threads",
+        "commands": [
+          "thread 12",
+          "frame 3",
+          "info frame",
+          "info args",
+          "info locals",
+          "thread 2",
+          "frame 3",
+          "info frame",
+          "info args",
+          "info locals",
+          "thread 1",
+          "frame 3",
+          "info frame",
+          "info args",
+          "info locals"
+        ],
+        "returncode": 0,
+        "timed_out": false,
+        "duration_s": 1.3,
+        "stderr_excerpt": "\nwarning: core file may not match specified executable file.\n"
+      }
+    ],
+    "truncated_sections": []
+  },
+  "analysis": null
+}

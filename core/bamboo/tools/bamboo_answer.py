@@ -27,7 +27,11 @@ from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
-from bamboo.tools.bamboo_executor import execute_plan, get_last_traceback_evidence
+from bamboo.tools.bamboo_executor import (
+    execute_plan,
+    get_last_core_dump_offer,
+    get_last_traceback_evidence,
+)
 from bamboo.tools.planner import (
     bamboo_plan_tool,
     Plan,
@@ -149,6 +153,133 @@ def _is_pilot_source_request(question: str) -> bool:
     """
     q = question.lower()
     return any(sig in q for sig in _PILOT_SOURCE_SIGNALS)
+
+
+# ---------------------------------------------------------------------------
+# Core-dump analysis signals.
+#
+# Two distinct entry points, deliberately kept apart:
+#   * an explicit request naming a job ("analyse the core dump of job 123"),
+#     which is allowed for any failure type; and
+#   * a bare affirmative answering the offer that panda_log_analysis makes
+#     after a looping-job kill, which carries no job ID of its own.
+# ---------------------------------------------------------------------------
+
+_CORE_DUMP_SIGNALS: frozenset[str] = frozenset({
+    "core dump",
+    "core-dump",
+    "coredump",
+    "core file",
+    "gdb",
+    "backtrace",
+    "back trace",
+})
+
+# The other half of rule 1c: asking what the payload was *doing* when it was
+# killed.  A regex rather than literals because the job reference sits in the
+# middle of the phrase — "what was job 7263525363 stuck on" — so substring
+# matching on "what was it stuck on" silently misses the commonest phrasing.
+#
+# Note what is deliberately absent: a bare "why did job X hang".  That is a
+# diagnosis request, not a core-dump request, and it must reach
+# panda_log_analysis first — see _is_core_dump_request.
+_CORE_DUMP_STATE_RE: re.Pattern[str] = re.compile(
+    r"(?i)\b(?:"
+    r"what\s+(?:was|were)\s+(?:it|that|the\s+job|the\s+payload|job\s+[0-9]{4,12})"
+    r"\s+(?:actually\s+)?(?:doing|stuck|waiting|hung|blocked)"
+    r"|where\s+(?:was|were)\s+(?:it|the\s+job|job\s+[0-9]{4,12})\s+stuck"
+    r"|what\s+(?:was|were)\s+(?:it|the\s+job)\s+stuck\s+(?:on|in)"
+    r")\b"
+)
+
+
+def _is_core_dump_request(question: str) -> bool:
+    """Return True if the question explicitly asks for core-dump analysis.
+
+    Rule 1c's signal test.  Unlike the affirmative path this is not gated on a
+    prior offer, so it stays usable for any failure type — a crash as much as a
+    looping-job hang — and the tool itself resolves the framing from the pilot
+    error code.
+
+    Deliberately narrower than "any question about a hang".  A bare "why did
+    job X hang" is left to ``panda_log_analysis``: the core-dump tool fetches a
+    multi-gigabyte core and holds the single analysis slot for about a minute,
+    which is the wrong opening move for a question that a log analysis usually
+    answers outright — and when it does not, that same log analysis makes the
+    offer that rule 1d picks up.  So the expensive path is reached either by
+    naming it or by accepting it, never by guessing.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        True if the question names a core-dump artifact or asks what the
+        payload was doing when it was killed.
+    """
+    q = (question or "").lower()
+    if any(sig in q for sig in _CORE_DUMP_SIGNALS):
+        return True
+    return bool(_CORE_DUMP_STATE_RE.search(q))
+
+
+# Matches a short, content-free affirmative: "yes", "yes please", "ok do it",
+# "go ahead", "please analyse it", "sure".  Anchored at both ends and length-
+# bounded by the alternation itself, so a sentence that merely *contains* "yes"
+# ("yes but what about the stage-out") does not match and falls through to
+# normal routing, where the user's actual question is answered.
+_CORE_DUMP_AFFIRMATIVE_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:"
+    r"(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|affirmative)"
+    r"(?:[,!.\s]+(?:please|do\s+it|go\s+ahead|thanks?))*"
+    r"|(?:please\s+)?(?:do\s+it|go\s+ahead|go\s+for\s+it|proceed|carry\s+on)"
+    r"|(?:yes[,!.\s]+)?(?:please\s+)?analys[ei]\s+it"
+    r"|(?:yes[,!.\s]+)?(?:please\s+)?analyze\s+it"
+    r"|(?:yes[,!.\s]+)?(?:please\s+)?run\s+it"
+    r")[!.\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_core_dump_affirmative(question: str) -> bool:
+    """Return True if *question* is a bare affirmative and nothing else.
+
+    Only meaningful when a core-dump offer is outstanding — the caller always
+    pairs this with :func:`~bamboo.tools.bamboo_executor.get_last_core_dump_offer`,
+    so a "yes" with no offer behind it cannot misfire.
+
+    Args:
+        question: The raw user message.
+
+    Returns:
+        True when the whole message is an affirmative with no other content.
+    """
+    return bool(_CORE_DUMP_AFFIRMATIVE_RE.match((question or "").strip()))
+
+
+def _build_core_dump_plan(job_id: int, mode: str, explain: str) -> "Plan":
+    """Build a FAST_PATH plan calling the ATLAS core-dump tool.
+
+    Args:
+        job_id: PanDA job ID whose core dump to analyse.
+        mode: ``"auto"``, ``"hang"`` or ``"crash"``.
+        explain: Human-readable routing rationale for the plan record.
+
+    Returns:
+        A :class:`Plan` routing to ``atlas.core_dump_analysis``.
+    """
+    return Plan(
+        route=PlanRoute.FAST_PATH,
+        confidence=1.0,
+        tool_calls=[ToolCall(
+            # Entry-point name: the MCP server overwrites a plugin tool's
+            # internal name with its entry-point key, so "core_dump_analysis"
+            # alone does not resolve.
+            tool="atlas.core_dump_analysis",
+            arguments={"job_id": job_id, "action": "start", "mode": mode},
+        )],
+        reuse_policy=ReusePolicy(),
+        explain=explain,
+    )
 
 
 _PANDA_HEALTH_RE: re.Pattern[str] = re.compile(
@@ -1688,6 +1819,7 @@ def _build_deterministic_plan(  # noqa: C901
 
     Fast-path rules (in priority order):
     1b. Job ID + pilot-source signals + stored pilot_monitoring_error → ``pilot_source_analysis`` FAST_PATH
+    1c. Job ID + core-dump signals (ATLAS)  → ``atlas.core_dump_analysis``  FAST_PATH
     1. Job ID + analysis keywords   → ``panda_log_analysis``       FAST_PATH
     2. Job ID (no task ID)          → ``panda_job_status``         FAST_PATH
     3. Task ID                      → ``panda_task_status``        FAST_PATH
@@ -1699,6 +1831,13 @@ def _build_deterministic_plan(  # noqa: C901
     9. Prompt-log signals           → ``opensearch_promptlog_query`` FAST_PATH
     10. Source code signals         → ``code_query``               FAST_PATH
     11. Nothing matched             → ``None`` (defer to LLM planner)
+
+    Rule 1d — a bare affirmative answering a stored core-dump offer — is
+    deliberately **not** here.  It is handled in :meth:`BambooAnswerTool._route`
+    ahead of the social intercept, because by the time control reaches this
+    function a bare "ok" has already been answered by ``_is_ack`` and a bare
+    "yes" has been rewritten by the topic guard's follow-up reformulation.  See
+    the comment at that call site.
 
     Args:
         question: User question text.
@@ -1759,6 +1898,30 @@ def _build_deterministic_plan(  # noqa: C901
                         "pilot traceback evidence → pilot source analysis."
                     ),
                 )
+
+        # Rule 1c: explicit core-dump request naming a job.
+        #
+        # Must precede rule 1: "why did job 123 hang" matches
+        # _is_log_analysis_request ("why" + job ID), so without this the
+        # explicit request would silently re-run panda_log_analysis — which has
+        # already been run, and which is what produced the offer in the first
+        # place.
+        #
+        # ATLAS only.  _CORE_DUMP_ANALYSIS_AVAILABLE is False in the ePIC
+        # mirror, so an ePIC question reaching here would name a tool that is
+        # not registered; the executor would report it unknown rather than
+        # falling back usefully.
+        if job_id and plugin_id == "atlas" and _is_core_dump_request(question):
+            return _build_core_dump_plan(
+                job_id,
+                # "auto" rather than a pinned mode: an explicit request may
+                # name any job, and the tool resolves the framing from the
+                # pilot error code.
+                mode="auto",
+                explain=(
+                    "Deterministic: job ID + core-dump keywords → core dump analysis."
+                ),
+            )
 
         # Rule 1: job ID + analysis keywords → log analysis.
         if job_id and _is_log_analysis_request(question):
@@ -2488,6 +2651,99 @@ async def _run_db_query_fast_path(
     return None
 
 
+async def _run_early_intercepts(
+    question: str,
+    history: list[Message],
+    bypass_fast_path: bool,
+    plugin_id: str = "atlas",
+) -> "list[MCPContent] | None":
+    """Run the intercepts that must precede the topic guard, in order.
+
+    The order is the substance of this function.  Rule 1d runs first because
+    the social intercept below would otherwise swallow the affirmatives it
+    depends on: ``_is_ack`` matches "ok", "okay", "great", "perfect" and
+    "sounds good", and a user answering a core-dump offer with any of those
+    would be told "You're welcome" while the analysis never started.
+
+    Args:
+        question: The raw user message, before any reformulation.
+        history: Prior conversation turns.
+        bypass_fast_path: When True, the deterministic intercepts are skipped
+            so the question reaches the topic guard and LLM planner.  The
+            social replies are not deterministic *routing* and still apply.
+        plugin_id: Active plugin identifier.
+
+    Returns:
+        ``list[MCPContent]`` when an intercept produced the answer, or ``None``
+        to continue with normal routing.
+    """
+    if not bypass_fast_path:
+        accepted = await _run_core_dump_offer_intercept(question, history, plugin_id)
+        if accepted is not None:
+            return accepted
+
+    # Social intercept — zero LLM cost for greetings and acknowledgements.
+    if _is_greeting(question):
+        return text_content(_GREETING_RESPONSE)
+    if _is_ack(question):
+        return text_content(_ACK_RESPONSE)
+    return None
+
+
+async def _run_core_dump_offer_intercept(
+    question: str,
+    history: list[Message],
+    plugin_id: str = "atlas",
+) -> "list[MCPContent] | None":
+    """Rule 1d — accept an outstanding core-dump offer with a bare affirmative.
+
+    Called from :meth:`BambooAnswerTool._route` **before** the social intercept
+    and the topic guard, for two independent reasons.  ``_is_ack`` matches
+    "ok", "okay", "great", "perfect" and "sounds good", so an affirmative reply
+    to the offer would otherwise be answered with "You're welcome" and the
+    analysis would never start.  And ``_run_topic_guard`` reformulates
+    content-free follow-ups, so ``_build_deterministic_plan`` never sees the
+    user's "yes" at all — it sees a rewritten RAG query.  The promptlog fast
+    path sits early for exactly this reason and says so in its own comment.
+
+    Both conditions are required: a stored offer *and* a message that is
+    nothing but an affirmative.  A "yes" in any other context is left alone.
+
+    Args:
+        question: The raw user message, before any reformulation.
+        history: Prior conversation turns.
+        plugin_id: Active plugin identifier.  ATLAS only —
+            ``_CORE_DUMP_ANALYSIS_AVAILABLE`` is False in the ePIC mirror, so
+            naming the tool elsewhere would produce "Unknown tool".
+
+    Returns:
+        ``list[MCPContent]`` when the offer was accepted and the analysis
+        started, or ``None`` to continue with normal routing.
+    """
+    if plugin_id != "atlas":
+        return None
+    offer = get_last_core_dump_offer()
+    if offer is None or not _is_core_dump_affirmative(question):
+        return None
+    return await execute_plan(
+        _build_core_dump_plan(
+            offer["job_id"],
+            # Pinned, not "auto": the offer is only ever made for a looping-job
+            # kill (pilot code 1150), which resolves to "hang" anyway.  Stating
+            # it removes a metadata round trip and the failure mode where that
+            # fetch fails and leaves the framing unresolved.
+            mode="hang",
+            explain=(
+                "Deterministic: affirmative reply to a stored core-dump offer "
+                "→ core dump analysis."
+            ),
+        ),
+        question,
+        history,
+        plugin_id=plugin_id,
+    )
+
+
 async def _run_fast_path_intercepts(
     question: str,
     history: list[Message],
@@ -2813,11 +3069,14 @@ class BambooAnswerTool:
         if bypass_routing:
             return await _bypass_response(question, history)
 
-        # Social intercept — zero LLM cost for greetings and acknowledgements.
-        if _is_greeting(question):
-            return text_content(_GREETING_RESPONSE)
-        if _is_ack(question):
-            return text_content(_ACK_RESPONSE)
+        # Early intercepts — rule 1d, then greetings and acknowledgements.
+        # Grouped into one helper because the ordering between them is the
+        # whole point: see _run_early_intercepts.
+        early = await _run_early_intercepts(
+            question, history, bypass_fast_path, plugin_id,
+        )
+        if early is not None:
+            return early
 
         # Fast-path intercepts — pilot and jobs DB — bypass the topic guard
         # for clearly on-topic questions.  Skipped when bypass_fast_path is
@@ -2899,6 +3158,14 @@ __all__ = [
     "_is_panda_health_question",
     "_is_pilot_source_request",
     "_PILOT_SOURCE_SIGNALS",
+    "_is_core_dump_request",
+    "_is_core_dump_affirmative",
+    "_build_core_dump_plan",
+    "_run_core_dump_offer_intercept",
+    "_run_early_intercepts",
+    "_CORE_DUMP_SIGNALS",
+    "_CORE_DUMP_STATE_RE",
+    "_CORE_DUMP_AFFIRMATIVE_RE",
     "_topic_for_question",
     "_RUCIO_SIGNALS",
     "_ROOT_SIGNALS",

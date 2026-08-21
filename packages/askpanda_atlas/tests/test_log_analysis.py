@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, Callable
 
 import pytest
 
@@ -392,12 +393,12 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
     # setup.stdout confirmed zero-length in index → skipped by _file_is_nonempty;
     # payload files are non-empty so they are downloaded as expected.
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": 0,
             "payload.stdout": 50000,
             "payload.stderr": 200,
-        },
+        }),
     )
 
     import json
@@ -716,6 +717,472 @@ def test_fetch_file_index_parses_list_response(
     }
 
 
+# ---------------------------------------------------------------------------
+# Recursive listing: path keying, error policy, top-level view
+# ---------------------------------------------------------------------------
+
+#: Trimmed excerpt of the real recursive listing for PanDA job 7263525363,
+#: a job killed as looping (pilot error 1150) whose tarball contains a core
+#: dump.  Reproduces the two properties that broke basename keying: the same
+#: basename appears under several ``dirname`` values, and paths live in
+#: ``dirname`` rather than in ``name``.  The ``error`` field carries the
+#: advisory warning BigPanDA emits for a large job log.
+_JOB_7263525363_LISTING: dict[str, Any] = {
+    "error": "slow_downloading:The size of job log tarball is quite big (119.36MB).",
+    "files": [
+        {"name": "payload.stdout", "size": 454904, "dirname": "",
+         "modification": "2026-08-19 06:08:46"},
+        {"name": "payload.stderr", "size": 0, "dirname": "",
+         "modification": "2026-08-19 01:42:08"},
+        {"name": "my_release_setup.sh", "size": 225, "dirname": "",
+         "modification": "2026-08-19 01:42:51"},
+        {"name": "core.18277", "size": 1065033128, "dirname": "",
+         "modification": "2026-08-19 08:18:20"},
+        {"name": "output.root", "size": 10865224, "dirname": "/workDir",
+         "modification": "2026-08-19 06:07:49"},
+        {"name": "output.root", "size": 1648, "dirname": "/workDir/workDir/hist",
+         "modification": "2026-08-19 01:43:21"},
+        {"name": "output.root", "size": 1910, "dirname": "/workDir/workDir/input",
+         "modification": "2026-08-19 01:43:21"},
+        {"name": "setup.sh", "size": 6624,
+         "dirname": "/workDir/usr/UserAnalysis/1.0.0/InstallArea/x86_64-el9-gcc15-opt",
+         "modification": "2026-08-19 01:43:02"},
+    ],
+}
+
+
+def _patch_listing_response(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: Any,
+    status: int = 200,
+) -> None:
+    """Patch ``cached_fetch_jsonish`` so the real listing parser runs on *payload*.
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture.
+        payload: Parsed-JSON value the cache layer should hand back.
+        status: HTTP status the cache layer should report.
+    """
+    import askpanda_atlas._cache as cache_mod
+
+    monkeypatch.setattr(
+        cache_mod,
+        "cached_fetch_jsonish",
+        lambda url, timeout: (status, "application/json", "", payload),
+    )
+
+
+def test_file_index_keys_on_full_relative_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-basename files under different dirnames get distinct index keys.
+
+    Basename keying let the last entry parsed win, so a nested ``output.root``
+    could answer a size question about a root-level file of the same name.
+    """
+    from askpanda_atlas.log_analysis_impl import _fetch_file_index
+
+    _patch_listing_response(monkeypatch, _JOB_7263525363_LISTING)
+    index = _fetch_file_index(7263525363, "https://bigpanda.cern.ch", 30)
+
+    assert index is not None
+    assert index["workDir/output.root"] == 10865224
+    assert index["workDir/workDir/hist/output.root"] == 1648
+    assert index["workDir/workDir/input/output.root"] == 1910
+    assert (
+        index["workDir/usr/UserAnalysis/1.0.0/InstallArea/"
+              "x86_64-el9-gcc15-opt/setup.sh"] == 6624
+    )
+    # Three distinct output.root entries survive rather than collapsing to one.
+    assert sum(1 for key in index if key.endswith("output.root")) == 3
+
+
+def test_file_index_leaves_root_level_names_unprefixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dirname of "" yields a bare basename key, so existing lookups still work."""
+    from askpanda_atlas.log_analysis_impl import _fetch_file_index
+
+    _patch_listing_response(monkeypatch, _JOB_7263525363_LISTING)
+    index = _fetch_file_index(7263525363, "https://bigpanda.cern.ch", 30)
+
+    assert index is not None
+    assert index["payload.stdout"] == 454904
+    assert index["payload.stderr"] == 0
+    assert index["core.18277"] == 1065033128
+
+
+def test_top_level_file_index_drops_nested_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The top-level view keeps only job-root files, so namesakes cannot answer."""
+    from askpanda_atlas.log_analysis_impl import (
+        _fetch_file_index,
+        _top_level_file_index,
+    )
+
+    _patch_listing_response(monkeypatch, _JOB_7263525363_LISTING)
+    top_level = _top_level_file_index(
+        _fetch_file_index(7263525363, "https://bigpanda.cern.ch", 30)
+    )
+
+    assert top_level is not None
+    assert set(top_level) == {
+        "payload.stdout", "payload.stderr", "my_release_setup.sh", "core.18277",
+    }
+    assert not any("/" in key for key in top_level)
+
+
+def test_top_level_file_index_propagates_none() -> None:
+    """An unavailable listing stays unavailable through the top-level view.
+
+    Collapsing ``None`` to ``{}`` here would turn "listing unknown" into
+    "no files listed", and every downstream fail-open check depends on the
+    distinction.
+    """
+    from askpanda_atlas.log_analysis_impl import _top_level_file_index
+
+    assert _top_level_file_index(None) is None
+
+
+def test_listing_error_is_advisory_when_files_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-empty error field with a populated files array is not fatal.
+
+    BigPanDA reports ``slow_downloading:...`` for a large job log while
+    returning a complete listing; rejecting it would make every big-tarball
+    job undiagnosable.
+    """
+    from askpanda_atlas.log_analysis_impl import _fetch_file_listing
+
+    _patch_listing_response(monkeypatch, _JOB_7263525363_LISTING)
+    listing = _fetch_file_listing(7263525363, "https://bigpanda.cern.ch", 30)
+
+    assert listing is not None
+    assert len(listing) == len(_JOB_7263525363_LISTING["files"])
+
+
+def test_listing_error_with_no_files_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An error field with no usable entries reports "unknown", not "empty"."""
+    from askpanda_atlas.log_analysis_impl import _fetch_file_listing
+
+    _patch_listing_response(
+        monkeypatch, {"error": "job log not found", "files": []}
+    )
+    assert _fetch_file_listing(1111, "https://bigpanda.cern.ch", 30) is None
+
+
+def test_listing_without_error_and_no_files_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean but empty listing is a definite "no files", distinct from None."""
+    from askpanda_atlas.log_analysis_impl import _fetch_file_listing
+
+    _patch_listing_response(monkeypatch, {"error": "", "files": []})
+    assert _fetch_file_listing(1111, "https://bigpanda.cern.ch", 30) == []
+
+
+def test_listing_normalisation_preserves_modification_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The UTC modification string survives normalisation.
+
+    Downstream acquisition restores it with ``os.utime`` so that the
+    analyzer's core-versus-log mtime comparison stays meaningful; dropping it
+    here would silently disable that.
+    """
+    from askpanda_atlas.log_analysis_impl import _fetch_file_listing
+
+    _patch_listing_response(monkeypatch, _JOB_7263525363_LISTING)
+    listing = _fetch_file_listing(7263525363, "https://bigpanda.cern.ch", 30)
+
+    assert listing is not None
+    by_path = {record["relative_path"]: record for record in listing}
+    assert by_path["core.18277"]["modification"] == "2026-08-19 08:18:20"
+    assert by_path["payload.stdout"]["modification"] == "2026-08-19 06:08:46"
+    assert by_path["workDir/output.root"]["dirname"] == "workDir"
+
+
+def test_listing_skips_unusable_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entries that are not dicts or carry no name are dropped, not fatal."""
+    from askpanda_atlas.log_analysis_impl import _fetch_file_listing
+
+    _patch_listing_response(
+        monkeypatch,
+        {
+            "error": "",
+            "files": [
+                "not-a-dict",
+                {"size": 10, "dirname": ""},
+                {"name": "pilotlog.txt", "size": "not-a-number", "dirname": ""},
+            ],
+        },
+    )
+    listing = _fetch_file_listing(1111, "https://bigpanda.cern.ch", 30)
+
+    assert listing is not None
+    assert len(listing) == 1
+    assert listing[0]["relative_path"] == "pilotlog.txt"
+    assert listing[0]["size_bytes"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Core-dump probe
+# ---------------------------------------------------------------------------
+
+def _core_listing(
+    size_bytes: int = 1065033128,
+    name: str = "core.18277",
+    dirname: str = "",
+) -> list[dict[str, Any]]:
+    """Return a minimal listing containing one core file plus a payload stream.
+
+    Args:
+        size_bytes: Size of the core file.
+        name: Core filename.
+        dirname: Directory the core file sits in.
+
+    Returns:
+        Normalised listing records.
+    """
+    return [
+        {"relative_path": "payload.stdout", "name": "payload.stdout",
+         "dirname": "", "size_bytes": 454904,
+         "modification": "2026-08-19 06:08:46"},
+        {"relative_path": f"{dirname}/{name}" if dirname else name, "name": name,
+         "dirname": dirname, "size_bytes": size_bytes,
+         "modification": "2026-08-19 08:18:20"},
+    ]
+
+
+def test_core_dump_probe_reports_present_core() -> None:
+    """A non-empty core.<pid> in the listing is reported as present and usable."""
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    ev = _build_core_dump_evidence(_core_listing(), 1150)
+
+    assert ev["core_dump_probe_state"] == "present"
+    assert ev["core_dump_available"] is True
+    assert ev["core_dump_total_bytes"] == 1065033128
+    assert [c["name"] for c in ev["core_dump_candidates"]] == ["core.18277"]
+    assert ev["core_dump_candidates"][0]["modification"] == "2026-08-19 08:18:20"
+
+
+def test_core_dump_probe_reports_truncated_core() -> None:
+    """A zero-length core means capture was interrupted, not that none exists.
+
+    Collapsing this into "absent" would hide that the kernel had started
+    writing a core and was killed mid-write.
+    """
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    ev = _build_core_dump_evidence(_core_listing(size_bytes=0), 1150)
+
+    assert ev["core_dump_probe_state"] == "truncated"
+    assert ev["core_dump_available"] is False
+    assert ev["core_dump_offer_md"] == ""
+
+
+def test_core_dump_probe_reports_timed_out_for_looping_kill() -> None:
+    """No core after a looping-job kill is reported as a timed-out capture."""
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    listing = [
+        {"relative_path": "payload.stdout", "name": "payload.stdout",
+         "dirname": "", "size_bytes": 100, "modification": ""},
+    ]
+    ev = _build_core_dump_evidence(listing, 1150)
+
+    assert ev["core_dump_probe_state"] == "timed_out"
+    assert ev["core_dump_available"] is False
+    assert ev["core_dump_candidates"] == []
+    assert ev["core_dump_total_bytes"] == 0
+
+
+def test_core_dump_probe_reports_absent_for_other_failures() -> None:
+    """No core on a non-looping failure is simply absent, not a timed-out capture."""
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    listing = [
+        {"relative_path": "pilotlog.txt", "name": "pilotlog.txt",
+         "dirname": "", "size_bytes": 100, "modification": ""},
+    ]
+    ev = _build_core_dump_evidence(listing, 1305)
+
+    assert ev["core_dump_probe_state"] == "absent"
+    assert ev["core_dump_available"] is False
+
+
+def test_core_dump_probe_unavailable_listing_is_not_a_negative() -> None:
+    """An unfetched listing reports None, never False.
+
+    Reporting False would let the answer state that a job has no core dump on
+    the strength of a failed HTTP request.
+    """
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    ev = _build_core_dump_evidence(None, 1150)
+
+    assert ev["core_dump_probe_state"] == "not_probed"
+    assert ev["core_dump_available"] is None
+    assert ev["core_dump_offer_md"] == ""
+
+
+def test_core_dump_probe_ignores_lookalike_filenames() -> None:
+    """Only core.<pid> matches; unrelated names containing "core" do not."""
+    from askpanda_atlas.log_analysis_impl import _find_core_dump_candidates
+
+    listing = [
+        {"relative_path": n, "name": n, "dirname": "", "size_bytes": 10,
+         "modification": ""}
+        for n in (
+            "core_dump_config.txt", ".corefile", "core.", "core", "hardcore.1",
+            "core.18277.gz", "core.18277",
+        )
+    ]
+    assert [c["name"] for c in _find_core_dump_candidates(listing)] == ["core.18277"]
+
+
+def test_core_dump_probe_orders_candidates_largest_first() -> None:
+    """Multiple cores are ordered by size so the offer names the usable one."""
+    from askpanda_atlas.log_analysis_impl import _find_core_dump_candidates
+
+    listing = [
+        {"relative_path": "core.1", "name": "core.1", "dirname": "",
+         "size_bytes": 0, "modification": ""},
+        {"relative_path": "core.2", "name": "core.2", "dirname": "",
+         "size_bytes": 2048, "modification": ""},
+        {"relative_path": "core.3", "name": "core.3", "dirname": "",
+         "size_bytes": 4096, "modification": ""},
+    ]
+    assert [c["name"] for c in _find_core_dump_candidates(listing)] == [
+        "core.3", "core.2", "core.1",
+    ]
+
+
+def test_core_dump_offer_only_for_looping_job_kill() -> None:
+    """A usable core on a non-looping failure is recorded but not offered.
+
+    The evidence keys stay populated so an explicit request still works; only
+    the proactive offer is narrowed.
+    """
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    ev = _build_core_dump_evidence(_core_listing(), 1305)
+
+    assert ev["core_dump_available"] is True
+    assert ev["core_dump_offer_md"] == ""
+
+
+def test_core_dump_offer_names_file_and_size() -> None:
+    """The offer carries the real filename and size, not an LLM paraphrase."""
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    offer = _build_core_dump_evidence(_core_listing(), 1150)["core_dump_offer_md"]
+
+    assert offer.startswith("\n\n")
+    assert "`core.18277`" in offer
+    assert "1.1 GB" in offer
+    assert "further core file" not in offer
+    assert offer.rstrip().endswith("Analyse it?")
+
+
+def test_core_dump_offer_mentions_additional_cores() -> None:
+    """With more than one usable core the offer says so rather than hiding them."""
+    from askpanda_atlas.log_analysis_impl import _build_core_dump_evidence
+
+    listing = _core_listing() + [
+        {"relative_path": "core.999", "name": "core.999", "dirname": "",
+         "size_bytes": 4096, "modification": ""},
+    ]
+    offer = _build_core_dump_evidence(listing, 1150)["core_dump_offer_md"]
+
+    assert "`core.18277`" in offer
+    assert "1 further core file present" in offer
+
+
+def test_core_dump_offer_suppressed_when_tool_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no analysis tool registered the probe reports but never offers.
+
+    This is the mirrored-plugin case: the ePIC copy sets
+    ``_CORE_DUMP_ANALYSIS_AVAILABLE`` to False, and an offer that cannot be
+    accepted must not reach the user.
+    """
+    import askpanda_atlas.log_analysis_impl as impl
+
+    monkeypatch.setattr(impl, "_CORE_DUMP_ANALYSIS_AVAILABLE", False)
+    ev = impl._build_core_dump_evidence(_core_listing(), 1150)
+
+    assert ev["core_dump_available"] is True
+    assert ev["core_dump_probe_state"] == "present"
+    assert ev["core_dump_offer_md"] == ""
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "expected"),
+    [
+        (0, "0 B"),
+        (225, "225 B"),
+        (999, "999 B"),
+        (1000, "1.0 kB"),
+        (454904, "454.9 kB"),
+        (1065033128, "1.1 GB"),
+        (2 * 10 ** 12, "2.0 TB"),
+    ],
+)
+def test_format_bytes(size_bytes: int, expected: str) -> None:
+    """Sizes are rendered in decimal units matching the job monitor's figures."""
+    from askpanda_atlas.log_analysis_impl import _format_bytes
+
+    assert _format_bytes(size_bytes) == expected
+
+
+def test_core_dump_evidence_reaches_tool_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe keys survive the full tool call for a looping-job kill.
+
+    Guards the wiring, not the probe: a helper that is written but never
+    called is the failure mode this catches.
+    """
+    looping_job = {
+        **_SAMPLE_JOB_PAYLOAD,
+        "jobstatus": "failed",
+        "piloterrorcode": 1150,
+        "piloterrordiag": "Looping job killed by pilot",
+    }
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_metadata",
+        lambda job_id, base_url, timeout: _make_metadata_response(looping_job),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_log_text",
+        lambda job_id, filename, base_url, timeout: (
+            "pilot log body without a traceback\n"
+        ),
+    )
+    monkeypatch.setattr(
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        lambda job_id, base_url, timeout: _core_listing(),
+    )
+
+    ev = _unpack(
+        asyncio.run(panda_log_analysis_tool.call({"job_id": 7263525363}))
+    )["evidence"]
+
+    assert ev["core_dump_probe_state"] == "present"
+    assert ev["core_dump_available"] is True
+    assert ev["core_dump_total_bytes"] == 1065033128
+    assert "`core.18277`" in ev["core_dump_offer_md"]
+
+
 def test_classify_failure_setup_release_not_found() -> None:
     """setup_release_not_found is classified when setup log excerpt is used."""
     setup_excerpt = (
@@ -767,6 +1234,45 @@ def _index_with_zero_payload() -> dict[str, int]:
     }
 
 
+def _listing_stub(
+    sizes: dict[str, int] | None,
+    modification: str = "2026-08-19 01:42:51",
+) -> Callable[[int, str, int], list[dict[str, Any]] | None]:
+    """Build a ``_fetch_file_listing`` replacement from a ``{name: size}`` map.
+
+    The production seam returns normalised listing records rather than a size
+    index, so tests that want to control which files appear non-empty supply
+    the map they care about and let this helper expand it into root-level
+    records.
+
+    Args:
+        sizes: Mapping of root-level filename to size in bytes, or ``None``
+            to simulate an unavailable listing (the fail-open case).
+        modification: UTC timestamp string applied to every record.
+
+    Returns:
+        A callable with the ``(job_id, base_url, timeout)`` signature of
+        :func:`~askpanda_atlas.log_analysis_impl._fetch_file_listing`.
+    """
+    def _stub(
+        job_id: int, base_url: str, timeout: int,
+    ) -> list[dict[str, Any]] | None:
+        if sizes is None:
+            return None
+        return [
+            {
+                "relative_path": name,
+                "name": name,
+                "dirname": "",
+                "size_bytes": size,
+                "modification": modification,
+            }
+            for name, size in sizes.items()
+        ]
+
+    return _stub
+
+
 def test_setup_log_checked_before_payload_for_code_1305(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -795,10 +1301,10 @@ def test_setup_log_checked_before_payload_for_code_1305(
         "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": 100, "payload.stdout": 100, "payload.stderr": 0
-        },
+        }),
     )
 
     asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -835,8 +1341,8 @@ def test_setup_error_skips_payload_download(
         "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub(_index_with_zero_payload()),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -870,8 +1376,8 @@ def test_setup_error_excerpt_used_as_primary_log(
         ),
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub(_index_with_zero_payload()),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -908,12 +1414,12 @@ def test_zero_length_payload_files_not_downloaded(
         "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": len(_SETUP_LOG_CLEAN),
             "payload.stdout": 0,
             "payload.stderr": 0,
-        },
+        }),
     )
 
     asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -954,12 +1460,12 @@ def test_setup_log_nonempty_no_error_falls_through_to_payload(
         "askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": len(_SETUP_LOG_CLEAN),
             "payload.stdout": 100,
             "payload.stderr": 0,
-        },
+        }),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -1000,8 +1506,8 @@ def test_file_index_unavailable_falls_through_to_old_behavior(
     )
     # Index unavailable — None → fail-open
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: None,
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub(None),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -1025,8 +1531,8 @@ def test_setup_log_url_in_links_md(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub(_index_with_zero_payload()),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -1058,8 +1564,8 @@ def test_setup_log_url_absent_when_not_fetched(
         lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"pilotlog.txt": 500},
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"pilotlog.txt": 500}),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
@@ -1190,8 +1696,8 @@ def _analyse_job_7261310898(monkeypatch: pytest.MonkeyPatch) -> dict:
         lambda job_id, filename, base_url, timeout: _JOB_7261310898_PILOTLOG,
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"pilotlog.txt": len(_JOB_7261310898_PILOTLOG)},
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"pilotlog.txt": len(_JOB_7261310898_PILOTLOG)}),
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 7261310898}))
     return _unpack(result)["evidence"]
@@ -1285,8 +1791,8 @@ def test_job_7261310898_summary_mentions_exception(
         lambda job_id, filename, base_url, timeout: _JOB_7261310898_PILOTLOG,
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"pilotlog.txt": 5000},
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"pilotlog.txt": 5000}),
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 7261310898}))
     text = _unpack(result)["text"]
@@ -1312,8 +1818,8 @@ def test_pilot_version_falls_back_to_pilotid(
         lambda job_id, filename, base_url, timeout: "payload output\n",
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"payload.stdout": 20},
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"payload.stdout": 20}),
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 7261310898}))
     ev = _unpack(result)["evidence"]
@@ -1417,8 +1923,8 @@ def test_no_traceback_yields_false_evidence_keys(
         lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"pilotlog.txt": 500},
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"pilotlog.txt": 500}),
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
     ev = _unpack(result)["evidence"]
@@ -1465,11 +1971,11 @@ def test_payload_stderr_traceback_wins_over_stdout(
         "askpanda_atlas.log_analysis_impl._fetch_log_text", _fetch
     )
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "payload.stdout": len(stdout_text),
             "payload.stderr": len(stderr_text),
-        },
+        }),
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
     ev = _unpack(result)["evidence"]

@@ -354,6 +354,57 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # Bearer token for authenticating to a Bamboo HTTP server.
 # export MCP_BEARER_TOKEN=""
 
-# Timeout in seconds for MCP tool calls in the Streamlit sync client.
-# Large task status fetches can take 60-90 s for tasks with thousands of jobs.
-# export BAMBOO_MCP_CLIENT_TIMEOUT="120"
+# Timeouts in seconds for MCP tool calls.  These are two INDEPENDENT ceilings
+# on the same call and the lower one silently wins, so raising one alone has no
+# effect.  Both default to 300 s.
+#
+#   BAMBOO_MCP_CLIENT_TIMEOUT  client-side deadline on the call's future
+#   BAMBOO_MCP_HTTP_TIMEOUT    per-tool-call deadline on the HTTP transport
+#                              (not a connection timeout)
+#
+# Long-running tools need headroom under BOTH: large task status fetches take
+# 60-90 s for tasks with thousands of jobs, and a tool that fetches and analyses
+# a job's files takes longer still.  Pinning either below the default will cut
+# such a call short while the work continues server-side.
+# export BAMBOO_MCP_CLIENT_TIMEOUT="300"
+# export BAMBOO_MCP_HTTP_TIMEOUT="300"
+
+########################################
+# CORE-DUMP ANALYSIS (atlas.core_dump_analysis)
+########################################
+
+# Root directory for analysis workspaces.  Each job gets one directory here,
+# holding the reconstructed job tree, the core file, the gdb evidence and the
+# worker log.  /tmp is adequate on aipanda033.
+#
+# NOTHING IS DELETED, EVER — not partial downloads, not failed runs, not
+# superseded evidence.  Reaping belongs to a separate service script, so the
+# quota below is what stops this directory growing without bound.
+# export BAMBOO_CORE_ANALYSIS_ROOT="/tmp/bamboo/core-analysis"
+
+# How long a 'start' call waits inline before handing back a request ID.  An
+# analysis takes about a minute, so most calls return the full result in the
+# same turn and the caller never sees a handle.  Must stay comfortably below
+# BAMBOO_MCP_CLIENT_TIMEOUT above, which is the real ceiling.
+# export BAMBOO_CORE_ANALYSIS_INLINE_WAIT="120"
+
+# Age at which a run that is still not finished is declared failed.  This is
+# the backstop for a worker that is alive but wedged; a worker that has *died*
+# is detected at once from its pid and does not wait for this.
+# export BAMBOO_CORE_ANALYSIS_HARD_TIMEOUT="900"
+
+# Whole-container deadline passed to the analyzer as --container-timeout.  Well
+# below the analyzer's own 1800 s default, which assumes a patient CLI user
+# rather than an interactive session.
+# export BAMBOO_CORE_ANALYSIS_CONTAINER_TIMEOUT="600"
+
+# Byte ceiling for everything under BAMBOO_CORE_ANALYSIS_ROOT.  At or above it,
+# a new analysis is refused and reports what is being held.
+# export BAMBOO_CORE_ANALYSIS_MAX_BYTES="53687091200"
+
+# The analysis needs CVMFS and apptainer on the host: it reconstructs the job's
+# own ATLAS release container rather than using the host's gdb.  There is no
+# option to fall back to a local gdb, because a mismatched release resolves the
+# payload's symbols against the wrong binaries and produces a confident, wrong
+# answer.  Set ATLAS_LOCAL_ROOT_BASE if CVMFS is mounted somewhere unusual.
+# export ATLAS_LOCAL_ROOT_BASE="/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, Callable
 
 import pytest
 
@@ -93,6 +94,7 @@ _SAMPLE_PILOT_LOG = "\n".join([
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _unpack(result: list) -> dict:
     """Deserialise the JSON-wrapped MCPContent returned by the tool.
 
@@ -120,6 +122,7 @@ def _make_metadata_response(job: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Unit tests: pure functions
 # ---------------------------------------------------------------------------
+
 
 def test_classify_failure_stagein_timeout() -> None:
     """Stage-in timeout is correctly classified."""
@@ -252,6 +255,7 @@ def test_extract_log_excerpt_uses_char_tail_for_payload() -> None:
 # Integration tests: full tool.call() with HTTP mocked
 # ---------------------------------------------------------------------------
 
+
 def test_log_analysis_success_with_log(monkeypatch: pytest.MonkeyPatch) -> None:
     """Successful analysis: metadata fetched, log downloaded, failure classified."""
     monkeypatch.setattr(
@@ -378,12 +382,12 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
     # setup.stdout confirmed zero-length in index → skipped by _file_is_nonempty;
     # payload files are non-empty so they are downloaded as expected.
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": 0,
             "payload.stdout": 50000,
             "payload.stderr": 200,
-        },
+        }),
     )
 
     import json
@@ -592,6 +596,7 @@ def test_get_definition() -> None:
 #             _fetch_file_index, classify_failure setup pattern)
 # ---------------------------------------------------------------------------
 
+
 def test_setup_log_has_error_matches_no_release() -> None:
     """_setup_log_has_error returns True for 'No matched release is found'."""
     from askpanda_epic.log_analysis_impl import _setup_log_has_error
@@ -753,6 +758,45 @@ def _index_with_zero_payload() -> dict[str, int]:
     }
 
 
+def _listing_stub(
+    sizes: dict[str, int] | None,
+    modification: str = "2026-08-19 01:42:51",
+) -> Callable[[int, str, int], list[dict[str, Any]] | None]:
+    """Build a ``_fetch_file_listing`` replacement from a ``{name: size}`` map.
+
+    The production seam returns normalised listing records rather than a size
+    index, so tests that want to control which files appear non-empty supply
+    the map they care about and let this helper expand it into root-level
+    records.
+
+    Args:
+        sizes: Mapping of root-level filename to size in bytes, or ``None``
+            to simulate an unavailable listing (the fail-open case).
+        modification: UTC timestamp string applied to every record.
+
+    Returns:
+        A callable with the ``(job_id, base_url, timeout)`` signature of
+        :func:`~askpanda_epic.log_analysis_impl._fetch_file_listing`.
+    """
+    def _stub(
+        job_id: int, base_url: str, timeout: int,
+    ) -> list[dict[str, Any]] | None:
+        if sizes is None:
+            return None
+        return [
+            {
+                "relative_path": name,
+                "name": name,
+                "dirname": "",
+                "size_bytes": size,
+                "modification": modification,
+            }
+            for name, size in sizes.items()
+        ]
+
+    return _stub
+
+
 def test_setup_log_checked_before_payload_for_code_1305(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -781,10 +825,10 @@ def test_setup_log_checked_before_payload_for_code_1305(
         "askpanda_epic.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": 100, "payload.stdout": 100, "payload.stderr": 0
-        },
+        }),
     )
 
     asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -821,8 +865,8 @@ def test_setup_error_skips_payload_download(
         "askpanda_epic.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub(_index_with_zero_payload()),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -856,8 +900,8 @@ def test_setup_error_excerpt_used_as_primary_log(
         ),
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub(_index_with_zero_payload()),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -894,12 +938,12 @@ def test_zero_length_payload_files_not_downloaded(
         "askpanda_epic.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": len(_SETUP_LOG_CLEAN),
             "payload.stdout": 0,
             "payload.stderr": 0,
-        },
+        }),
     )
 
     asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -940,12 +984,12 @@ def test_setup_log_nonempty_no_error_falls_through_to_payload(
         "askpanda_epic.log_analysis_impl._fetch_log_text", _capture_log
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub({
             "setup.stdout": len(_SETUP_LOG_CLEAN),
             "payload.stdout": 100,
             "payload.stderr": 0,
-        },
+        }),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -986,8 +1030,8 @@ def test_file_index_unavailable_falls_through_to_old_behavior(
     )
     # Index unavailable — None → fail-open
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: None,
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub(None),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -1011,8 +1055,8 @@ def test_setup_log_url_in_links_md(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: _index_with_zero_payload(),
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub(_index_with_zero_payload()),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
@@ -1044,8 +1088,8 @@ def test_setup_log_url_absent_when_not_fetched(
         lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"pilotlog.txt": 500},
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"pilotlog.txt": 500}),
     )
 
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
@@ -1067,8 +1111,8 @@ def test_log_analysis_links_md_uses_panda_monitor_label(
         lambda job_id, filename, base_url, timeout: _SAMPLE_PILOT_LOG,
     )
     monkeypatch.setattr(
-        "askpanda_epic.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {"pilotlog.txt": 500},
+        "askpanda_epic.log_analysis_impl._fetch_file_listing",
+        _listing_stub({"pilotlog.txt": 500}),
     )
     result = asyncio.run(panda_log_analysis_tool.call({"job_id": 6799893074}))
     ev = _unpack(result)["evidence"]

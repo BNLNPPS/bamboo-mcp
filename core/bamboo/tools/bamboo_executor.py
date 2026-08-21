@@ -1384,6 +1384,7 @@ async def _execute_one_tool(
 _PRESENTATION_KEYS: frozenset[str] = frozenset({
     "links_md",
     "code_analysis_offer_md",
+    "core_dump_offer_md",
 })
 
 
@@ -1518,6 +1519,260 @@ def _inject_doc_topics(plan: Plan, question: str, plugin_id: str) -> None:
         tc.arguments["topic"] = topic
 
 
+# ---------------------------------------------------------------------------
+# Core-dump synthesis
+#
+# Unlike every other tool, core_dump_analysis does not hand its evidence to a
+# _SYSTEM_* prompt for prose.  The analyzer ships its own prompt pair and its
+# own response schema, and the model's JSON must pass through
+# reconcile_llm_analysis before anyone reads it.  That whole pipeline lives
+# here rather than in the tool because the tool runs inside a live event loop,
+# where the analyzer's own LLM path refuses to run — see the module docstring
+# of askpanda_atlas.core_dump_analysis_impl.
+# ---------------------------------------------------------------------------
+
+#: Entry-point name of the ATLAS core-dump tool.  The MCP server overwrites a
+#: plugin tool's internal ``name`` with its entry-point key, so this is the only
+#: name that resolves — ``core_dump_analysis`` does not.
+_CORE_DUMP_TOOL: str = "atlas.core_dump_analysis"
+
+#: Token ceiling for core-dump synthesis.  Higher than the 2048 used for prose
+#: because the response is a JSON object with several list-valued fields.
+_CORE_DUMP_MAX_TOKENS: int = 3000
+
+
+def _core_dump_evidence() -> dict[str, Any]:
+    """Return the evidence dict from the last core-dump analysis call.
+
+    Unwraps exactly one layer.  ``_last_evidence_store`` holds what
+    :func:`unpack_tool_result` produced — ``{"evidence": {...}, "text": ...}``
+    — so one ``.get("evidence")`` reaches the dict.  The double unwrap
+    documented for ``bamboo_last_evidence`` applies to *that* tool's response,
+    which wraps this store entry a second time; applying it here would yield
+    ``None``.
+
+    Returns:
+        The evidence dict, or an empty dict when nothing is stored.
+    """
+    stored = _last_evidence_store.get(_CORE_DUMP_TOOL, {})
+    if not isinstance(stored, dict):
+        return {}
+    evidence = stored.get("evidence", stored)
+    return evidence if isinstance(evidence, dict) else {}
+
+
+def _core_dump_progress_text() -> str:
+    """Return the tool's own summary line for the last core-dump call.
+
+    Args:
+        None.
+
+    Returns:
+        The ``text`` field of the stored payload, or an empty string.
+    """
+    stored = _last_evidence_store.get(_CORE_DUMP_TOOL, {})
+    if not isinstance(stored, dict):
+        return ""
+    return str(stored.get("text", ""))
+
+
+def _bullet_list(value: Any) -> str:
+    """Render a list-valued analysis field as Markdown bullets.
+
+    Args:
+        value: The field value; non-list values and empty lists yield "".
+
+    Returns:
+        Markdown bullet lines, or an empty string.
+    """
+    if not isinstance(value, list):
+        return ""
+    items = [str(item).strip() for item in value if str(item).strip()]
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _render_core_dump_markdown(
+    analysis: dict[str, Any],
+    evidence: dict[str, Any],
+) -> str:
+    """Render a reconciled core-dump analysis as Markdown.
+
+    The analyzer's own :func:`render_report` is deliberately not reused: its
+    docstring names it the CLI's fixed-width presentation and tells embedders
+    to render from the dicts directly, and its 78-character rules read badly in
+    a chat surface.
+
+    Args:
+        analysis: The reconciled analysis dict, following the analyzer's
+            ``RESPONSE_SCHEMA``.
+        evidence: The tool's own evidence dict, for the monitor link and the
+            acquisition footnote.
+
+    Returns:
+        Markdown body text.
+    """
+    parts: list[str] = []
+    verdict = str(analysis.get("verdict") or "").strip()
+    if verdict:
+        parts.append(f"**{verdict}**")
+
+    classification = str(analysis.get("classification") or "undetermined")
+    confidence = str(analysis.get("confidence") or "unknown")
+    reason = str(analysis.get("confidence_reason") or "").strip()
+    line = f"Classification: `{classification}` (confidence: {confidence})"
+    parts.append(f"{line} — {reason}" if reason else line)
+
+    for title, key in (
+        ("Likely cause", "likely_cause"),
+        ("Busy threads", "busy_threads"),
+        ("Explanation", "explanation"),
+    ):
+        body = str(analysis.get(key) or "").strip()
+        if body:
+            parts.append(f"### {title}\n\n{body}")
+
+    culprit = str(analysis.get("culprit_component") or "").strip()
+    if culprit and culprit.lower() != "unknown":
+        parts.append(f"Most likely responsible component: `{culprit}`")
+
+    for title, key in (
+        ("Supporting evidence", "supporting_evidence"),
+        ("Limitations", "limitations"),
+        ("Next steps", "next_steps"),
+    ):
+        rendered = _bullet_list(analysis.get(key))
+        if rendered:
+            parts.append(f"### {title}\n\n{rendered}")
+
+    acquisition = evidence.get("acquisition")
+    if isinstance(acquisition, dict):
+        fetched = len(acquisition.get("fetched") or [])
+        skipped = int(acquisition.get("skipped_count") or 0)
+        note = f"Reconstructed from {fetched} job file(s)"
+        if skipped:
+            note += f"; {skipped} file(s) were skipped"
+        parts.append(f"_{note}. Analyzer {evidence.get('analyzer_version', '?')}._")
+
+    monitor_url = evidence.get("monitor_url")
+    if monitor_url:
+        parts.append(f"[Job {evidence.get('job_id')} in BigPanDA]({monitor_url})")
+
+    return "\n\n".join(parts)
+
+
+def _append_acquisition_warnings(
+    analysis: dict[str, Any],
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Fold acquisition warnings into the analysis limitations.
+
+    Done here, deterministically and **after** reconciliation, rather than by
+    showing the warnings to the model: the ``code_analysis_offer_md`` precedent
+    is that anything the user must be able to trust is appended programmatically
+    rather than routed through an LLM that may paraphrase or drop it.
+
+    Args:
+        analysis: The reconciled analysis dict; mutated in place.
+        evidence: The tool's evidence dict, whose ``acquisition.warnings``
+            records what the fetch layer could not do.
+
+    Returns:
+        The same ``analysis`` dict, for chaining.
+    """
+    acquisition = evidence.get("acquisition")
+    if not isinstance(acquisition, dict):
+        return analysis
+    warnings = [str(w) for w in (acquisition.get("warnings") or []) if str(w).strip()]
+    if not warnings:
+        return analysis
+    existing = analysis.get("limitations")
+    if not isinstance(existing, list):
+        existing = []
+    analysis["limitations"] = [*existing, *warnings]
+    return analysis
+
+
+async def _synthesise_core_dump(
+    plan: Plan,
+    called_tool_names: list[str],
+) -> str | None:
+    """Synthesise an answer from the last core-dump analysis, or bypass.
+
+    A run that has not reached ``complete`` has no evidence to reason about, so
+    its deterministic progress or failure line is returned verbatim: an LLM
+    call there could only paraphrase a status message, and at worst would
+    invent findings for an analysis that has not produced any.
+
+    On ``complete`` the analyzer's own prompt pair drives the call and
+    :func:`reconcile_llm_analysis` post-processes the result.  That call is not
+    optional — it is what stops the model reading EventLoop completion markers
+    as evidence that a looping job exited normally.
+
+    Args:
+        plan: The executed plan, used only for the tracing span.
+        called_tool_names: Tools called in this plan, for the span and the
+            prompt log.
+
+    Returns:
+        Markdown answer text, or ``None`` to fall through to normal synthesis
+        when the evidence is unusable and the generic path may do better.
+    """
+    evidence = _core_dump_evidence()
+    if not evidence:
+        return None
+
+    state = str(evidence.get("state") or "")
+    if state != "complete":
+        # Covers queued/preparing/downloading/analyzing and failed alike: each
+        # already carries a deterministic, user-ready line from the tool.
+        return _core_dump_progress_text() or None
+
+    raw_evidence = evidence.get("core_evidence")
+    if not isinstance(raw_evidence, dict):
+        logger.warning("core_dump_analysis reported complete with no core_evidence")
+        return None
+
+    # Deferred: bamboo core must not import an ATLAS plugin module at import
+    # time, or core becomes unusable wherever the plugin is not installed.
+    try:
+        from askpanda_atlas._core_dump_analyzer import (  # noqa: PLC0415
+            build_system_prompt,
+            build_user_prompt,
+            core_evidence_from_dict,
+            extract_json_object,
+            reconcile_llm_analysis,
+        )
+    except ImportError as exc:
+        logger.warning("core-dump synthesis unavailable: %s", exc)
+        return None
+
+    # core_evidence has already been through enforce_global_budget at 50 000
+    # chars inside the tool.  Shrinking it again here would silently discard
+    # thread groups the first pass decided were worth keeping.
+    core_evidence = core_evidence_from_dict(raw_evidence)
+    mode = str(evidence.get("failure_mode") or "hang")
+    system = build_system_prompt(mode)
+    user = build_user_prompt(core_evidence)
+
+    async with span(EVENT_SYNTHESIS, tool="bamboo_executor",
+                    tools=called_tool_names, route=plan.route.value,
+                    mode=mode):
+        response = await call_llm(
+            system, user, None,
+            max_tokens=_CORE_DUMP_MAX_TOKENS,
+            tools_used=called_tool_names,
+        )
+
+    analysis = extract_json_object(response)
+    if analysis is None:
+        logger.warning("core-dump synthesis returned no parsable JSON object")
+        return None
+
+    analysis = reconcile_llm_analysis(core_evidence, analysis)
+    analysis = _append_acquisition_warnings(analysis, evidence)
+    return _render_core_dump_markdown(analysis, evidence)
+
+
 async def execute_plan(
     plan: Plan,
     question: str,
@@ -1597,6 +1852,13 @@ async def execute_plan(
                 pass  # emit span for tracing consistency
             return text_content(_cgsim_summary)
 
+    # Core-dump synthesis: the analyzer owns its own prompt pair and returns
+    # JSON, not prose, so it cannot go through _build_synthesis_prompt.
+    if _CORE_DUMP_TOOL in called_tool_names:
+        rendered = await _synthesise_core_dump(plan, called_tool_names)
+        if rendered is not None:
+            return text_content(rendered)
+
     system, user = _build_synthesis_prompt(
         called_tool_names, evidence_parts, question, errors,
         original_question=original_question,
@@ -1627,11 +1889,11 @@ async def execute_plan(
     # so the TUI renders them as the closing block.
     if "panda_log_analysis" in called_tool_names:
         body = _strip_llm_links_section(body)
-        offer = _log_analysis_offer_md()
-        # Belt and braces alongside _strip_presentation_keys: if the LLM
-        # produced the offer anyway, do not append a second copy.
-        if offer and offer.strip() not in body:
-            body += offer
+        for offer in (_log_analysis_offer_md(), _log_analysis_core_dump_offer_md()):
+            # Belt and braces alongside _strip_presentation_keys: if the LLM
+            # produced the offer anyway, do not append a second copy.
+            if offer and offer.strip() not in body:
+                body += offer
         body += _log_analysis_links_md()
 
     return text_content(body + _db_footnote(called_tool_names))
@@ -1744,6 +2006,60 @@ def _log_analysis_offer_md() -> str:
     return str(evidence.get("code_analysis_offer_md", ""))
 
 
+def _log_analysis_core_dump_offer_md() -> str:
+    """Return the pre-built core-dump follow-up offer from the last log analysis.
+
+    Built deterministically in ``log_analysis_impl._build_core_dump_offer``
+    from the job-log listing, and deliberately narrow: it is emitted only for a
+    looping-job kill (pilot code 1150) that left a non-empty core file.  Like
+    ``code_analysis_offer_md`` it is a presentation key, hidden from the
+    synthesis LLM and appended here instead, so the file name and size the user
+    sees are the listing's own rather than the model's recollection.
+
+    Returns:
+        Markdown offer string, or an empty string when the last failure had no
+        analysable core dump.
+    """
+    stored = _last_evidence_store.get("panda_log_analysis", {})
+    evidence = stored.get("evidence", stored)
+    if not isinstance(evidence, dict):
+        return ""
+    return str(evidence.get("core_dump_offer_md", ""))
+
+
+def get_last_core_dump_offer() -> dict[str, Any] | None:
+    """Return the stored core-dump offer from the last log analysis, if any.
+
+    This is the gate for ``bamboo_answer``'s affirmative follow-up rule: a bare
+    "yes" only means "analyse the core dump" when an offer to do so is actually
+    outstanding.  The job ID is recovered from the evidence rather than from
+    the user's message, since the affirmative itself carries no ID.
+
+    The offer string is the gate rather than ``core_dump_available``, because
+    ``_build_core_dump_offer`` applies conditions this function should not
+    duplicate — the pilot error code, a non-empty core, and whether the tool is
+    installed at all.  An empty string means no offer was made, whatever the
+    reason.
+
+    Returns:
+        ``{"job_id": int, "offer_md": str}`` when the last ``panda_log_analysis``
+        offered a core-dump analysis and recorded a usable job ID; ``None``
+        otherwise.
+    """
+    stored = _last_evidence_store.get("panda_log_analysis", {})
+    evidence = stored.get("evidence", stored)
+    if not isinstance(evidence, dict):
+        return None
+    offer = str(evidence.get("core_dump_offer_md", ""))
+    if not offer.strip():
+        return None
+    try:
+        job_id = int(evidence["job_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"job_id": job_id, "offer_md": offer}
+
+
 def _compact_json(obj: Any, limit: int = 12000) -> str:
     """Compact JSON for prompts, bounded to ``limit`` characters.
 
@@ -1770,6 +2086,20 @@ __all__ = [
     "retrieve_rag_context",
     "_pick_synthesis_prompt",
     "get_last_pilot_monitoring_evidence",
+    "get_last_core_dump_offer",
+    "_CORE_DUMP_TOOL",
+    "_render_core_dump_markdown",
+    "_append_acquisition_warnings",
+    "_synthesise_core_dump",
+    # Private, but reached by name from outside this module (tests, and
+    # bamboo_answer for the evidence store).  Listing them keeps the export
+    # surface honest: a py.typed marker would otherwise make pyright reject
+    # exactly these while accepting their neighbours, which reads as a bug in
+    # the caller rather than as a missing export.
+    "_core_dump_evidence",
+    "_log_analysis_core_dump_offer_md",
+    "_strip_presentation_keys",
+    "_last_evidence_store",
     "_SYSTEM_LOG_ANALYSIS",
     "_SYSTEM_PILOT_SOURCE",
     "_SYSTEM_CODE_QUERY",

@@ -73,6 +73,47 @@ def _merge_stdio_env(stdio_env: dict[str, str] | None) -> dict[str, str] | None:
 
 TransportType = Literal["stdio", "http"]
 
+#: Default per-call HTTP transport timeout, in seconds, overridable with
+#: ``BAMBOO_MCP_HTTP_TIMEOUT``.
+#:
+#: This is a per-tool-call deadline, not a connection timeout, so it has to
+#: accommodate the slowest tool rather than the typical one.  It was 30 s, which
+#: predates any long-running tool; ``atlas.core_dump_analysis`` waits inline for
+#: a gdb run over a multi-gigabyte core and would have been killed mid-call on
+#: the HTTP deployment while the detached worker carried on, leaving the user a
+#: transport error instead of an answer.
+#:
+#: Keep this comfortably above ``BAMBOO_CORE_ANALYSIS_INLINE_WAIT`` plus the
+#: synthesis LLM call, and keep ``BAMBOO_MCP_CLIENT_TIMEOUT`` (the client-side
+#: future deadline, default 120 s) above *this* — the two are independent
+#: ceilings and the lower one wins.
+DEFAULT_HTTP_TIMEOUT_S: float = 300.0
+
+#: Default client-side deadline, in seconds, for waiting on a single MCP call,
+#: overridable with ``BAMBOO_MCP_CLIENT_TIMEOUT``.  Kept equal to
+#: :data:`DEFAULT_HTTP_TIMEOUT_S` because the two are independent ceilings on
+#: the same call and the lower one silently wins.
+DEFAULT_CLIENT_TIMEOUT_S: float = 300.0
+
+
+def _default_http_timeout() -> float:
+    """Resolve the HTTP transport timeout from the environment.
+
+    Returns:
+        ``BAMBOO_MCP_HTTP_TIMEOUT`` as a float, or
+        :data:`DEFAULT_HTTP_TIMEOUT_S` when it is unset or unparsable.  An
+        unparsable value falls back rather than raising, so a typo in a
+        deployment environment cannot stop the client from starting.
+    """
+    raw = os.environ.get("BAMBOO_MCP_HTTP_TIMEOUT", "")
+    if not raw.strip():
+        return DEFAULT_HTTP_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_HTTP_TIMEOUT_S
+    return value if value > 0 else DEFAULT_HTTP_TIMEOUT_S
+
 
 @dataclass
 class MCPServerConfig:
@@ -86,7 +127,8 @@ class MCPServerConfig:
         http_url: Streamable HTTP endpoint URL (e.g., "http://localhost:8000/mcp").
         http_headers: Optional headers (auth, etc.) for HTTP transport.
         terminate_on_close: If True, sends DELETE to terminate session on close.
-        http_timeout_s: HTTP client timeout (seconds).
+        http_timeout_s: Per-call HTTP client timeout (seconds).  Defaults from
+            ``BAMBOO_MCP_HTTP_TIMEOUT``; see :data:`DEFAULT_HTTP_TIMEOUT_S`.
     """
 
     transport: TransportType = "stdio"
@@ -100,7 +142,7 @@ class MCPServerConfig:
     http_url: str = "http://localhost:8000/mcp"
     http_headers: dict[str, str] | None = None
     terminate_on_close: bool = True
-    http_timeout_s: float = 30.0
+    http_timeout_s: float = field(default_factory=_default_http_timeout)
 
 
 class MCPAsyncClient:
@@ -327,10 +369,16 @@ class MCPClientSync:
         """
         # run_coroutine_threadsafe expects a coroutine; if a Future is passed
         # (unlikely in our usage), forward it as-is; otherwise use it directly.
-        # Timeout for waiting on the result. Defaults to 120 s — large task
-        # status fetches from BigPanDA can take 60–90 s for tasks with many
-        # thousands of jobs. Override with BAMBOO_MCP_CLIENT_TIMEOUT (seconds).
-        _timeout = int(os.environ.get("BAMBOO_MCP_CLIENT_TIMEOUT", "120"))
+        # Timeout for waiting on the result. Override with
+        # BAMBOO_MCP_CLIENT_TIMEOUT (seconds).
+        #
+        # This is the outer of two independent ceilings on a single tool call:
+        # this future deadline and the transport's own http_timeout_s. The lower
+        # one wins, so raising only one of them has no effect. It was 120 s,
+        # sized for large BigPanDA task fetches (60–90 s for tasks with many
+        # thousands of jobs); a long-running tool that waits inline, plus the
+        # planner and synthesis LLM calls around it, does not fit in that.
+        _timeout = int(os.environ.get("BAMBOO_MCP_CLIENT_TIMEOUT", str(int(DEFAULT_CLIENT_TIMEOUT_S))))
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
         try:
             return fut.result(timeout=_timeout)

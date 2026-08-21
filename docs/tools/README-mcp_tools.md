@@ -63,6 +63,7 @@ These tools fetch and analyse PanDA Pilot source code from GitHub.
 | Tool | Document | Description |
 |---|---|---|
 | `pilot_source_analysis` | [pilot_source_analysis.md](pilot_source_analysis.md) | Traceback-driven analysis — fetches pilot3 functions named in a job failure exception. |
+| `atlas.core_dump_analysis` | [core_dump_analysis.md](core_dump_analysis.md) | **ATLAS only.** gdb against a failed job's core dump inside the matching release container; answers what the payload was doing when it was killed. |
 | `code_query` | [code_query.md](code_query.md) | **Superuser.** On-demand fetch of any source file or function from a configurable repository; targeted Q&A, algorithm explanation, Mermaid diagrams. |
 
 ---

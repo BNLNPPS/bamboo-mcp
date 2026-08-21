@@ -4,9 +4,193 @@ All notable changes to Bamboo are documented here.
 
 ---
 
-## [Unreleased]
+## v1.0.8 — 2026-08-20
+
+### Added
+- **Core-dump acquisition layer**
+  (`packages/askpanda_atlas/askpanda_atlas/_job_prep.py`, new). Reconstructs a
+  PanDA job directory from BigPanDA's unauthenticated media path so the vendored
+  analyzer can run against it. `select_files_for_fetch()` is pure policy and
+  mirrors the analyzer's own `discover_job_logs` rules against the *listing*, so
+  the rebuilt directory contains what discovery would have chosen and nothing
+  else — on the reference looping job that is 774 kB out of a 119 MB tarball,
+  with five copies of `output.root`, 50 cmake modules under `workDir/usr`, and
+  the pilot log all skipped and each recorded in `FetchPlan.skipped` with its
+  reason.
+
+  Three properties are load-bearing and each is pinned by a test:
+
+  - **Media URLs are constructed, never read from `media_link`.** BigPanDA omits
+    the `dirname`/`name` separator for nested entries, so its own link for
+    `workDir` + `in.txt` is `.../workDirin.txt`. The link is correct only when
+    `dirname` is empty, which is exactly the case where it adds nothing.
+  - **Modification times are restored with `os.utime()` from the listing,
+    parsed as UTC.** For a looping job the strongest deterministic observation
+    is how long the payload had been silent when the core was captured, and it
+    is computed purely from mtimes. A directory rebuilt with "now" as every
+    timestamp loses that observation *silently* — the analysis still runs and
+    simply omits it. The round-trip test therefore pins the reference value
+    exactly (7774.0 s / `"2h 09m 34s"`) rather than within a tolerance, and was
+    verified to fail when `os.utime()` is removed.
+  - **The `workDir` recency window is anchored on the payload streams, not the
+    core.** A looping job's payload is silent for hours before the core is
+    written, so a window measured backwards from the core discards precisely the
+    files that were live when the payload stopped. Empty streams are excluded
+    from the anchor: a zero-length `payload.stderr` carries no activity
+    information and would move the cutoff for no reason.
+
+  `_find_core_dump_candidates` is imported from `log_analysis_impl` rather than
+  reimplemented, so the core that gets analysed is necessarily the one the probe
+  named when it offered the analysis.
+
+- **Uncached binary media primitives**
+  (`packages/askpanda_atlas/askpanda_atlas/_cache.py`). `head_remote_file()` for
+  authoritative size, byte-range support and modification time; `stream_to_file()`
+  for streaming a core straight to disk. Neither touches the cache store: routing
+  a gigabyte-scale core through `cached_fetch_log()` would decode it into a `str`
+  via `resp.text` and pin it under `LOG_TTL` (`math.inf`) for the lifetime of the
+  process.
+
+  Three guards, each answering an observed failure mode. A `text/html` body is
+  rejected **before any byte is written** — the SSO-gated endpoint answers an
+  unauthenticated request with an HTTP **200** login page, so the status code
+  alone cannot distinguish it from success and `curl -f` does not catch it. The
+  transferred length is verified against the expected size, because a short
+  transfer that ends cleanly is otherwise indistinguishable from a complete one.
+  Bytes land in `<dest>.part` and are renamed onto the destination only once both
+  guards pass, so the real path never exists in a truncated state. A failed
+  transfer deliberately keeps its `.part` file: it is the input to a resumed
+  retry, and nothing in this package deletes files.
+
+  Resume support is opt-in and refuses to engage where it would be unsafe —
+  without a known final size a partial file cannot be told from a complete one,
+  and a server that answers **200** to a `Range` request has sent the whole body,
+  so the carried-over prefix is discarded rather than appended to (which would
+  silently produce a corrupt file of plausible length).
+
+- **Core-dump analysis routing, synthesis and documentation** — step 5, the
+  final step of the core-dump work. Registers `atlas.core_dump_analysis` at the
+  five points a plugin tool must appear, and adds the synthesis path the tool
+  itself deliberately does not have.
+
+  **Synthesis lives in `bamboo_executor`, not in the tool.**
+  `_complete_via_bamboo` refuses to run inside a live event loop and its own
+  error text names the alternative: collect with `--no-llm`, synthesise through
+  the caller's provider stack. `_synthesise_core_dump()` is that caller. It is
+  the only tool whose evidence bypasses `_build_synthesis_prompt` entirely,
+  because the analyzer ships its own prompt pair and its own response schema and
+  returns JSON rather than prose.
+
+  Four properties are load-bearing:
+
+  - **A non-terminal run is answered with its own progress line, no LLM call.**
+    There is no evidence to reason about while a run is still downloading; an
+    LLM call there could only paraphrase a status message, and at worst would
+    invent findings for an analysis that has not produced any. Follows the
+    `_try_cric_direct_format` and cgsim-summary bypass precedents.
+  - **`reconcile_llm_analysis()` is always called on the model output.** It is
+    what stops the model reading EventLoop completion markers as evidence that
+    a looping payload exited normally — those markers describe event-processing
+    state, not payload exit.
+  - **`acquisition.warnings` are appended to `analysis["limitations"]` after
+    reconciliation**, deterministically, never through the model. The ordering
+    is not cosmetic: `reconcile_llm_analysis` drops list entries that read as
+    claims of normal job success, so appending first would let a legitimate
+    acquisition warning be filtered back out. Verified by mutation — swapping
+    the two lines fails exactly one test.
+  - **`core_evidence` is not shrunk a second time.** It has already been through
+    `enforce_global_budget` at 50 000 chars inside the tool; a second pass would
+    discard thread groups the first pass decided were worth keeping.
+
+  The analyzer imports are deferred inside the function, so bamboo core stays
+  importable wherever the ATLAS plugin is not installed. `render_report` is
+  deliberately not reused — its own docstring names it the CLI's fixed-width
+  presentation and tells embedders to render from the dicts directly.
+
+  **Routing: two entry points, in two different layers.** Rule 1c (explicit
+  request naming a job) is a `_build_deterministic_plan` rule, ahead of rule 1
+  because "analyse the core dump of job X" independently matches
+  `_is_log_analysis_request`. Rule 1d (a bare affirmative accepting the stored
+  offer) is a `_route` branch instead, because both layers below it would
+  consume the affirmative first: `_is_ack` matches "ok", "okay", "great" and
+  "perfect", and the topic guard rewrites content-free follow-ups before the
+  deterministic planner sees them. The promptlog fast path sits early for
+  exactly this reason. Verified by mutation — moving rule 1d after the social
+  intercept fails exactly one test.
+
+  Rule 1c passes `mode="auto"` since an explicit request may name any job; rule
+  1d pins `mode="hang"`, since the offer is only ever made for a looping-job
+  kill (pilot code 1150), which removes a metadata round trip and the failure
+  mode where that fetch fails and leaves the framing unresolved.
+
+  **"Why did job X hang" is deliberately not a rule 1c signal.** It is a
+  diagnosis request, and routing it straight to a multi-gigabyte core fetch
+  holding the single analysis slot is the wrong opening move for a question
+  `panda_log_analysis` usually answers outright — and when it does not, that
+  same log analysis emits the offer rule 1d catches. The expensive path is
+  reached by naming it or by accepting it, never by guessing.
+
+- **`tests/test_core_dump_routing.py`** (new, 39 tests) and
+  **`tests/test_core_dump_synthesis.py`** (new, 19 tests). Rule 1d is tested
+  end-to-end through `_route` rather than at the plan layer, because a plan-layer
+  test would pass while the shipped path still answered "You're welcome".
+
+- **`packages/askpanda_atlas/tests/test_job_prep.py`** (new, 60 tests) and 16
+  further tests in `tests/test_cache.py`. Sockets are blocked by an autouse
+  fixture so any path reaching the real HTTP layer fails loudly instead of
+  falling through to a 403 and passing for the wrong reason.
 
 ### Fixed
+- **`core_dump_offer_md` was built but never reached the user.**
+  `log_analysis_impl._build_core_dump_evidence` has emitted the key since round
+  2, but it was absent from `_PRESENTATION_KEYS` and nothing appended it after
+  synthesis — so it was passed to the synthesis LLM as ordinary evidence. That
+  is precisely the failure the `code_analysis_offer_md` comment documents: a
+  ready-made offer string sitting in the model's input reliably beats an
+  instruction not to reproduce it, and the canonical copy is then appended on
+  top. The offer is now a presentation key, hidden from the model and appended
+  programmatically, so the file name and size the user sees are the listing's
+  own. Rule 1d had nothing to fire on until this was fixed.
+
+- **`packages/askpanda_atlas/askpanda_atlas/core_dump_worker.py` was missing its
+  leading underscore.** `WORKER_MODULE` names `askpanda_atlas._core_dump_worker`,
+  the test suite imports `_core_dump_worker`, and the module's own docstring
+  documents `python -m askpanda_atlas._core_dump_worker`. Every other private
+  module in the package keeps the underscore. Renamed. Left unfixed this fails
+  at runtime in `spawn_worker()` with no test catching it, because the suite
+  fails at import instead.
+
+- **`BambooAnswerTool._route` was at the `max-complexity = 15` ceiling exactly**,
+  so any added branch broke lint. The social intercept and rule 1d are now
+  grouped in `_run_early_intercepts()`, which also makes their ordering explicit
+  rather than incidental; `_route` drops to 14. Behaviour unchanged.
+
+- **`scripts/README-core_dump_analysis.md` now links to
+  `docs/tools/core_dump_analysis.md`.** The CLI README had carried a plain
+  sentence in place of the link while the tool doc did not yet exist.
+
+- **`test_saved_looping_cases_share_family_but_have_distinct_subtypes` read
+  fixtures from `/mnt/data/`**, a path outside the repository, so the test could
+  only pass on the machine that happened to hold the two saved evidence bundles
+  and failed everywhere else. Both bundles are now committed as
+  `packages/askpanda_atlas/tests/fixtures/core-analysis{7,9}.json` and the test
+  resolves them relative to its own location. They are the only regression
+  evidence for the `post-event-processing-xrootd-shutdown-hang` family and its
+  `poller-finalization` / `remote-file-close` subtypes, which are derived from
+  real validated looping jobs and cannot be reconstructed synthetically.
+
+- **`scripts/analyze_core_dump.py` pointed at `scripts/README-analyze_core_dump.md`**,
+  which has never existed; the file is `scripts/README-core_dump_analysis.md`.
+
+- **`bamboo_env_example.sh` still documented `BAMBOO_MCP_CLIENT_TIMEOUT="120"`**,
+  the pre-300 s default. Commented out, so nothing was pinned — but as
+  documentation it contradicted the code and would have restored the 30/120 s
+  ceiling for anyone who uncommented it. Now documents both
+  `BAMBOO_MCP_CLIENT_TIMEOUT` and `BAMBOO_MCP_HTTP_TIMEOUT` at 300 s, and states
+  that they are independent ceilings on the same call where the lower one
+  silently wins.
+
+### Fixed (earlier)
 - **ePIC delegation test's fetch mock had the pre-`repo` signature**
   (`packages/askpanda_epic/tests/test_pilot_source_analysis_epic.py`).
   `TypeError: _fetch() takes 2 positional arguments but 4 were given` — the ATLAS

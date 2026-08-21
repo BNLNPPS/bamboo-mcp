@@ -7,8 +7,15 @@ experiment operations, and CGSim distributed computing simulation.
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (June 2026):** core infrastructure is stable. Recent additions include
-> a multi-step AI Agent (`scripts/bamboo_agent.py`) for complex multi-hop queries,
+> **Status (August 2026):** core infrastructure is stable; latest release
+> **v1.0.8**. The newest addition is `atlas.core_dump_analysis`, which runs gdb
+> against a failed ATLAS job's core dump inside the matching release container
+> and reports what the payload was actually doing when it was killed — the
+> question log analysis structurally cannot answer, since a looping-job kill
+> happens precisely because the payload stopped producing output.
+>
+> Earlier additions include a multi-step AI Agent (`scripts/bamboo_agent.py`)
+> for complex multi-hop queries,
 > full OpenSearch self-observability — Bamboo logs every prompt/response turn and
 > can query its own logs for FAQ analysis, session replay, tool-usage analytics,
 > and per-model token cost breakdowns. Users can rate responses (1–5 stars) from
@@ -324,6 +331,8 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions, including code review question patterns and `code_query` examples |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
 | [`docs/tools/code_query.md`](docs/tools/code_query.md) | `code_query` tool reference — evidence pipeline, routing, LLM quality guidance, example sessions |
+| [`docs/tools/core_dump_analysis.md`](docs/tools/core_dump_analysis.md) | `atlas.core_dump_analysis` tool reference — execution model, synthesis boundary, routing rules 1c/1d |
+| [`scripts/README-core_dump_analysis.md`](scripts/README-core_dump_analysis.md) | `analyze_core_dump.py` CLI — gdb invocation, executable resolution, LLM backends |
 
 ---
 
@@ -342,6 +351,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 |---|---|---|
 | `atlas.task_status` | `panda_task_status` | Task metadata and job-level detail |
 | `atlas.log_analysis` | `panda_log_analysis` | Pilot/payload log download and failure classification |
+| `atlas.core_dump_analysis` | `atlas.core_dump_analysis` | gdb analysis of a failed job's core dump, in the matching ATLAS release container |
 | `atlas.doc_search` | `panda_doc_search` | Vector similarity search over ATLAS documentation |
 | `atlas.doc_bm25` | `panda_doc_bm25` | BM25 keyword search over ATLAS documentation |
 | `atlas.jobs_query` | `panda_jobs_query` | Natural language → SQL against the ingestion DuckDB |

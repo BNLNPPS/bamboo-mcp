@@ -46,7 +46,20 @@ piloterrordiag, exeerrorcode, exeerrordiag, taskbuffererrorcode,
 taskbuffererrordiag, ddmerrorcode, ddmerrordiag, starttime, endtime,
 duration, failure_type, log_url, log_excerpt, log_available,
 traceback_available, exception_type, exception_message, exception_frames,
-deepest_pilot_frame, traceback_count, pilot_version, code_analysis_offer_md.
+deepest_pilot_frame, traceback_count, pilot_version, code_analysis_offer_md,
+core_dump_probe_state, core_dump_available, core_dump_candidates,
+core_dump_total_bytes, core_dump_offer_md.
+
+Core-dump probe
+---------------
+The job-log listing fetched for the log downloads is also read for core files
+(``core.<pid>``), so a looping-job kill can be followed by a core-dump
+analysis without a second request.  The probe distinguishes a usable core from
+one truncated mid-write and from a looping-job kill that produced no core at
+all, because those mean different things to the person reading the answer.
+``core_dump_offer_md`` is emitted only for a looping-job kill with a usable
+core; the evidence keys are populated for every failure type so that an
+explicit request works regardless of how the job failed.
 """
 from __future__ import annotations
 
@@ -69,6 +82,39 @@ from askpanda_epic._traceback_parse import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Core-dump probe
+# ---------------------------------------------------------------------------
+
+# Whether a core-dump analysis tool is registered for this experiment, and so
+# whether an analysis follow-up may be offered to the user.  The probe itself
+# is experiment-neutral — it only reads the job's file listing — but the
+# analysis tool reconstructs the job's ATLAS release container, which is
+# ATLAS-specific.  Offering analysis where no tool is registered would produce
+# an offer that cannot be accepted, so this mirrored copy has it set to False
+# (see tests/plugin_mirror_spec.py) and the offer builder below is therefore
+# unreachable here.  The evidence keys are still populated, since "does this
+# job have a core dump" is a useful answer either way.
+_CORE_DUMP_ANALYSIS_AVAILABLE: bool = False
+
+# Pilot error code emitted when the pilot's looping-job detector kills a
+# payload that has stopped writing output.  The pilot requests a core dump at
+# that point, so this is the failure mode where analysis is worth offering
+# proactively; an explicit request still works for any failure type.
+_LOOPING_JOB_PILOT_CODE: int = 1150
+
+# The pilot names core files core.<pid>.  Anchored on both ends so that
+# unrelated names containing "core" (core_dump_config.txt, .corefile) cannot
+# match.
+_CORE_FILE_RE: re.Pattern[str] = re.compile(r"^core\.\d+$")
+
+# Probe outcomes, in the order the probe considers them.
+CORE_DUMP_PRESENT: str = "present"
+CORE_DUMP_TRUNCATED: str = "truncated"
+CORE_DUMP_TIMED_OUT: str = "timed_out"
+CORE_DUMP_ABSENT: str = "absent"
+CORE_DUMP_NOT_PROBED: str = "not_probed"
 
 # ---------------------------------------------------------------------------
 # Failure classification patterns
@@ -291,26 +337,87 @@ def _setup_log_has_error(setup_text: str) -> bool:
     return False
 
 
-def _fetch_file_index(
+def _listing_entries(payload: Any) -> list[Any]:
+    """Extract the raw file-entry list from a filebrowser JSON payload.
+
+    Args:
+        payload: Parsed JSON body, either a bare list of entries or a dict
+            wrapping one under ``files``/``data``/``results``.
+
+    Returns:
+        The raw entry list, or an empty list when no recognisable list is
+        present.
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        # Some PanDA monitor versions wrap the list under a "files" key.
+        for key in ("files", "data", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _normalise_listing_entry(entry: Any) -> dict[str, Any] | None:
+    """Normalise one filebrowser entry into a path-keyed record.
+
+    The ``dirname`` field carries the path and ``name`` carries only the
+    basename, so the relative path has to be reassembled.  Entries with no
+    usable name are dropped.
+
+    Note that the entry's own ``media_link`` is deliberately not carried
+    forward: the PanDA monitor omits the separator between ``dirname`` and ``name``
+    for nested files, producing links such as ``.../workDirin.txt``.  Media
+    URLs are constructed from the job's log GUID instead.
+
+    Args:
+        entry: One element of the listing's ``files`` array.
+
+    Returns:
+        Dict with ``relative_path``, ``name``, ``dirname``, ``size_bytes``
+        and ``modification`` keys, or ``None`` when the entry is unusable.
+    """
+    if not isinstance(entry, dict):
+        return None
+    name = str(entry.get("name") or entry.get("filename") or "")
+    if not name:
+        return None
+    dirname = str(entry.get("dirname") or "").strip("/")
+    try:
+        size_bytes = int(entry.get("size") or entry.get("fsize") or 0)
+    except (ValueError, TypeError):
+        size_bytes = 0
+    return {
+        "relative_path": f"{dirname}/{name}" if dirname else name,
+        "name": name,
+        "dirname": dirname,
+        "size_bytes": size_bytes,
+        "modification": str(entry.get("modification") or ""),
+    }
+
+
+def _fetch_file_listing(
     job_id: int,
     base_url: str,
     timeout: int,
-) -> dict[str, int] | None:
-    """Fetch the filebrowser directory listing for a job, returning file sizes.
+) -> list[dict[str, Any]] | None:
+    """Fetch the recursive filebrowser listing for a job.
 
-    Calls ``/filebrowser/?pandaid={job_id}&json`` (no ``filename=`` param) to
-    retrieve a JSON list of files available for the job.  The result is parsed
-    into a mapping of ``{filename: size_in_bytes}`` so callers can skip
-    zero-length files before attempting to download them.
+    Calls ``/filebrowser/?pandaid={job_id}&json`` (no ``filename=`` param).
+    The ``&json`` form is served unauthenticated; the bare form redirects to
+    the monitor's login page, so the query string must not be altered.
 
-    The response is cached via :func:`~askpanda_epic._cache.cached_fetch_jsonish`
-    using the metadata TTL (60 s).  A ``None`` return means the listing could
-    not be fetched; callers must treat this as "assume all files are non-empty"
-    (fail-open) so that an unavailable index does not suppress log downloads.
+    The listing is fully recursive and each entry's path lives in ``dirname``
+    rather than in ``name``, so entries are normalised to a single
+    ``relative_path`` key by :func:`_normalise_listing_entry`.
 
-    The PanDA monitor's filebrowser JSON listing uses the following structure::
-
-        [{"name": "pilotlog.txt", "size": 123456}, ...]
+    The listing's ``error`` field is advisory whenever the file array is
+    populated.  A large job log makes the PanDA monitor report a warning such as
+    ``"slow_downloading:The size of job log tarball is quite big (119.36MB)."``
+    alongside a complete and correct listing, so treating a non-empty
+    ``error`` as fatal would reject usable responses.  It is only fatal when
+    no entries came back.
 
     Args:
         job_id: PanDA job ID.
@@ -318,47 +425,112 @@ def _fetch_file_index(
         timeout: HTTP timeout in seconds.
 
     Returns:
-        Dict mapping filename to size in bytes, or ``None`` on failure.
+        List of normalised entry dicts, or ``None`` when the listing could
+        not be fetched or came back empty with an error set.  Callers must
+        treat ``None`` as "unknown", not as "no files".
     """
     from askpanda_epic._cache import cached_fetch_jsonish  # type: ignore[import]
 
     url = f"{base_url}/filebrowser/?pandaid={job_id}&json"
-    logger.info("Fetching file index: %s", url)
+    logger.info("Fetching file listing: %s", url)
     status, _ctype, _text, payload = cached_fetch_jsonish(url, timeout)
     if status < 200 or status >= 300 or payload is None:
-        logger.warning(
-            "File index fetch failed for job %d: HTTP %d", job_id, status
-        )
+        logger.warning("File listing fetch failed for job %d: HTTP %d", job_id, status)
         return None
 
-    # The response may be a list directly, or a dict wrapping a list.
-    entries: list[Any] = []
-    if isinstance(payload, list):
-        entries = payload
-    elif isinstance(payload, dict):
-        # Some PanDA monitor versions wrap the list under a "files" key.
-        for key in ("files", "data", "results"):
-            if isinstance(payload.get(key), list):
-                entries = payload[key]
-                break
+    listing_error = ""
+    if isinstance(payload, dict):
+        listing_error = str(payload.get("error") or "")
 
-    if not entries:
-        logger.debug("File index for job %d is empty or unrecognised format", job_id)
-        return {}
+    entries = _listing_entries(payload)
+    normalised = [
+        record for record in (_normalise_listing_entry(entry) for entry in entries)
+        if record is not None
+    ]
 
-    index: dict[str, int] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name") or entry.get("filename") or ""
-        size = entry.get("size") or entry.get("fsize") or 0
-        if name:
-            try:
-                index[str(name)] = int(size)
-            except (ValueError, TypeError):
-                index[str(name)] = 0
+    if not normalised:
+        if listing_error:
+            logger.warning(
+                "File listing for job %d returned no files and reported: %s",
+                job_id, listing_error,
+            )
+            return None
+        logger.debug("File listing for job %d is empty or unrecognised format", job_id)
+        return []
 
-    return index
+    if listing_error:
+        # Advisory only — the entries are usable.
+        logger.info(
+            "File listing for job %d reported a warning alongside %d entries: %s",
+            job_id, len(normalised), listing_error,
+        )
+    return normalised
+
+
+def _fetch_file_index(
+    job_id: int,
+    base_url: str,
+    timeout: int,
+) -> dict[str, int] | None:
+    """Fetch the filebrowser listing for a job, returning file sizes by path.
+
+    Thin wrapper over :func:`_fetch_file_listing` for callers that only need
+    sizes, so they can skip zero-length files before attempting a download.
+
+    The mapping is keyed on the **full relative path**, not on the basename.
+    Keying on the basename alone silently collapsed distinct files: a single
+    job tarball can contain ``output.root`` five times under five different
+    ``dirname`` values, and ``setup.sh`` both at the job root and under
+    ``workDir/usr/...``, in which case the last entry parsed won.  Top-level
+    files are unaffected because their relative path *is* their basename;
+    use :func:`_top_level_file_index` when a basename lookup is what is
+    wanted.
+
+    A ``None`` return means the listing could not be fetched; callers must
+    treat this as "assume all files are non-empty" (fail-open) so that an
+    unavailable listing does not suppress log downloads.
+
+    The PanDA monitor's filebrowser JSON listing uses the following structure::
+
+        {"error": "", "files": [
+            {"name": "pilotlog.txt", "size": 123456, "dirname": ""},
+            {"name": "in.txt", "size": 2359, "dirname": "/workDir"},
+        ]}
+
+    Args:
+        job_id: PanDA job ID.
+        base_url: PanDA monitor base URL.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        Dict mapping relative path to size in bytes, or ``None`` on failure.
+    """
+    listing = _fetch_file_listing(job_id, base_url, timeout)
+    if listing is None:
+        return None
+    return {record["relative_path"]: int(record["size_bytes"]) for record in listing}
+
+
+def _top_level_file_index(file_index: dict[str, int] | None) -> dict[str, int] | None:
+    """Restrict a path-keyed size index to entries at the job-directory root.
+
+    Exists so that basename lookups stay unambiguous.  Every helper that
+    consults the index asks about a canonical top-level log
+    (``setup.stdout``, ``payload.stdout``, ``payload.stderr``,
+    ``pilotlog.txt``), and a nested file that happens to share one of those
+    names must not be able to answer for it.
+
+    Args:
+        file_index: Path-keyed mapping from :func:`_fetch_file_index`, or
+            ``None`` when the listing is unavailable.
+
+    Returns:
+        Mapping of basename to size for root-level entries only, or ``None``
+        when *file_index* is ``None`` (propagating the fail-open signal).
+    """
+    if file_index is None:
+        return None
+    return {path: size for path, size in file_index.items() if "/" not in path}
 
 
 def _file_is_nonempty(file_index: dict[str, int] | None, filename: str) -> bool:
@@ -369,8 +541,13 @@ def _file_is_nonempty(file_index: dict[str, int] | None, filename: str) -> bool:
     the download proceeds.  This preserves existing behaviour when the
     index endpoint is unavailable.
 
+    The lookup is an exact match on the index key, which is a relative path.
+    Callers passing a bare filename should pass an index restricted by
+    :func:`_top_level_file_index` so a nested namesake cannot answer for a
+    root-level file.
+
     Args:
-        file_index: Mapping of ``{filename: size_bytes}`` from
+        file_index: Mapping of ``{relative_path: size_bytes}`` from
             :func:`_fetch_file_index`, or ``None`` if the index is
             unavailable.
         filename: The log filename to check (e.g. ``"setup.stdout"``).
@@ -1230,6 +1407,178 @@ def _build_code_analysis_offer(exception: ExceptionInfo | None) -> str:
     )
 
 
+def _format_bytes(size_bytes: int) -> str:
+    """Render a byte count in decimal units for human-facing text.
+
+    Decimal (1000-based) units are used deliberately so the figure matches
+    what the job monitor reports for the same file.
+
+    Args:
+        size_bytes: Size in bytes; negative values are treated as zero.
+
+    Returns:
+        A short string such as ``"225 B"``, ``"444 kB"`` or ``"1.1 GB"``.
+    """
+    size = max(0, int(size_bytes))
+    if size < 1000:
+        return f"{size} B"
+    scaled = float(size)
+    for unit in ("kB", "MB", "GB", "TB"):
+        scaled /= 1000.0
+        if scaled < 1000.0 or unit == "TB":
+            return f"{scaled:.1f} {unit}"
+    return f"{scaled:.1f} TB"  # pragma: no cover - unreachable, loop returns
+
+
+def _find_core_dump_candidates(
+    file_listing: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Select the core files from a normalised job-log listing.
+
+    Args:
+        file_listing: Normalised records from :func:`_fetch_file_listing`, or
+            ``None`` when the listing is unavailable.
+
+    Returns:
+        Matching records ordered largest first, each with ``name``,
+        ``dirname``, ``size_bytes`` and ``modification`` keys.  Empty when the
+        listing is unavailable or contains no core file.
+    """
+    if not file_listing:
+        return []
+    candidates = [
+        {
+            "name": record["name"],
+            "dirname": record["dirname"],
+            "size_bytes": int(record["size_bytes"]),
+            "modification": record["modification"],
+        }
+        for record in file_listing
+        if _CORE_FILE_RE.match(str(record.get("name") or ""))
+    ]
+    candidates.sort(key=lambda item: (-item["size_bytes"], item["name"]))
+    return candidates
+
+
+def _classify_core_dump_probe(
+    file_listing: list[dict[str, Any]] | None,
+    candidates: list[dict[str, Any]],
+    pilot_error_code: int,
+) -> str:
+    """Classify what the job log says about core-dump availability.
+
+    The distinction between the negative outcomes matters to the user: a
+    zero-length core means the kernel was still writing it when the process
+    was killed, whereas no core at all after a looping-job kill usually means
+    core creation did not finish in the time the pilot allowed.  Reporting
+    both as "no core dump" would hide a real difference in what went wrong.
+
+    Args:
+        file_listing: Normalised listing records, or ``None`` when the listing
+            was not fetched or could not be fetched.
+        candidates: Core files found by :func:`_find_core_dump_candidates`.
+        pilot_error_code: The job's pilot error code.
+
+    Returns:
+        One of :data:`CORE_DUMP_PRESENT`, :data:`CORE_DUMP_TRUNCATED`,
+        :data:`CORE_DUMP_TIMED_OUT`, :data:`CORE_DUMP_ABSENT` or
+        :data:`CORE_DUMP_NOT_PROBED`.
+    """
+    if file_listing is None:
+        return CORE_DUMP_NOT_PROBED
+    if candidates:
+        if any(item["size_bytes"] > 0 for item in candidates):
+            return CORE_DUMP_PRESENT
+        return CORE_DUMP_TRUNCATED
+    if pilot_error_code == _LOOPING_JOB_PILOT_CODE:
+        return CORE_DUMP_TIMED_OUT
+    return CORE_DUMP_ABSENT
+
+
+def _build_core_dump_offer(
+    probe_state: str,
+    candidates: list[dict[str, Any]],
+    pilot_error_code: int,
+) -> str:
+    """Build the Markdown follow-up offer for core-dump analysis.
+
+    Deliberately narrow: offered only for a looping-job kill with a usable
+    core, following the ``_build_code_analysis_offer`` precedent that a
+    proactive offer must be built deterministically here rather than left to
+    the synthesis LLM.  An explicit request remains available for any failure
+    type, so narrowing the proactive offer costs no capability.
+
+    Args:
+        probe_state: Outcome from :func:`_classify_core_dump_probe`.
+        candidates: Core files found by :func:`_find_core_dump_candidates`.
+        pilot_error_code: The job's pilot error code.
+
+    Returns:
+        Markdown offer string, or an empty string when no offer should be
+        made.
+    """
+    if not _CORE_DUMP_ANALYSIS_AVAILABLE:
+        return ""
+    if probe_state != CORE_DUMP_PRESENT:
+        return ""
+    if pilot_error_code != _LOOPING_JOB_PILOT_CODE:
+        return ""
+    usable = [item for item in candidates if item["size_bytes"] > 0]
+    if not usable:
+        return ""
+    largest = usable[0]
+    extra = ""
+    if len(usable) > 1:
+        others = len(usable) - 1
+        extra = f" ({others} further core file{'s' if others > 1 else ''} present)"
+    return (
+        f"\n\nA core dump is present in the job log: `{largest['name']}` "
+        f"({_format_bytes(largest['size_bytes'])}){extra}. I can fetch it and "
+        f"run gdb inside the matching ATLAS release container — usually under a "
+        f"minute. Analyse it?"
+    )
+
+
+def _build_core_dump_evidence(
+    file_listing: list[dict[str, Any]] | None,
+    pilot_error_code: int,
+) -> dict[str, Any]:
+    """Build the core-dump evidence keys from the job-log listing.
+
+    No network access beyond the listing already fetched for the log
+    downloads, no disk access and no gdb: this is a pure read of the listing's
+    own ``size`` and ``modification`` fields.
+
+    Args:
+        file_listing: Normalised listing records, or ``None`` when the listing
+            was not fetched or could not be fetched.
+        pilot_error_code: The job's pilot error code.
+
+    Returns:
+        Dict of evidence keys.  All keys are always present so downstream
+        consumers can rely on the shape.  ``core_dump_available`` is ``None``
+        rather than ``False`` when nothing was probed, so "not looked at" is
+        never reported as "not there".
+    """
+    candidates = _find_core_dump_candidates(file_listing)
+    probe_state = _classify_core_dump_probe(
+        file_listing, candidates, pilot_error_code
+    )
+    available: bool | None = (
+        None if probe_state == CORE_DUMP_NOT_PROBED
+        else probe_state == CORE_DUMP_PRESENT
+    )
+    return {
+        "core_dump_probe_state": probe_state,
+        "core_dump_available": available,
+        "core_dump_candidates": candidates,
+        "core_dump_total_bytes": sum(item["size_bytes"] for item in candidates),
+        "core_dump_offer_md": _build_core_dump_offer(
+            probe_state, candidates, pilot_error_code
+        ),
+    }
+
+
 def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any]:
     """Fetch metadata and logs, extract context window, classify failure.
 
@@ -1285,20 +1634,35 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     # --- Step 2: Download logs (only for failed/holding/cancelled jobs) ---
     fetch_result = _LogFetchResult()
 
+    file_listing: list[dict[str, Any]] | None = None
+
     if jobstatus in ("failed", "holding", "cancelled"):
-        # Fetch the file-size index once so both helpers can skip zero-length
-        # files.  Returns None on failure; helpers treat None as fail-open.
-        file_index = _fetch_file_index(job_id, base_url, timeout)
+        # Fetch the recursive listing once.  It feeds both the zero-length
+        # skip decisions below and the core-dump probe further down, so no
+        # extra request is made for the probe.  Returns None on failure;
+        # helpers treat None as fail-open.
+        file_listing = _fetch_file_listing(job_id, base_url, timeout)
+        file_index = (
+            None if file_listing is None
+            else {
+                record["relative_path"]: int(record["size_bytes"])
+                for record in file_listing
+            }
+        )
+        # The fetch helpers only ever ask about canonical root-level logs, so
+        # they get the basename-safe view: a nested namesake such as
+        # ``workDir/usr/.../setup.sh`` must not answer for a root-level file.
+        top_level_index = _top_level_file_index(file_index)
 
         if pilot_error_code == 1305:
             fetch_result = _fetch_logs_payload(
                 job_id, pilot_error_code, pilot_error_diag,
-                file_index, base_url, timeout,
+                top_level_index, base_url, timeout,
             )
         else:
             fetch_result = _fetch_logs_pilotlog(
                 job, job_id, pilot_error_code, pilot_error_diag,
-                file_index, base_url, timeout,
+                top_level_index, base_url, timeout,
             )
 
     log_excerpt = fetch_result.log_excerpt
@@ -1352,6 +1716,10 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     }
 
     evidence.update(_build_exception_evidence(exception, fetch_result.traceback_count))
+    # Core-dump probe.  Reuses the listing already fetched above, so a job in a
+    # non-terminal state (where no listing is fetched) reports "not probed"
+    # rather than paying for an extra request to assert an obvious negative.
+    evidence.update(_build_core_dump_evidence(file_listing, pilot_error_code))
 
     summary = f"Job {job_id} ({jobstatus}): failure type '{failure_type}'."
     if exception is not None and exception.exc_type:

@@ -134,6 +134,7 @@ _PLOT_UNSUPPORTED_TOOLS: frozenset[str] = frozenset({
     "panda_job_status",
     "panda_log_analysis",
     "pilot_source_analysis",
+    "atlas.core_dump_analysis",
     "code_query",
     "panda_server_health",
     "bamboo_health",

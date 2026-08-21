@@ -75,6 +75,37 @@ _LOG_ANALYSIS_SUBS: tuple[tuple[str, str], ...] = (
         "The ``job`` dict from the BigPanDA metadata response.",
         "The ``job`` dict from the PanDA monitor metadata response.",
     ),
+    # Core-dump probe.  The probe is experiment-neutral and runs in both copies,
+    # but the analysis tool it offers as a follow-up (atlas.core_dump_analysis)
+    # reconstructs the job's ATLAS release container and is registered for ATLAS
+    # only.  Flipping this one flag disables the offer in the ePIC copy while
+    # keeping the probe's evidence keys, so an ePIC user can still be told
+    # whether a job produced a core dump but is never offered an analysis that
+    # cannot be run.  This is the recorded intentional divergence; do not
+    # hand-edit the constant in the ePIC copy.
+    (
+        "# an offer that cannot be accepted, so the ePIC mirror sets this to False (see\n"
+        "# tests/plugin_mirror_spec.py).  The evidence keys are still populated for\n"
+        '# both, since "does this job have a core dump" is a useful answer either way.\n'
+        "_CORE_DUMP_ANALYSIS_AVAILABLE: bool = True",
+        "# an offer that cannot be accepted, so this mirrored copy has it set to False\n"
+        "# (see tests/plugin_mirror_spec.py) and the offer builder below is therefore\n"
+        '# unreachable here.  The evidence keys are still populated, since "does this\n'
+        '# job have a core dump" is a useful answer either way.\n'
+        "_CORE_DUMP_ANALYSIS_AVAILABLE: bool = False",
+    ),
+    (
+        "forward: BigPanDA omits the separator between ``dirname`` and ``name``",
+        "forward: the PanDA monitor omits the separator between ``dirname`` and ``name``",
+    ),
+    (
+        "the CERN SSO login page, so the query string must not be altered.",
+        "the monitor's login page, so the query string must not be altered.",
+    ),
+    (
+        "populated.  A large job log makes BigPanDA report a warning such as",
+        "populated.  A large job log makes the PanDA monitor report a warning such as",
+    ),
     ("askpanda_atlas", "askpanda_epic"),
 )
 
