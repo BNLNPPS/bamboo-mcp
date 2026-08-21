@@ -7,6 +7,45 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **The log-analysis synthesis prompt was blind to the core-dump probe**
+  (`core/bamboo/tools/bamboo_executor.py`). Rounds 2 and 4a added
+  `core_dump_probe_state`, `core_dump_available`, `core_dump_candidates` and
+  `core_dump_total_bytes` to the log-analysis evidence, but `_SYSTEM_LOG_ANALYSIS`
+  was never updated to describe any of them. Worse, it carried the rule
+  *"never infer a root cause from a directory listing or from file sizes in the
+  log excerpt"* — and `core_dump_candidates` is a list of records with a `name`
+  and a `size_bytes`. The model was being told to disregard the exact shape of
+  what the probe emits.
+
+  The result was not a consistent failure but an inconsistent one. Job
+  7263015032 was answered once with a section headed "Root Cause — Core Dump"
+  built around `core.20115`, and thirteen minutes later with "No core dump is
+  visible in the pilot log evidence — the title mentions 'core dump' but the
+  actual failure mode is a looping/hung job." Same job, same probe output,
+  opposite conclusions, neither flagged as uncertain.
+
+  The prompt now documents all four keys and all five probe states, and the
+  listing prohibition is scoped to what the model reads out of `log_excerpt`,
+  with an explicit note that the probe keys are structured evidence governed by
+  the rules that follow. Those rules make `core_dump_probe_state` authoritative
+  on existence, require `truncated` and `timed_out` to be reported as
+  themselves rather than flattened into "no core dump", and require
+  `not_probed` / `core_dump_available: null` to be reported as *not looked at*
+  rather than as absence.
+
+  A separate rule stops the model treating the core dump as the diagnosis. The
+  earlier answer reasoned from the core's modification timestamp to a crash
+  "approximately 2 hours before the pilot killed the job", which the timestamp
+  does not support — it records when the core was written, which for a
+  pilot-killed job is usually the kill. Only the analysed stack says where the
+  process died.
+
+  Also added: an instruction not to write its own "shall I analyse it?" offer,
+  matching the existing one for pilot source. The offer is appended from
+  `core_dump_offer_md` after synthesis, and a model-invented offer has nothing
+  behind it — the follow-up intercept keys on the stored offer, not on the
+  answer text, so "yes please" against an invented offer finds nothing.
+
 - **`_SYSTEM_CODE_QUERY` was unreachable** (`core/bamboo/tools/bamboo_executor.py`).
   The synthesis prompt table keyed on `pilot_code_query`, a name no tool has
   ever been called — `code_query` is both the advertised and the wire name, and
@@ -115,6 +154,21 @@ All notable changes to Bamboo are documented here.
   excluded from the tool by the namespace filter instead.
 
 ### Added
+- **Guards tying the log-analysis prompt to the evidence it receives**
+  (`tests/test_log_analysis_prompt.py`). A prompt cannot be unit-tested for
+  whether a model obeys it, but it can be tested that every probe key reaching
+  the model and every state value the probe can emit is at least named in it.
+  The key guard derives its expectations from
+  `_build_core_dump_evidence()` minus `_PRESENTATION_KEYS` rather than from a
+  hand-written list, so a new key is covered the moment it is emitted — it
+  caught `core_dump_available` missing from the first draft of the prompt
+  rewrite above.
+
+  Verified by mutation: reverting the listing prohibition, renaming a probe
+  state, or dropping the offer rule each fails the corresponding guard. Skipped
+  via `importorskip` where the ATLAS plugin is absent, since the probe
+  constants live there.
+
 - **Drift guards for tool-name literals** (`tests/test_tool_name_canon.py`).
   Three sites in core compare exact strings against `called_tool_names`, and a
   literal that is nearly right selects no specialist behaviour and falls
