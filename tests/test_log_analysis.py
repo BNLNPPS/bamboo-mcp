@@ -339,7 +339,7 @@ def test_log_analysis_invalid_arguments() -> None:
 def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pilot error 1305 (payload failure) fetches payload.stdout and payload.stderr.
 
-    setup.stdout is explicitly zero-length in the file index so the fail-open
+    setup.stdout is explicitly zero-length in the file listing so the fail-open
     policy in _file_is_nonempty does not cause it to be downloaded.
     """
     fetched_filenames: list[str] = []
@@ -353,16 +353,26 @@ def test_log_analysis_payload_error_uses_payload_log(monkeypatch: pytest.MonkeyP
         lambda job_id, base_url, timeout: _make_metadata_response(_SAMPLE_JOB_PAYLOAD),
     )
     monkeypatch.setattr("askpanda_atlas.log_analysis_impl._fetch_log_text", _capture_log)
-    # Provide a concrete file index so _file_is_nonempty does not fall back to
-    # fail-open (None).  setup.stdout is zero-length -> skipped; payload logs
-    # are non-empty -> downloaded.
+    # Patch the listing, not _fetch_file_index.  The analysis path fetches the
+    # recursive listing once via _fetch_file_listing and derives the size index
+    # from it in-line, so that both the zero-length skip decisions and the
+    # core-dump probe are served by a single request.  _fetch_file_index is now
+    # only a thin wrapper that nothing on this path calls, so patching it left
+    # the real fetch running: it 400s in a test environment, returns None, and
+    # the fail-open policy then downloads setup.stdout after all.
+    #
+    # setup.stdout is zero-length -> skipped; payload logs are non-empty ->
+    # downloaded.
     monkeypatch.setattr(
-        "askpanda_atlas.log_analysis_impl._fetch_file_index",
-        lambda job_id, base_url, timeout: {
-            "setup.stdout": 0,
-            "payload.stdout": 1000,
-            "payload.stderr": 500,
-        },
+        "askpanda_atlas.log_analysis_impl._fetch_file_listing",
+        lambda job_id, base_url, timeout: [
+            {"relative_path": "setup.stdout", "name": "setup.stdout",
+             "dirname": "", "size_bytes": 0, "modification": ""},
+            {"relative_path": "payload.stdout", "name": "payload.stdout",
+             "dirname": "", "size_bytes": 1000, "modification": ""},
+            {"relative_path": "payload.stderr", "name": "payload.stderr",
+             "dirname": "", "size_bytes": 500, "modification": ""},
+        ],
     )
 
     asyncio.run(panda_log_analysis_tool.call({"job_id": 1111}))
