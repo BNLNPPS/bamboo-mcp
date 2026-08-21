@@ -7,6 +7,54 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **`_SYSTEM_CODE_QUERY` was unreachable** (`core/bamboo/tools/bamboo_executor.py`).
+  The synthesis prompt table keyed on `pilot_code_query`, a name no tool has
+  ever been called — `code_query` is both the advertised and the wire name, and
+  `pilot_code_query` survives only in a docstring. Every `code_query` answer has
+  been synthesised with the generic prompt rather than the specialist one.
+  Found by the guard test below, not by inspection: the failure mode is a
+  slightly worse answer, which nothing reports.
+
+  The table is now a module-level `_TOOL_PROMPT_TABLE` rather than a local
+  rebuilt on each call, so a test can assert its keys are reachable at all. It
+  could not before, which is how the table accumulated two dead entries — this
+  one and `pilot_source_analysis`, fixed earlier in this change.
+
+- **A plan's spelling of a tool name decided whether its evidence was
+  readable** (`core/bamboo/tools/bamboo_executor.py`,
+  `core/bamboo/tools/_tool_names.py`). `_execute_one_tool` keyed
+  `_last_evidence_store` and `called_tool_names` on the literal `tc.tool`
+  string. `_resolve_tool` accepts several spellings of the same tool, so a plan
+  naming `core_dump_analysis` ran exactly the same object as one naming
+  `atlas.core_dump_analysis` — and then recorded it under a key no reader looks
+  up. `_core_dump_evidence()` returned `{}`, `_CORE_DUMP_TOOL in
+  called_tool_names` was False, `_synthesise_core_dump` was skipped, and the
+  analyzer's JSON went to generic prose synthesis with `reconcile_llm_analysis`
+  never called. Nothing raised; the answer was simply worse, and worse in the
+  specific way reconciliation exists to prevent.
+
+  The name recorded is now the canonical wire name. Exact-literal readers
+  (`_CORE_DUMP_TOOL`, `"panda_log_analysis"`, `_pick_synthesis_prompt`'s table)
+  are correct again without any of them having to enumerate aliases. The plan's
+  own spelling is retained for error text, where echoing what the caller wrote
+  is what makes `Unknown tool: …` diagnosable.
+
+  `bamboo_last_evidence` canonicalises its `tool` argument for the same reason:
+  the store is keyed on wire names, so a caller asking for
+  `core_dump_analysis` must reach the entry written under
+  `atlas.core_dump_analysis`.
+
+  `alias_map()` is memoised. Building it loads every entry point in the group —
+  ~230 ms — and canonicalisation now sits on the execution path once per tool
+  call; measured 229 ms → 0.9 µs warm. Entry points cannot change without a
+  process restart, so there is no natural invalidation; `reset_alias_cache()`
+  exists for tests that patch discovery.
+
+  New `tests/test_tool_name_canon.py` pins the agreement rather than the
+  mechanism: both spellings of the core-dump tool converge on one store key,
+  catalog names are a subset of wire names, and every namespaced name in the
+  planner prompt is catalogued.
+
 - **The planner catalog advertised tool names the server does not expose**
   (`core/bamboo/tools/_tool_names.py`, new; `core/bamboo/core.py`,
   `core/bamboo/tools/planner.py`). `_collect_tool_catalog` took a plugin tool's
@@ -65,6 +113,38 @@ All notable changes to Bamboo are documented here.
   `_PANDA_CORE_TOOLS`. That set filters the built-in `TOOLS` dict, which has
   never contained the key, so the entry matched nothing; non-PanDA plugins are
   excluded from the tool by the namespace filter instead.
+
+### Added
+- **Drift guards for tool-name literals** (`tests/test_tool_name_canon.py`).
+  Three sites in core compare exact strings against `called_tool_names`, and a
+  literal that is nearly right selects no specialist behaviour and falls
+  through to a generic path without raising. The guards assert
+  `_TOOL_PROMPT_TABLE` keys, the doc-tool sets, and every
+  `ToolCall(tool="...")` literal in `bamboo_answer` are names the MCP server
+  actually exposes.
+
+  The `bamboo_answer` literals are collected by walking the module's AST rather
+  than by exercising the routing functions. Those rules are gated on question
+  text, history and stored evidence, so a behavioural test pins only the
+  branches someone remembered to write a case for; the AST sees all 20
+  literals, including in rules added later. This is the guard for the
+  "three-file edit problem" — adding a plugin tool means touching
+  `bamboo_answer`, `planner` and `bamboo_executor`, and a wrong name in one of
+  them is silent.
+
+  **Membership, not idempotence.** The first draft asserted each literal was a
+  fixed point under `canonical_tool_name`, and mutation testing showed it did
+  not catch `pilot_code_query` at all: an unknown name canonicalises to itself
+  by design, so a fixed-point check passes for a name that is not a tool. The
+  guards assert membership in the wire surface instead. Verified by mutation —
+  reverting the `code_query` key, the `pilot_source_analysis` key, rule 1b's
+  `ToolCall` name, or the planner catalog to advertised names each fails the
+  corresponding guard and nothing else.
+
+  A namespaced literal whose plugin is absent is filtered out, not skipped:
+  `pytest.skip` from inside the loop would abandon the whole test, leaving
+  every ATLAS name unchecked while the run still looked green. Each guard also
+  asserts it checked something, so it cannot go inert.
 
 ---
 
