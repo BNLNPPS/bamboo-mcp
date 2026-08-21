@@ -156,24 +156,15 @@ def wire_tool_definitions() -> list[dict[str, Any]]:
     return defs
 
 
-def alias_map() -> dict[str, str]:
-    """Return a mapping of every accepted tool spelling to its wire name.
+def _build_alias_map() -> dict[str, str]:
+    """Build the alias-to-wire-name mapping from scratch.
 
-    Three spellings are accepted for a plugin tool: its entry-point key, the
-    name it advertises in its own definition, and — where unambiguous — the
-    bare suffix after the namespace.  All three resolve through
-    ``_resolve_tool``, so all three can reach ``_last_evidence_store`` as keys
-    unless they are collapsed first.
-
-    An alias claimed by two different wire names is **omitted** rather than
-    resolved arbitrarily.  ``doc_search`` is the live example: both
-    ``atlas.doc_search`` and ``epic.doc_search`` shorten to it, and guessing
-    between them would route one plugin's evidence to the other's reader.
-    Omitted aliases fall through :func:`canonical_tool_name` unchanged, which
-    is the pre-existing behaviour.
+    Separated from :func:`alias_map` so the cache has something to call.  This
+    is expensive — it loads every entry point in the ``bamboo.tools`` group —
+    which is why the public accessor caches.
 
     Returns:
-        Mapping of alias to wire name.  Every wire name maps to itself.
+        Mapping of alias to wire name.
     """
     claims: dict[str, set[str]] = {}
 
@@ -181,7 +172,8 @@ def alias_map() -> dict[str, str]:
         if alias:
             claims.setdefault(alias, set()).add(wire)
 
-    for name in _builtin_definitions():
+    builtins = _builtin_definitions()
+    for name in builtins:
         _claim(name, name)
 
     try:
@@ -203,7 +195,7 @@ def alias_map() -> dict[str, str]:
         advertised = _advertised_name(resolved.obj)
         # A tool whose advertised name is built in keeps the built-in name on
         # the wire; otherwise the entry-point key is the wire name.
-        wire = advertised if advertised in _builtin_definitions() else full_name
+        wire = advertised if advertised in builtins else full_name
         _claim(full_name, wire)
         _claim(advertised, wire)
         _claim(tool_name, wire)
@@ -213,6 +205,57 @@ def alias_map() -> dict[str, str]:
         for alias, wires in claims.items()
         if len(wires) == 1
     }
+
+
+#: Memoised alias map.  ``None`` means "not built yet"; an empty map is a
+#: legitimate result (no plugins installed) and must not force a rebuild.
+_ALIAS_CACHE: dict[str, str] | None = None
+
+
+def alias_map() -> dict[str, str]:
+    """Return a mapping of every accepted tool spelling to its wire name.
+
+    Three spellings are accepted for a plugin tool: its entry-point key, the
+    name it advertises in its own definition, and — where unambiguous — the
+    bare suffix after the namespace.  All three resolve through
+    ``_resolve_tool``, so all three can reach ``_last_evidence_store`` as keys
+    unless they are collapsed first.
+
+    An alias claimed by two different wire names is **omitted** rather than
+    resolved arbitrarily.  ``doc_search`` is the live candidate: both
+    ``atlas.doc_search`` and ``epic.doc_search`` shorten to it, and guessing
+    between them would route one plugin's evidence to the other's reader.
+    Omitted aliases fall through :func:`canonical_tool_name` unchanged, which
+    is the pre-existing behaviour.
+
+    The result is memoised because building it loads every entry point in the
+    group — around 230 ms — and :func:`canonical_tool_name` is called once per
+    tool call on the execution path.  Entry points cannot change without a
+    process restart, so the cache has no natural invalidation; tests that patch
+    discovery call :func:`reset_alias_cache`.
+
+    Returns:
+        A fresh dict mapping alias to wire name.  Every wire name maps to
+        itself.  A copy is returned so a caller mutating the result cannot
+        corrupt the cache.
+    """
+    global _ALIAS_CACHE  # pylint: disable=global-statement
+    if _ALIAS_CACHE is None:
+        _ALIAS_CACHE = _build_alias_map()
+    return dict(_ALIAS_CACHE)
+
+
+def reset_alias_cache() -> None:
+    """Discard the memoised alias map.
+
+    Only needed by tests that patch entry-point discovery, and by any caller
+    that installs a plugin into a running process.
+
+    Returns:
+        None.
+    """
+    global _ALIAS_CACHE  # pylint: disable=global-statement
+    _ALIAS_CACHE = None
 
 
 def canonical_tool_name(name: str, namespace: str | None = None) -> str:
@@ -242,5 +285,6 @@ def canonical_tool_name(name: str, namespace: str | None = None) -> str:
 __all__ = [
     "alias_map",
     "canonical_tool_name",
+    "reset_alias_cache",
     "wire_tool_definitions",
 ]

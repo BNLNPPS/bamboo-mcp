@@ -29,6 +29,7 @@ from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
 from bamboo.tools.loader import find_tool_by_name
+from bamboo.tools._tool_names import canonical_tool_name
 from bamboo.tools.planner import Plan
 from bamboo.tracing import EVENT_PLAN, EVENT_RETRIEVAL, EVENT_SYNTHESIS, span
 
@@ -37,9 +38,14 @@ from bamboo.tracing import EVENT_PLAN, EVENT_RETRIEVAL, EVENT_SYNTHESIS, span
 #
 # Populated by execute_plan() after every successful tool call so that the
 # TUI /json and /inspect commands can retrieve the last evidence dict without
-# re-fetching from BigPanDA.  Keys are tool names; values are the unpacked
-# evidence dicts.  A separate "last_tool" key tracks which tool ran most
-# recently so callers can retrieve the most relevant entry.
+# re-fetching from BigPanDA.  A separate "last_tool" key tracks which tool ran
+# most recently so callers can retrieve the most relevant entry.
+#
+# Keys are **canonical wire names**, not whatever spelling the plan used —
+# _execute_one_tool canonicalises before writing.  Readers may therefore match
+# on an exact literal (_CORE_DUMP_TOOL, "panda_log_analysis") without also
+# handling every alias _resolve_tool would have accepted.  Anything else
+# writing to this store must canonicalise its key too.
 # ---------------------------------------------------------------------------
 
 _last_evidence_store: dict[str, Any] = {}
@@ -1301,22 +1307,43 @@ async def _execute_one_tool(
     *evidence_parts*.  All failures are non-fatal — errors are appended to
     *errors* so the caller can attempt synthesis with partial evidence.
 
+    Two names are in play and the distinction is load-bearing.  ``tc.tool`` is
+    whatever the plan wrote, which for an LLM-produced plan is whichever
+    spelling the model picked; the *canonical* name is the one the MCP server
+    exposes.  ``_resolve_tool`` accepts several spellings, so a plan naming
+    ``core_dump_analysis`` runs the same object as one naming
+    ``atlas.core_dump_analysis`` — but everything downstream is an exact string
+    match.  Recording the plan's spelling meant a correctly-executed core-dump
+    analysis could land under a key ``_core_dump_evidence`` does not read and a
+    name ``_CORE_DUMP_TOOL in called_tool_names`` does not match, so
+    ``_synthesise_core_dump`` was skipped and ``reconcile_llm_analysis`` never
+    ran on the model's output.
+
+    So the canonical name is what gets recorded, and the plan's own spelling is
+    kept only for error text, where echoing what the caller actually wrote is
+    what makes the error diagnosable.
+
     Args:
         tc: Tool call descriptor with ``tool``, ``namespace``, and ``arguments``.
-        called_tool_names: Mutable list of successfully-called tool names.
+        called_tool_names: Mutable list of canonical names of tools that were
+            called successfully.
         evidence_parts: Mutable list of compact evidence strings for synthesis.
         errors: Mutable list of error strings accumulated across all tool calls.
     """
     from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
     from bamboo.core import _validate_arguments  # pylint: disable=import-outside-toplevel
 
-    tool_name: str = tc.tool
+    requested_name: str = tc.tool
     args: dict[str, Any] = dict(tc.arguments)
 
-    tool_obj = _resolve_tool(tool_name, tc.namespace, TOOLS)
+    tool_obj = _resolve_tool(requested_name, tc.namespace, TOOLS)
     if tool_obj is None:
-        errors.append(f"Unknown tool: {tool_name}")
+        errors.append(f"Unknown tool: {requested_name}")
         return
+
+    # Only meaningful once the tool resolved: an unknown name has no canonical
+    # form, and canonical_tool_name returns it unchanged in that case anyway.
+    tool_name: str = canonical_tool_name(requested_name, tc.namespace)
 
     get_def_fn = getattr(tool_obj, "get_definition", None)
     if callable(get_def_fn):
@@ -1326,13 +1353,13 @@ async def _execute_one_tool(
             tool_def = {}
         err = _validate_arguments(tool_def, args)
         if err:
-            errors.append(f"Invalid args for {tool_name}: {err}")
+            errors.append(f"Invalid args for {requested_name}: {err}")
             return
 
     try:
         raw_result: list[MCPContent] = await tool_obj.call(args)
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        errors.append(f"Tool {tool_name} raised: {exc!s}")
+        errors.append(f"Tool {requested_name} raised: {exc!s}")
         return
 
     called_tool_names.append(tool_name)
@@ -2203,7 +2230,14 @@ class BambooLastEvidenceTool:
                 "error": "No evidence stored yet — ask about a task or job first."
             }))
 
-        tool_name = requested_tool or _last_evidence_store.get("last_tool")
+        # The store is keyed on canonical wire names, so a caller asking for
+        # "core_dump_analysis" must reach the entry written under
+        # "atlas.core_dump_analysis".  A name with no canonical form passes
+        # through unchanged and simply misses, as before.
+        if requested_tool:
+            tool_name: str | None = canonical_tool_name(requested_tool)
+        else:
+            tool_name = _last_evidence_store.get("last_tool")
         evidence = _last_evidence_store.get(str(tool_name), {}) if tool_name else {}
 
         if not evidence:

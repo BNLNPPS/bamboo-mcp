@@ -7,6 +7,41 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **A plan's spelling of a tool name decided whether its evidence was
+  readable** (`core/bamboo/tools/bamboo_executor.py`,
+  `core/bamboo/tools/_tool_names.py`). `_execute_one_tool` keyed
+  `_last_evidence_store` and `called_tool_names` on the literal `tc.tool`
+  string. `_resolve_tool` accepts several spellings of the same tool, so a plan
+  naming `core_dump_analysis` ran exactly the same object as one naming
+  `atlas.core_dump_analysis` — and then recorded it under a key no reader looks
+  up. `_core_dump_evidence()` returned `{}`, `_CORE_DUMP_TOOL in
+  called_tool_names` was False, `_synthesise_core_dump` was skipped, and the
+  analyzer's JSON went to generic prose synthesis with `reconcile_llm_analysis`
+  never called. Nothing raised; the answer was simply worse, and worse in the
+  specific way reconciliation exists to prevent.
+
+  The name recorded is now the canonical wire name. Exact-literal readers
+  (`_CORE_DUMP_TOOL`, `"panda_log_analysis"`, `_pick_synthesis_prompt`'s table)
+  are correct again without any of them having to enumerate aliases. The plan's
+  own spelling is retained for error text, where echoing what the caller wrote
+  is what makes `Unknown tool: …` diagnosable.
+
+  `bamboo_last_evidence` canonicalises its `tool` argument for the same reason:
+  the store is keyed on wire names, so a caller asking for
+  `core_dump_analysis` must reach the entry written under
+  `atlas.core_dump_analysis`.
+
+  `alias_map()` is memoised. Building it loads every entry point in the group —
+  ~230 ms — and canonicalisation now sits on the execution path once per tool
+  call; measured 229 ms → 0.9 µs warm. Entry points cannot change without a
+  process restart, so there is no natural invalidation; `reset_alias_cache()`
+  exists for tests that patch discovery.
+
+  New `tests/test_tool_name_canon.py` pins the agreement rather than the
+  mechanism: both spellings of the core-dump tool converge on one store key,
+  catalog names are a subset of wire names, and every namespaced name in the
+  planner prompt is catalogued.
+
 - **The planner catalog advertised tool names the server does not expose**
   (`core/bamboo/tools/_tool_names.py`, new; `core/bamboo/core.py`,
   `core/bamboo/tools/planner.py`). `_collect_tool_catalog` took a plugin tool's
