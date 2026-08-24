@@ -199,11 +199,14 @@ def test_rule_1c_is_atlas_only() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _route_question(question: str) -> tuple[Any, Any]:
+async def _route_question(
+    question: str, bypass_fast_path: bool = False,
+) -> tuple[Any, Any]:
     """Drive ``_route`` with execute_plan patched out.
 
     Args:
         question: The user message to route.
+        bypass_fast_path: Value of the flag the TUI derives from ``/fastpath``.
 
     Returns:
         Tuple of ``(result, execute_plan_mock)``.
@@ -221,7 +224,7 @@ async def _route_question(question: str) -> tuple[Any, Any]:
         mock_guard.side_effect = lambda q, h: (q, False)
         mock_plan.return_value = [{"type": "text", "text": "planner"}]
         result = await bamboo_answer_tool._route(
-            question, [], False, False, False, False,
+            question, [], False, bypass_fast_path, False, False,
         )
     return result, mock_exec
 
@@ -300,3 +303,53 @@ def test_get_last_core_dump_offer_requires_a_job_id() -> None:
         "evidence": {"core_dump_offer_md": "Analyse it?"},
     }
     assert ex_mod.get_last_core_dump_offer() is None
+
+
+# ---------------------------------------------------------------------------
+# Rule 1d under /fastpath off
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rule_1d_fires_with_the_fast_path_off() -> None:
+    """The live regression: ``/fastpath off`` must not disarm offer acceptance.
+
+    ``bypass_fast_path`` exists to hand a *question* to the LLM planner instead
+    of a deterministic rule.  A bare "yes" is not such a question: the topic
+    guard reformulates content-free follow-ups into a documentation query
+    before any planner sees them, so gating rule 1d on the flag did not reroute
+    the turn, it destroyed it — job 7272161793's offer was answered with "the
+    documentation search did not return relevant results".
+    """
+    _store_offer()
+    _, mock_exec = await _route_question("yes please", bypass_fast_path=True)
+    assert mock_exec.await_count == 1
+    plan = mock_exec.await_args.args[0]
+    assert plan.tool_calls[0].tool == _CORE_DUMP_TOOL
+    assert plan.tool_calls[0].arguments["job_id"] == _JOB_ID
+
+
+@pytest.mark.asyncio
+async def test_the_fast_path_flag_still_gates_rule_1c() -> None:
+    """Un-gating 1d must not un-gate the routing rules it sits beside.
+
+    Rule 1c *is* a routing rule: with the fast path off, an explicit request
+    belongs to the LLM planner, which can name the tool itself.  A test that
+    only covered 1d would not notice this regressing.
+    """
+    _store_offer()
+    _, mock_exec = await _route_question(
+        "please analyse the core dump in job 7263525363", bypass_fast_path=True,
+    )
+    assert mock_exec.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unarmed_affirmative_is_untouched_with_the_fast_path_off() -> None:
+    """With no offer stored, "yes" keeps whatever meaning it had before.
+
+    Rule 1d now runs unconditionally, so the no-offer case carries the whole
+    weight of not hijacking an affirmative that answers something else.
+    """
+    _, mock_exec = await _route_question("yes please", bypass_fast_path=True)
+    assert mock_exec.await_count == 0

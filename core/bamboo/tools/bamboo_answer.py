@@ -2670,22 +2670,36 @@ async def _run_early_intercepts(
     "sounds good", and a user answering a core-dump offer with any of those
     would be told "You're welcome" while the analysis never started.
 
+    Neither intercept is gated on *bypass_fast_path*, and rule 1d's exemption
+    is deliberate.  ``bypass_fast_path`` exists to send a *question* to the LLM
+    planner instead of a deterministic rule, but a bare "yes" is not a question
+    the planner can route: ``_run_topic_guard`` reformulates content-free
+    follow-ups into a documentation query before any planner sees them, so
+    skipping rule 1d does not reroute the turn, it destroys it.  That is the
+    observed failure — with the fast path off, "yes please" against an
+    outstanding core-dump offer was answered with "the documentation search did
+    not return relevant results".  Resolving an offer the *previous* turn made
+    deterministically is conversational state resolution, in the same class as
+    the social replies below, not a routing shortcut.
+
     Args:
         question: The raw user message, before any reformulation.
         history: Prior conversation turns.
-        bypass_fast_path: When True, the deterministic intercepts are skipped
-            so the question reaches the topic guard and LLM planner.  The
-            social replies are not deterministic *routing* and still apply.
+        bypass_fast_path: When True, the deterministic *routing* intercepts
+            downstream of this function are skipped so the question reaches the
+            topic guard and LLM planner.  Accepted here so the parameter list
+            still documents the mode, and unused for the reason above.
         plugin_id: Active plugin identifier.
 
     Returns:
         ``list[MCPContent]`` when an intercept produced the answer, or ``None``
         to continue with normal routing.
     """
-    if not bypass_fast_path:
-        accepted = await _run_core_dump_offer_intercept(question, history, plugin_id)
-        if accepted is not None:
-            return accepted
+    del bypass_fast_path  # Intentionally not consulted — see the docstring.
+
+    accepted = await _run_core_dump_offer_intercept(question, history, plugin_id)
+    if accepted is not None:
+        return accepted
 
     # Social intercept — zero LLM cost for greetings and acknowledgements.
     if _is_greeting(question):
@@ -2713,6 +2727,9 @@ async def _run_core_dump_offer_intercept(
 
     Both conditions are required: a stored offer *and* a message that is
     nothing but an affirmative.  A "yes" in any other context is left alone.
+    Because both conditions come from state this process created — the offer
+    was built deterministically by ``panda_log_analysis`` in an earlier turn —
+    the rule runs in both routing modes; see :func:`_run_early_intercepts`.
 
     Args:
         question: The raw user message, before any reformulation.

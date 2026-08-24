@@ -288,6 +288,36 @@ class TestSlotLock:
 # ---------------------------------------------------------------------------
 
 
+def _alrb(tmp_path: Path) -> Path:
+    """Build a minimally complete ATLASLocalRootBase tree.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        Path to the fabricated ATLASLocalRootBase.
+    """
+    base = tmp_path / "cvmfs" / "ATLASLocalRootBase"
+    (base / "user").mkdir(parents=True)
+    (base / "user" / "atlasLocalSetup.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    return base
+
+
+def _no_runtime_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every container-runtime avenue miss.
+
+    The login-shell probe is stubbed rather than allowed to run: a test that
+    shells out inherits the CI host's profile scripts and would pass or fail
+    on a property of the runner.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    impl.reset_runtime_cache()
+    monkeypatch.setattr(impl.shutil, "which", lambda name: None)
+    monkeypatch.setattr(impl, "_probe_login_shell_runtime", lambda: None)
+
+
 class TestAtlasPreflight:
     """Environment checks that run before any download."""
 
@@ -307,26 +337,28 @@ class TestAtlasPreflight:
         assert ok is False
         assert "atlasLocalSetup.sh" in message
 
-    def test_missing_apptainer_names_apptainer(
+    def test_missing_runtime_names_every_avenue_tried(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The container runtime is checked separately from the repository."""
-        base = tmp_path / "alrb"
-        (base / "user").mkdir(parents=True)
-        (base / "user" / "atlasLocalSetup.sh").write_text("#!/bin/bash\n", encoding="utf-8")
-        monkeypatch.setattr(impl.shutil, "which", lambda name: None)
+        """The container runtime is checked separately from the repository.
+
+        The refusal must name all three avenues, because a reader who sees only
+        "not on PATH" fixes the wrong PATH — that is the defect this replaced.
+        """
+        base = _alrb(tmp_path)
+        _no_runtime_anywhere(monkeypatch)
         ok, message = impl.preflight_atlas_environment({"ATLAS_LOCAL_ROOT_BASE": str(base)})
         assert ok is False
         assert "apptainer" in message
+        assert "login shell" in message
+        assert "ALRB" in message
 
     def test_refusal_never_offers_a_local_gdb_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A mismatched release resolves symbols wrongly; the refusal must say so."""
-        base = tmp_path / "alrb"
-        (base / "user").mkdir(parents=True)
-        (base / "user" / "atlasLocalSetup.sh").write_text("#!/bin/bash\n", encoding="utf-8")
-        monkeypatch.setattr(impl.shutil, "which", lambda name: None)
+        base = _alrb(tmp_path)
+        _no_runtime_anywhere(monkeypatch)
         _ok, message = impl.preflight_atlas_environment({"ATLAS_LOCAL_ROOT_BASE": str(base)})
         assert "will not fall back" in message
 
@@ -334,9 +366,7 @@ class TestAtlasPreflight:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """All four checks satisfied."""
-        base = tmp_path / "alrb"
-        (base / "user").mkdir(parents=True)
-        (base / "user" / "atlasLocalSetup.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+        base = _alrb(tmp_path)
         monkeypatch.setattr(impl.shutil, "which", lambda name: "/usr/bin/apptainer")
         assert impl.preflight_atlas_environment({"ATLAS_LOCAL_ROOT_BASE": str(base)}) == (True, "")
 

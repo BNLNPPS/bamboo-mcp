@@ -402,9 +402,22 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # a new analysis is refused and reports what is being held.
 # export BAMBOO_CORE_ANALYSIS_MAX_BYTES="53687091200"
 
-# The analysis needs CVMFS and apptainer on the host: it reconstructs the job's
-# own ATLAS release container rather than using the host's gdb.  There is no
-# option to fall back to a local gdb, because a mismatched release resolves the
-# payload's symbols against the wrong binaries and produces a confident, wrong
-# answer.  Set ATLAS_LOCAL_ROOT_BASE if CVMFS is mounted somewhere unusual.
+# The analysis needs CVMFS on the host: it reconstructs the job's own ATLAS
+# release container rather than using the host's gdb.  There is no option to
+# fall back to a local gdb, because a mismatched release resolves the payload's
+# symbols against the wrong binaries and produces a confident, wrong answer.
+# Set ATLAS_LOCAL_ROOT_BASE if CVMFS is mounted somewhere unusual.
 # export ATLAS_LOCAL_ROOT_BASE="/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase"
+
+# A container runtime is needed too, but not necessarily one installed on the
+# host: the preflight looks for apptainer or singularity on this process's
+# PATH, then on a *login* shell's PATH (which is what atlasLocalSetup.sh runs
+# under, and is usually wider than a daemon's), then for ALRB's own apptainer
+# under the CVMFS repository.  Set this only when the runtime lives somewhere
+# none of those three find it.
+# export BAMBOO_CORE_DUMP_APPTAINER="/opt/apptainer/bin/apptainer"
+
+# Escape hatch: skip the runtime check entirely and let the analyzer report a
+# missing runtime itself, a few seconds later.  The three CVMFS checks still
+# run.  Use this if detection ever refuses an analysis that would have worked.
+# export BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK="1"

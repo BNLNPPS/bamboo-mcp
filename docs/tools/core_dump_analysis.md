@@ -88,10 +88,40 @@ server restart mid-run loses nothing: `status` still answers from disk.
 | Container deadline | 600 s | `BAMBOO_CORE_ANALYSIS_CONTAINER_TIMEOUT` |
 | Workspace root | `/tmp/bamboo/core-analysis` | `BAMBOO_CORE_ANALYSIS_ROOT` |
 | Disk quota | 50 GiB | `BAMBOO_CORE_ANALYSIS_QUOTA_BYTES` |
+| Container runtime override | *(discovered)* | `BAMBOO_CORE_DUMP_APPTAINER` |
+| Skip the runtime check | off | `BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK` |
 
 The 120 s inline wait assumes the 300 s `BAMBOO_MCP_CLIENT_TIMEOUT` default. If
 a deployment pins that lower, lower the inline wait to match or `start` will
 time out on the wire before it can hand back a handle.
+
+### Container runtime detection
+
+The preflight refuses before the lock and before any download, so a host that
+cannot run the release container says so in the same turn rather than three
+minutes into a gigabyte transfer. It checks CVMFS three ways — the mount, its
+readability, and `atlasLocalSetup.sh` — and then looks for a container runtime
+through four avenues, in order:
+
+1. `BAMBOO_CORE_DUMP_APPTAINER`, when set to an executable file.
+2. `apptainer` or `singularity` on the server process's own `PATH`.
+3. Either name on a **login** shell's `PATH`, probed once per process with
+   `bash -lc 'command -v …'`.
+4. ALRB's own apptainer, under `containers/sw/apptainer` in the CVMFS
+   repository holding `ATLASLocalRootBase`.
+
+Avenue 3 is the one that matches reality. `_collect_evidence_atlas_container`
+starts the release with `bash -lc`, so the `PATH` that decides whether the
+analysis can run is a login shell's — assembled from `/etc/profile.d` — not the
+narrower one an MCP server inherits from systemd. Avenue 4 matters because ALRB
+supplies its own runtime when the host has none, so "no apptainer on this host"
+does not imply "no apptainer for the container setup".
+
+A negative probe result is cached for the life of the process. A host that
+gains a runtime needs the server restarted.
+
+None of this weakens the no-fallback rule: detection decides whether the
+*container* can start, never whether to run gdb without one.
 
 Only **one** analysis runs at a time, guarded by a lock file whose *content*
 records the holder. A second request while one is in flight is refused with a
@@ -161,6 +191,14 @@ intercept and the topic guard — not in `_build_deterministic_plan` with rule
 1c. Both layers would otherwise consume it: `_is_ack` matches "ok", "okay",
 "great" and "perfect", and the topic guard rewrites content-free follow-ups
 before the deterministic planner ever sees them.
+
+Rule 1d is also, unlike rule 1c, **not** gated on `bypass_fast_path`
+(`/fastpath off`). That flag exists to send a *question* to the LLM planner
+instead of a deterministic rule, and a bare "yes" is not such a question: the
+topic guard reformulates it into a documentation query before any planner sees
+it, so skipping rule 1d does not reroute the turn, it destroys it. Resolving an
+offer that an earlier turn made deterministically is conversational state
+resolution, in the same class as the social replies, not a routing shortcut.
 
 ---
 

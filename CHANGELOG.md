@@ -7,6 +7,62 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **`/fastpath off` silently disarmed core-dump offer acceptance**
+  (`core/bamboo/tools/bamboo_answer.py`). Rule 1d was gated on
+  `not bypass_fast_path`, alongside the deterministic routing rules. It does
+  not belong there. `bypass_fast_path` exists to hand a *question* to the LLM
+  planner instead of a deterministic rule, but a bare "yes" is not a question
+  the planner can route: `_run_topic_guard` reformulates content-free
+  follow-ups into a documentation query before any planner sees them. Skipping
+  rule 1d therefore did not reroute the turn, it destroyed it.
+
+  Observed on job 7272161793. `panda_log_analysis` diagnosed a looping-job kill
+  and appended its deterministic offer — "A core dump is present in the job
+  log: `core.1178643` (1.1 GB) … Analyse it?" — and the reply "yes please" was
+  answered with *"the documentation search did not return relevant results for
+  'yes please'"*. Nothing was wrong with the stored offer: the same evidence
+  dict that produced the appended offer is the one `get_last_core_dump_offer()`
+  reads. The turn never reached it.
+
+  Rule 1d now runs in both routing modes, in the same class as the social
+  intercepts beside it: it resolves state this process created in an earlier
+  turn, and both of its conditions — a stored offer *and* a message that is
+  nothing but an affirmative — are unchanged. Rule 1c stays gated, because an
+  explicit request *is* a question and the planner can name the tool itself.
+  `tests/test_core_dump_routing.py` now covers acceptance under
+  `bypass_fast_path=True`, the unarmed affirmative under the same flag, and
+  that 1c remains gated.
+
+- **Core-dump analysis refused on hosts where it would have worked**
+  (`packages/askpanda_atlas/askpanda_atlas/core_dump_analysis_impl.py`).
+  `preflight_atlas_environment` asked `shutil.which("apptainer")` in the MCP
+  server process. The analyzer does not use that PATH:
+  `_collect_evidence_atlas_container` starts the release with
+  `bash -lc "… source atlasLocalSetup.sh -c …"`, under a login shell whose PATH
+  is assembled from `/etc/profile.d` and is typically far wider than the one a
+  daemon inherits from systemd. ALRB also ships its own apptainer under CVMFS
+  and supplies it to the container setup when the host has none, so "no
+  apptainer on this host" never implied "no apptainer for the analysis" in the
+  first place.
+
+  On aipanda033 all three CVMFS checks passed and the tool still refused with
+  "apptainer is not on PATH", for job 7272161793.
+
+  Detection now runs four avenues in `find_container_runtime`: the new
+  `BAMBOO_CORE_DUMP_APPTAINER` override, the process PATH, a login shell's PATH
+  (probed once per process with `bash -lc 'command -v …'`, negative results
+  cached, every failure mode contained to `None`), and ALRB's bundled apptainer
+  under the CVMFS repository. `singularity` is accepted alongside `apptainer`
+  for older EL7 deployments. The refusal now names all three discovery avenues
+  and both escape hatches, so a reader cannot conclude they should fix the
+  wrong PATH. `BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK=1` drops the runtime check
+  while leaving the CVMFS checks in place.
+
+  The no-fallback-to-local-gdb rule is untouched. It governs *fallback*; this
+  governs *detection*, and the two failure modes are independent — a detection
+  false negative refuses an analysis that would have been correct, which is its
+  own kind of wrong answer.
+
 - **The log-analysis synthesis prompt was blind to the core-dump probe**
   (`core/bamboo/tools/bamboo_executor.py`). Rounds 2 and 4a added
   `core_dump_probe_state`, `core_dump_available`, `core_dump_candidates` and

@@ -145,6 +145,21 @@ METADATA_TIMEOUT_S: int = 60
 # ---------------------------------------------------------------------------
 
 
+def _truthy(value: str | None) -> bool:
+    """Interpret an environment variable as a boolean flag.
+
+    Accepts the spellings an operator is likely to reach for when setting a
+    flag by hand in a shell or a systemd unit.
+
+    Args:
+        value: Raw environment value, or ``None`` when unset.
+
+    Returns:
+        True when *value* spells an affirmative.
+    """
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _env_float(name: str, default: float) -> float:
     """Read a positive float from the environment.
 
@@ -631,6 +646,152 @@ def release_slot(root: Path, request_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Container runtime detection
+# ---------------------------------------------------------------------------
+
+#: Runtime binaries accepted, in preference order.  ``singularity`` is kept
+#: because ALRB still resolves to it on older EL7 deployments, and either one
+#: satisfies ``atlasLocalSetup.sh -c``.
+RUNTIME_BINARIES: tuple[str, ...] = ("apptainer", "singularity")
+
+#: Directory, relative to the CVMFS repository holding ATLASLocalRootBase, in
+#: which ALRB ships its own apptainer.  When this is present ALRB supplies the
+#: runtime to the container setup itself and the host needs none of its own.
+ALRB_RUNTIME_SUBPATH: tuple[str, ...] = ("containers", "sw", "apptainer")
+
+#: Seconds allowed for the login-shell probe.  A login shell sources
+#: ``/etc/profile.d`` in full, which is the point of the probe and also the
+#: only slow part of it.
+RUNTIME_PROBE_TIMEOUT_S: float = 15.0
+
+#: Memoised login-shell probe result.  ``False`` means "not probed yet"; a
+#: string or ``None`` is a completed probe.  A *negative* result is cached too,
+#: so a wedged or absent shell costs one subprocess per process rather than one
+#: per ``start``.  Entry points aside, nothing invalidates this: a host that
+#: gains apptainer needs the server restarted, or :func:`reset_runtime_cache`.
+_LOGIN_SHELL_RUNTIME: str | None | bool = False
+
+
+def reset_runtime_cache() -> None:
+    """Discard the memoised login-shell probe result.
+
+    Needed by tests, and by any caller that installs a container runtime into
+    a host with a long-running server on it.
+
+    Returns:
+        None.
+    """
+    global _LOGIN_SHELL_RUNTIME  # pylint: disable=global-statement
+    _LOGIN_SHELL_RUNTIME = False
+
+
+def _probe_login_shell_runtime() -> str | None:
+    """Look for a container runtime on a **login** shell's PATH.
+
+    This exists because the two PATHs differ and only one of them matters.
+    ``_collect_evidence_atlas_container`` runs the setup as ``bash -lc``, so
+    the PATH that decides whether the analysis can start is a login shell's —
+    assembled from ``/etc/profile`` and ``/etc/profile.d`` — not the one the
+    MCP server process inherited from systemd, which is typically far narrower.
+    Checking the server's own PATH was reporting "apptainer is not on PATH" on
+    hosts where the analysis would in fact have run.
+
+    Failures of every kind resolve to ``None``: a host with no ``bash``, a
+    profile script that hangs past :data:`RUNTIME_PROBE_TIMEOUT_S`, or a
+    non-zero exit.  The caller has one more avenue after this one, and a
+    diagnostic probe must never raise into the tool.
+
+    Returns:
+        Absolute path to the runtime binary, or ``None``.
+    """
+    global _LOGIN_SHELL_RUNTIME  # pylint: disable=global-statement
+    if _LOGIN_SHELL_RUNTIME is not False:
+        return _LOGIN_SHELL_RUNTIME  # type: ignore[return-value]
+
+    resolved: str | None = None
+    probe = "; ".join(f"command -v {name}" for name in RUNTIME_BINARIES)
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no user input
+            ["bash", "-lc", probe],
+            capture_output=True, text=True, check=False,
+            timeout=RUNTIME_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Login-shell runtime probe failed: %s", exc)
+    else:
+        for line in completed.stdout.splitlines():
+            candidate = line.strip()
+            # command -v can print a shell function or builtin name, which is
+            # not something the container setup can exec.  Only an absolute
+            # path is evidence.
+            if candidate.startswith("/") and os.access(candidate, os.X_OK):
+                resolved = candidate
+                break
+
+    _LOGIN_SHELL_RUNTIME = resolved
+    return resolved
+
+
+def find_container_runtime(
+    environ: dict[str, str] | None = None,
+    alrb: Path | None = None,
+) -> tuple[str | None, str]:
+    """Locate the container runtime that will actually start the release.
+
+    Four avenues are tried, in order of cost and directness:
+
+    1. ``$BAMBOO_CORE_DUMP_APPTAINER`` — an explicit override, for a host where
+       the runtime is installed somewhere neither PATH nor CVMFS advertises.
+    2. The server process's own PATH.  Free, and correct when it hits.
+    3. A login shell's PATH — see :func:`_probe_login_shell_runtime`.  This is
+       the avenue that matches how the analyzer runs.
+    4. ALRB's bundled apptainer under the CVMFS repository.  When present, the
+       container setup supplies its own runtime and the host needs none.
+
+    Only avenue 4 is not a binary the caller could exec; it is reported as a
+    directory because that is all the caller needs to know.  Nothing here
+    changes the no-local-gdb rule: this decides whether the *container* can
+    start, never whether to run gdb without one.
+
+    Args:
+        environ: Environment mapping, or ``None`` for :data:`os.environ`.
+        alrb: Resolved ATLASLocalRootBase, used to derive avenue 4.  ``None``
+            skips that avenue.
+
+    Returns:
+        ``(location, source)``.  *location* is ``None`` when every avenue
+        missed, in which case *source* is empty; otherwise *source* is a short
+        phrase naming the avenue, for the audit trail.
+    """
+    env = environ if environ is not None else dict(os.environ)
+
+    override = (env.get("BAMBOO_CORE_DUMP_APPTAINER") or "").strip()
+    if override:
+        if os.access(override, os.X_OK) and Path(override).is_file():
+            return override, "BAMBOO_CORE_DUMP_APPTAINER"
+        logger.warning(
+            "BAMBOO_CORE_DUMP_APPTAINER is set to %s, which is not an executable "
+            "file; falling through to discovery.", override,
+        )
+
+    for name in RUNTIME_BINARIES:
+        found = shutil.which(name)
+        if found:
+            return found, "the server's PATH"
+
+    probed = _probe_login_shell_runtime()
+    if probed:
+        return probed, "a login shell's PATH"
+
+    if alrb is not None:
+        bundled = alrb.parent.joinpath(*ALRB_RUNTIME_SUBPATH)
+        if bundled.is_dir():
+            return str(bundled), "ALRB's own CVMFS-provided apptainer"
+
+    return None, ""
+
+
+# ---------------------------------------------------------------------------
 # ATLAS environment preflight
 # ---------------------------------------------------------------------------
 
@@ -644,7 +805,15 @@ def preflight_atlas_environment(environ: dict[str, str] | None = None) -> tuple[
     There is deliberately no fallback to ``--execution local``.  A gdb outside
     the job's release resolves the payload's symbols against the wrong
     binaries and produces a confident, wrong answer, which is worse than no
-    answer at all.
+    answer at all.  That rule is about *fallback*; the runtime check below is
+    about *detection*, and the two are independent — a detection false
+    negative refuses an analysis that would have been correct, which is its
+    own kind of wrong answer.
+
+    ``BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK=1`` drops the runtime check
+    entirely, leaving the three CVMFS checks in place.  It exists so a
+    detection gap can never again block a live investigation: the analyzer
+    reports a missing runtime perfectly well on its own, a few seconds later.
 
     Args:
         environ: Environment mapping, or ``None`` for :data:`os.environ`.
@@ -672,12 +841,26 @@ def preflight_atlas_environment(environ: dict[str, str] | None = None) -> tuple[
             f"atlasLocalSetup.sh is missing at {setup}, so the release container cannot "
             "be set up. The CVMFS repository looks incomplete."
         )
-    if shutil.which("apptainer") is None:
+
+    if _truthy(env.get("BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK")):
+        logger.info("Container runtime check skipped by BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK.")
+        return True, ""
+
+    location, source = find_container_runtime(env, base)
+    if location is None:
+        names = " or ".join(RUNTIME_BINARIES)
+        bundled = base.parent.joinpath(*ALRB_RUNTIME_SUBPATH)
         return False, (
-            "apptainer is not on PATH, so the ATLAS release container cannot be started. "
-            "Core-dump analysis will not fall back to the host's own gdb: a mismatched "
-            "release resolves the payload's symbols incorrectly."
+            f"No container runtime was found, so the ATLAS release container cannot be "
+            f"started. Looked for {names} on this process's PATH, on a login shell's "
+            f"PATH (which is what atlasLocalSetup.sh runs under), and for ALRB's own "
+            f"apptainer at {bundled}. Set BAMBOO_CORE_DUMP_APPTAINER to an explicit "
+            f"path, or BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK=1 to let the analyzer decide. "
+            f"Core-dump analysis will not fall back to the host's own gdb: a mismatched "
+            f"release resolves the payload's symbols incorrectly."
         )
+
+    logger.debug("Container runtime resolved via %s: %s", source, location)
     return True, ""
 
 
@@ -1354,6 +1537,8 @@ __all__ = [
     "mark_failed",
     "new_manifest",
     "preflight_atlas_environment",
+    "find_container_runtime",
+    "reset_runtime_cache",
     "read_manifest",
     "reconcile_state",
     "release_slot",
