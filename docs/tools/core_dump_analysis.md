@@ -91,7 +91,7 @@ server restart mid-run loses nothing: `status` still answers from disk.
 | Container runtime override | *(discovered)* | `BAMBOO_CORE_DUMP_APPTAINER` |
 | Skip the runtime check | off | `BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK` |
 | Evidence budget | 120 000 chars | `BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS` |
-| CPython gdb helper | *(searched)* | `BAMBOO_CORE_DUMP_PYTHON_GDB` |
+| CPython gdb helper dir | *(searched)* | `BAMBOO_CORE_DUMP_PYTHON_GDB` |
 
 The 120 s inline wait assumes the 300 s `BAMBOO_MCP_CLIENT_TIMEOUT` default. If
 a deployment pins that lower, lower the inline wait to match or `start` will
@@ -154,8 +154,38 @@ no libpython candidate.
 The analyzer therefore searches explicitly, in a bootstrap that runs before
 `py-bt`: an explicit `--python-gdb-helper` first, then `<objfile>-gdb.py` and
 `share/gdb/auto-load/` for every loaded `libpython*` or `python3*` object. What
-it searched is recorded in `gdb_metadata.python_helper` and named in the
-`python.reason` text, so "not found" is distinguishable from "not looked for".
+it searched, and the CPython minor version detected from the core, are recorded
+in `gdb_metadata.python_helper` and named in the `python.reason` text — so "not
+found", "not looked for" and "found but wrong version" are all distinguishable.
+
+**The helper is version-specific.** It reads CPython's own struct layouts, and
+those change between minor versions — 3.12's frame representation is not 3.11's.
+A single fixed path is therefore the wrong shape for a deployment that analyses
+jobs from several releases. `BAMBOO_CORE_DUMP_PYTHON_GDB` accepts a *directory*
+of per-version helpers:
+
+```
+/data/bamboo/tools/cpython-gdb/3.11/python-gdb.py
+/data/bamboo/tools/cpython-gdb/3.12.13/python-gdb.py
+```
+
+The bootstrap detects the version from the core's own `libpython` object, takes
+the matching subdirectory (exact `X.Y`, then any `X.Y.*`), and declines rather
+than loading a mismatched helper. A single file is still accepted for a
+deployment where every job uses the same interpreter.
+
+**The path is read on the host and the helper is copied into the job
+directory**, which the container sees at `/srv`. It cannot travel as an
+environment variable: ALRB launches apptainer with `--cleanenv` and `--contain`,
+binding only `/cvmfs`, the user's home, the job directory and a scratch path, so
+a helper at, say, `/data/bamboo/tools` does not exist as far as the bootstrap is
+concerned. Staged copies join the worker and runner scripts in the same
+cleanup — removed on success, kept on failure.
+
+A helper that loads but yields no frames is reported as such, naming the
+detected version, rather than as "this is likely not a Python process". The two
+usual causes are a minor-version mismatch and a `libpython` with no DWARF for
+the helper to read interpreter structures from.
 
 Only **one** analysis runs at a time, guarded by a lock file whose *content*
 records the holder. A second request while one is in flight is refused with a

@@ -2389,3 +2389,148 @@ def test_next_steps_rule_is_in_the_system_prompt() -> None:
     prompt = acd.build_system_prompt("hang")
     assert "does not stage out" in prompt
     assert "error quota" in prompt
+
+
+# ---------------------------------------------------------------------------
+# CPython helper: version matching and container visibility
+# ---------------------------------------------------------------------------
+
+
+def _helper_tree(tmp_path: Path, versions: tuple[str, ...]) -> Path:
+    """Build a directory of per-version CPython helpers.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        versions: Directory names to create, e.g. ``("3.11", "3.12.13")``.
+
+    Returns:
+        The tree root.
+    """
+    root = tmp_path / "cpython-gdb"
+    for version in versions:
+        target = root / version / acd.PY_HELPER_NAME
+        target.parent.mkdir(parents=True)
+        target.write_text("# helper\n")
+    return root
+
+
+def test_helper_directory_selects_the_matching_minor_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper reads CPython struct layouts, which change between minors.
+
+    A 3.12 helper against a 3.11 core resolves the interpreter's frames
+    incorrectly or not at all, so version selection is not a nicety.
+    """
+    root = _helper_tree(tmp_path, ("3.11", "3.12.13"))
+    _output, executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/libpython3.12.so.1.0"], override=str(root),
+    )
+    assert executed == [f"source {root / '3.12.13' / acd.PY_HELPER_NAME}"]
+
+
+def test_helper_directory_declines_a_mismatched_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No helper is better than the wrong helper."""
+    root = _helper_tree(tmp_path, ("3.11", "3.12.13"))
+    _output, executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/libpython3.9.so.1.0"], override=str(root),
+    )
+    assert executed == []
+
+
+def test_the_detected_python_version_is_reported() -> None:
+    """The version has to reach the reader, or they cannot supply a helper."""
+    parsed = acd._parse_python_helper(
+        f"{acd.PY_HELPER_LOADED_MARKER} \n"
+        f"{acd.PY_HELPER_TRIED_MARKER} /a\n"
+        f"{acd.PY_HELPER_VERSION_MARKER} 3.12\n"
+    )
+    assert parsed["python_version"] == "3.12"
+
+
+def test_staging_copies_a_helper_file_into_the_job_dir(tmp_path: Path) -> None:
+    """A host path outside the container's mounts is invisible to the bootstrap.
+
+    ALRB binds /cvmfs, the user's home, the job dir at /srv and little else,
+    under --contain. An override at /data/bamboo/tools was silently not found.
+    """
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    helper = tmp_path / "elsewhere" / acd.PY_HELPER_NAME
+    helper.parent.mkdir()
+    helper.write_text("# helper\n")
+
+    container_path, created = acd._stage_python_helper(str(helper), job_dir)
+    assert container_path.startswith("/srv/")
+    assert (job_dir / acd.PY_HELPER_STAGE_DIR / acd.PY_HELPER_NAME).is_file()
+    assert created
+
+
+def test_staging_copies_a_helper_tree_preserving_versions(tmp_path: Path) -> None:
+    """The per-version layout must survive the copy, or selection cannot work."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    root = _helper_tree(tmp_path, ("3.11", "3.12.13"))
+
+    container_path, _created = acd._stage_python_helper(str(root), job_dir)
+    staged = job_dir / acd.PY_HELPER_STAGE_DIR
+    assert container_path == f"/srv/{acd.PY_HELPER_STAGE_DIR}"
+    assert (staged / "3.11" / acd.PY_HELPER_NAME).is_file()
+    assert (staged / "3.12.13" / acd.PY_HELPER_NAME).is_file()
+
+
+def test_staging_ignores_a_path_that_does_not_exist(tmp_path: Path) -> None:
+    """A stale override must not stop the analysis or the fallback search."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    container_path, created = acd._stage_python_helper(str(tmp_path / "gone"), job_dir)
+    assert container_path == ""
+    assert created == []
+
+
+def test_staging_a_directory_without_helpers_is_ignored(tmp_path: Path) -> None:
+    """Pointing at the wrong directory should degrade, not fail."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    container_path, _created = acd._stage_python_helper(str(empty), job_dir)
+    assert container_path == ""
+
+
+def test_staging_is_bounded(tmp_path: Path) -> None:
+    """A misconfigured path must not mirror an arbitrary tree into the job dir."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    root = tmp_path / "many"
+    for index in range(acd.PY_HELPER_MAX_FILES + 5):
+        target = root / f"3.{index}" / acd.PY_HELPER_NAME
+        target.parent.mkdir(parents=True)
+        target.write_text("# helper\n")
+
+    acd._stage_python_helper(str(root), job_dir)
+    staged = list((job_dir / acd.PY_HELPER_STAGE_DIR).rglob(acd.PY_HELPER_NAME))
+    assert len(staged) == acd.PY_HELPER_MAX_FILES
+
+
+def test_a_loaded_helper_that_yields_nothing_says_why() -> None:
+    """"Not a Python process" would be plainly wrong for an Athena payload."""
+    result = acd._summarise_python(
+        "", "", "", False,
+        {"loaded": "/srv/.pygdb/3.12/python-gdb.py", "searched": [], "python_version": "3.12"},
+    )
+    assert result["available"] is False
+    assert "loaded" in result["reason"]
+    assert "3.12" in result["reason"]
+    assert "not a Python process" not in result["reason"]
+
+
+def test_the_missing_helper_reason_names_the_required_version() -> None:
+    """Telling the reader to supply a helper is useless without the version."""
+    result = acd._summarise_python(
+        "", "", 'Undefined command: "py-bt".', False,
+        {"loaded": "", "searched": ["/cvmfs/a/libpython3.12.so-gdb.py"], "python_version": "3.12"},
+    )
+    assert "CPython 3.12" in result["reason"]

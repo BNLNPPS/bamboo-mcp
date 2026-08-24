@@ -2790,6 +2790,20 @@ _ERROR_LINE_RE = re.compile(
 #: Markers the bootstrap prints so its outcome can be parsed out of the phase.
 PY_HELPER_LOADED_MARKER = "@@BAMBOO_PYHELPER_LOADED@@"
 PY_HELPER_TRIED_MARKER = "@@BAMBOO_PYHELPER_TRIED@@"
+PY_HELPER_VERSION_MARKER = "@@BAMBOO_PYHELPER_VERSION@@"
+
+#: Filename the CPython helper is expected to carry, both as an override target
+#: and inside a directory of per-version helpers.
+PY_HELPER_NAME = "python-gdb.py"
+
+#: Subdirectory of --job-dir into which an override is staged for the container.
+PY_HELPER_STAGE_DIR = ".core_dump_analyzer_pygdb"
+
+#: Bounds on staging a directory of helpers.  The real file is around 100 KiB
+#: and a deployment carries a handful of versions; anything far outside that is
+#: a misconfigured path rather than a helper tree.
+PY_HELPER_MAX_FILES = 12
+PY_HELPER_MAX_BYTES = 4 * 1024 * 1024
 
 #: Run inside gdb before ``py-bt``, to load the CPython helper that defines it.
 #:
@@ -2802,17 +2816,41 @@ PY_HELPER_TRIED_MARKER = "@@BAMBOO_PYHELPER_TRIED@@"
 #: searched so "not available" can be told apart from "not looked for".
 _PY_HELPER_BOOTSTRAP_SRC = """
 import os
+import re
 import gdb
 
-candidates = []
 override = OVERRIDE
-if override:
-    candidates.append(override)
+
+version = ""
+python_objects = []
 for objfile in gdb.objfiles():
     name = getattr(objfile, "filename", "") or ""
     base = os.path.basename(name)
     if "libpython" not in base and not base.startswith("python3"):
         continue
+    python_objects.append(name)
+    if not version:
+        found = re.search(r"python(\\d+)\\.(\\d+)", base)
+        if found:
+            version = found.group(1) + "." + found.group(2)
+
+candidates = []
+if override:
+    if os.path.isdir(override):
+        # A directory of per-version helpers.  The helper reads CPython's own
+        # struct layouts, which change between minor versions, so the version
+        # detected from the core selects the subdirectory.
+        if version:
+            candidates.append(os.path.join(override, version, "python-gdb.py"))
+            for entry in sorted(os.listdir(override)):
+                if entry.startswith(version + "."):
+                    candidates.append(os.path.join(override, entry, "python-gdb.py"))
+        candidates.append(os.path.join(override, "python-gdb.py"))
+    else:
+        candidates.append(override)
+
+for name in python_objects:
+    base = os.path.basename(name)
     candidates.append(name + "-gdb.py")
     root = os.path.dirname(os.path.dirname(name))
     candidates.append(os.path.join(root, "share", "gdb", "auto-load", base + "-gdb.py"))
@@ -2834,6 +2872,7 @@ for candidate in candidates:
 
 print("LOADED_MARKER " + loaded)
 print("TRIED_MARKER " + "|".join(tried))
+print("VERSION_MARKER " + version)
 """
 
 
@@ -2855,6 +2894,7 @@ def _python_helper_bootstrap_command(override: str = "") -> str:
         .replace("OVERRIDE", repr(override))
         .replace("LOADED_MARKER", PY_HELPER_LOADED_MARKER)
         .replace("TRIED_MARKER", PY_HELPER_TRIED_MARKER)
+        .replace("VERSION_MARKER", PY_HELPER_VERSION_MARKER)
     )
     return "python exec(" + repr(source) + ")"
 
@@ -2866,10 +2906,13 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
         text: Output of the bootstrap section.
 
     Returns:
-        ``{"loaded": str, "searched": list[str]}``.  ``loaded`` is ``""`` when
-        no helper was found, which is a different fact from not having looked.
+        ``{"loaded", "searched", "python_version"}``.  ``loaded`` is ``""``
+        when no helper was found, which is a different fact from not having
+        looked; ``python_version`` is the CPython minor version detected from
+        the core, and selects which helper in a directory applies.
     """
     loaded = ""
+    version = ""
     searched: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -2878,7 +2921,9 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
         elif stripped.startswith(PY_HELPER_TRIED_MARKER):
             payload = stripped[len(PY_HELPER_TRIED_MARKER):].strip()
             searched = [item for item in payload.split("|") if item]
-    return {"loaded": loaded, "searched": searched}
+        elif stripped.startswith(PY_HELPER_VERSION_MARKER):
+            version = stripped[len(PY_HELPER_VERSION_MARKER):].strip()
+    return {"loaded": loaded, "searched": searched, "python_version": version}
 
 
 def _last_error_line(text: str) -> str:
@@ -2903,6 +2948,91 @@ def _last_error_line(text: str) -> str:
     """
     matches = [line.strip() for line in text.splitlines() if _ERROR_LINE_RE.match(line)]
     return matches[-1] if matches else ""
+
+
+def _stage_python_helper(override: str, job_dir: Path) -> tuple[str, list[Path]]:
+    """Copy a CPython gdb helper into the job directory for the container.
+
+    The container sees almost nothing of the host. ALRB binds ``/cvmfs``, the
+    user's home, the working directory at ``/srv`` and little else, all with
+    ``--contain``, so a helper anywhere outside those — ``/data/bamboo/tools``,
+    for instance — simply does not exist as far as the bootstrap is concerned.
+    Passing the host path through unchanged silently found nothing.
+
+    Staging it under ``--job-dir`` reuses the one directory that is already
+    mounted, and puts the copy in the same list the worker and runner scripts
+    use, so it is cleaned up on success and kept on failure alongside them.
+
+    A directory is copied as a tree of ``python-gdb.py`` files only, bounded in
+    count and size: the point is to carry a handful of small helpers, not to
+    mirror an arbitrary path into the job directory.
+
+    Args:
+        override: Host path to a helper file or a directory of per-version
+            helpers, or ``""``.
+        job_dir: The job directory, mounted at ``/srv``.
+
+    Returns:
+        ``(container_path, created)``. *container_path* is ``""`` when there
+        was nothing usable to stage, in which case the bootstrap falls back to
+        searching next to the core's own Python objects.
+    """
+    if not override:
+        return "", []
+
+    source = Path(override).expanduser()
+    staged_root = job_dir / PY_HELPER_STAGE_DIR
+    created: list[Path] = []
+
+    if source.is_file():
+        staged_root.mkdir(parents=True, exist_ok=True)
+        target = staged_root / PY_HELPER_NAME
+        shutil.copy2(source, target)
+        created.extend([target, staged_root])
+        return _container_path(target, job_dir), created
+
+    if not source.is_dir():
+        print(
+            f"[!] BAMBOO_CORE_DUMP_PYTHON_GDB points at {source}, which is neither a "
+            "file nor a directory; ignoring it.",
+            file=sys.stderr,
+        )
+        return "", []
+
+    copied = 0
+    total = 0
+    for candidate in sorted(source.rglob(PY_HELPER_NAME)):
+        if copied >= PY_HELPER_MAX_FILES:
+            break
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            continue
+        if size > PY_HELPER_MAX_BYTES:
+            continue
+        relative = candidate.relative_to(source)
+        target = staged_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidate, target)
+        created.append(target)
+        copied += 1
+        total += size
+
+    if not copied:
+        print(
+            f"[!] No {PY_HELPER_NAME} found under {source}; ignoring "
+            "BAMBOO_CORE_DUMP_PYTHON_GDB.",
+            file=sys.stderr,
+        )
+        return "", created
+
+    # Deepest first, so directories are empty by the time they are unlinked.
+    for directory in sorted(
+        {path.parent for path in created}, key=lambda item: len(item.parts), reverse=True
+    ):
+        if directory not in created:
+            created.append(directory)
+    return _container_path(staged_root, job_dir), created
 
 
 def _collect_evidence_atlas_container(
@@ -2964,8 +3094,20 @@ def _collect_evidence_atlas_container(
         json_in_container = _container_path(json_path, job_dir)
         raw_in_container = _container_path(raw_path, job_dir)
         runner_in_container = _container_path(runner_path, job_dir)
+
+        # The override is a *host* path; the inner worker needs one the
+        # container can see.  Stage it under the job directory and hand the
+        # /srv form onward.
+        helper_in_container, helper_created = _stage_python_helper(
+            getattr(args, "python_gdb_helper", "") or "", job_dir
+        )
+        created.extend(helper_created)
+        container_args = copy.copy(args)
+        container_args.python_gdb_helper = helper_in_container
+
         worker_argv = _container_worker_args(
-            args, core_in_container, worker_in_container, json_in_container, raw_in_container, job_dir
+            container_args, core_in_container, worker_in_container,
+            json_in_container, raw_in_container, job_dir,
         )
         runner_path.write_text(
             "#!/bin/bash\nset -euo pipefail\nexec " + shlex.join(worker_argv) + "\n",
@@ -3073,7 +3215,10 @@ def _collect_evidence_atlas_container(
         else:
             for path in created:
                 try:
-                    path.unlink()
+                    if path.is_dir():
+                        path.rmdir()
+                    else:
+                        path.unlink()
                 except OSError:
                     pass
 
@@ -3171,10 +3316,16 @@ def _summarise_python(
         if searched:
             shown = ", ".join(searched[:4])
             more = f" (+{len(searched) - 4} more)" if len(searched) > 4 else ""
+            version = (helper or {}).get("python_version") or ""
             reason += (
                 f" It was searched for and not found at: {shown}{more}. The release "
                 "does not ship it next to its Python objects; pass "
-                "--python-gdb-helper to point at one."
+                "--python-gdb-helper to point at one"
+                + (
+                    f", built for CPython {version} — the helper reads interpreter "
+                    "structures that change between minor versions, so it must match."
+                    if version else "."
+                )
             )
         elif helper is not None:
             reason += (
@@ -3187,6 +3338,19 @@ def _summarise_python(
         or re.search(r'^\s*File "[^"]+", line \d+, in ', text, re.M)
     )
     if not has_frames:
+        info = helper or {}
+        if info.get("loaded"):
+            return {
+                "available": False,
+                "reason": (
+                    f"The CPython helper at {info['loaded']} loaded, but py-bt produced no "
+                    "Python frames. The usual cause is a helper built for a different "
+                    "CPython minor version than the one in the core"
+                    + (f" ({info['python_version']})" if info.get("python_version") else "")
+                    + ", or a libpython with no DWARF debug information for the helper to "
+                    "read interpreter structures from."
+                ),
+            }
         return {"available": False, "reason": "py-bt produced no Python frames; this is likely not a Python process."}
 
     backtrace, _ = truncate(redact(text.strip(), redact_enabled), SECTION_LIMITS["python_backtrace"])

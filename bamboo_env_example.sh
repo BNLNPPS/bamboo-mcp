@@ -431,10 +431,25 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # gdb_raw.txt in the workspace are never budgeted.
 # export BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS="120000"
 
-# Path to a CPython gdb helper (python-gdb.py), enabling py-bt inside the
-# release container.  Normally unnecessary — the analyzer searches next to every
-# libpython object loaded from the core — but ATLAS/LCG releases do not always
-# ship one, and gdb's auto-load then has no candidate to find.  Passed to the
-# analyzer as an argument, not inherited: ALRB launches apptainer with
-# --cleanenv, so no host environment variable survives into the container.
-# export BAMBOO_CORE_DUMP_PYTHON_GDB="/path/to/python-gdb.py"
+# CPython gdb helper(s), enabling py-bt inside the release container.  Normally
+# unnecessary — the analyzer searches next to every libpython object loaded from
+# the core — but ATLAS/LCG releases do not always ship one, and gdb's auto-load
+# then has no candidate to find.
+#
+# The helper reads CPython's own struct layouts, which change between MINOR
+# versions, so it must match the interpreter in the core: a 3.12 helper cannot
+# read a 3.11 process.  Point this at a DIRECTORY of per-version helpers rather
+# than a single file, laid out as <version>/python-gdb.py; the analyzer detects
+# the version from the core and picks the matching one, and declines rather than
+# loading a mismatched helper.  A single file still works when every job you
+# analyse uses the same interpreter.
+#
+#   /data/bamboo/tools/cpython-gdb/3.11/python-gdb.py
+#   /data/bamboo/tools/cpython-gdb/3.12.13/python-gdb.py
+#
+# The path is read on the HOST and the helper is copied into the job directory,
+# which the container sees at /srv.  It is not passed as an environment
+# variable: ALRB launches apptainer with --cleanenv and binds only /cvmfs, the
+# user's home, the job directory and a scratch path, so a helper anywhere else
+# does not exist as far as the container is concerned.
+# export BAMBOO_CORE_DUMP_PYTHON_GDB="/data/bamboo/tools/cpython-gdb"
