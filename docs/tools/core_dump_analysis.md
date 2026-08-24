@@ -92,6 +92,7 @@ server restart mid-run loses nothing: `status` still answers from disk.
 | Skip the runtime check | off | `BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK` |
 | Evidence budget | 120 000 chars | `BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS` |
 | CPython gdb helper dir | *(searched)* | `BAMBOO_CORE_DUMP_PYTHON_GDB` |
+| Separate debug files | *(none)* | `BAMBOO_CORE_DUMP_DEBUG_DIR` |
 
 The 120 s inline wait assumes the 300 s `BAMBOO_MCP_CLIENT_TIMEOUT` default. If
 a deployment pins that lower, lower the inline wait to match or `start` will
@@ -201,8 +202,22 @@ release names `lib/python3.13/site-packages`. The third exists because an
 interpreter packaged as a plain `python` executable carries no version at all.
 Both `python-gdb.py` and `libpython.py` are accepted as filenames.
 
-A helper that loads but yields no frames is reported as such, naming the
-detected version, rather than as "this is likely not a Python process". The two
+When a helper loads, the bootstrap runs `gdb.lookup_type("PyObject")` and
+records the outcome as `interpreter_types`. That distinguishes the three
+reasons `py-bt` can come back empty, which otherwise look identical:
+
+- **No helper found.** Reported with every path searched.
+- **Helper loaded, types unresolvable.** The release's libpython carries no
+  DWARF, so there are no interpreter structures to walk — a property of the
+  build, not of the helper. `BAMBOO_CORE_DUMP_DEBUG_DIR` points gdb at separate
+  `.debug` files when the release ships them; it is applied as `-iex`, since
+  gdb binds debug files when an objfile is first read, and is *not* staged into
+  the job directory because it is expected to be a CVMFS path already visible
+  in the container.
+- **Helper loaded, types fine, no frames.** The interpreter was not executing
+  Python at the moment of capture. For a process caught inside a C-level
+  shutdown or wait — a hung XRootD finalization, say — that is the expected
+  result and not a gap in the evidence. The two
 usual causes are a minor-version mismatch and a `libpython` with no DWARF for
 the helper to read interpreter structures from.
 

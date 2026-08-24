@@ -978,6 +978,9 @@ def build_analyzer_argv(
         "--raw-gdb", str(workspace / GDB_RAW_NAME),
         "--container-timeout", str(int(timeout)),
     ]
+    debug_dir = (os.getenv("BAMBOO_CORE_DUMP_DEBUG_DIR") or "").strip()
+    if debug_dir:
+        argv += ["--debug-file-directory", debug_dir]
     helper = (os.getenv("BAMBOO_CORE_DUMP_PYTHON_GDB") or "").strip()
     if helper:
         argv += ["--python-gdb-helper", helper]

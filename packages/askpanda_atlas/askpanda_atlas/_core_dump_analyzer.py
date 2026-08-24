@@ -506,6 +506,7 @@ def run_gdb_phase(
     progress: bool = True,
     detail: bool = False,
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+    extra_init: Sequence[str] = (),
 ) -> GdbPhaseResult:
     """Run one batch of gdb commands against the core file.
 
@@ -524,6 +525,10 @@ def run_gdb_phase(
             phase is running. Has no effect if ``progress`` is ``False``.
         heartbeat_interval: Seconds between heartbeat messages when ``detail``
             is enabled.
+        extra_init: Additional settings applied before the core is loaded.
+            They must run as ``-iex``: gdb resolves separate debug files when
+            an objfile is first read, so a ``set debug-file-directory`` issued
+            afterwards has no effect on anything already loaded.
 
     Returns:
         A :class:`GdbPhaseResult` describing the invocation.
@@ -532,6 +537,8 @@ def run_gdb_phase(
     for setting in GDB_EARLY_INIT_COMMANDS:
         argv += ["-eiex", setting]
     for setting in GDB_INIT_COMMANDS:
+        argv += ["-iex", setting]
+    for setting in extra_init:
         argv += ["-iex", setting]
     if exe_path:
         argv.append(exe_path)
@@ -2616,6 +2623,7 @@ def _collect_evidence_local(
         print("[*] Resolving executable...", file=sys.stderr)
 
     heartbeat_interval = getattr(args, "heartbeat_interval", DEFAULT_HEARTBEAT_INTERVAL)
+    debug_init = _debug_file_init(args)
     probe = run_gdb_phase(
         gdb_path, core_path, None, "probe", [("program", "info program")], args.gdb_timeout,
         progress=progress, detail=detail, heartbeat_interval=heartbeat_interval,
@@ -2640,6 +2648,7 @@ def _collect_evidence_local(
         result = run_gdb_phase(
             gdb_path, core_path, exe_path, name, commands, args.gdb_timeout,
             progress=progress, detail=detail, heartbeat_interval=heartbeat_interval,
+            extra_init=debug_init,
         )
         sections.update(result.sections)
         errors[name] = result.stderr
@@ -2660,6 +2669,7 @@ def _collect_evidence_local(
         result = run_gdb_phase(
             gdb_path, core_path, exe_path, "targeted_threads", commands, args.gdb_timeout,
             progress=progress, detail=detail, heartbeat_interval=heartbeat_interval,
+            extra_init=debug_init,
         )
         sections.update(result.sections)
         errors["targeted_threads"] = result.stderr
@@ -2769,6 +2779,11 @@ def _container_worker_args(args: argparse.Namespace, core_in_container: str,
         argv += ["--exe", exe_arg]
     if args.gdb:
         argv += ["--gdb", args.gdb]
+    debug_dir = getattr(args, "debug_file_directory", "") or ""
+    if debug_dir:
+        # Not staged: unlike the CPython helper this is expected to be a CVMFS
+        # path, already visible inside the container.
+        argv += ["--debug-file-directory", debug_dir]
     helper = getattr(args, "python_gdb_helper", "") or ""
     if helper:
         # Passed as an argument rather than inherited: ALRB launches apptainer
@@ -2795,6 +2810,7 @@ PY_HELPER_LOADED_MARKER = "@@BAMBOO_PYHELPER_LOADED@@"
 PY_HELPER_TRIED_MARKER = "@@BAMBOO_PYHELPER_TRIED@@"
 PY_HELPER_VERSION_MARKER = "@@BAMBOO_PYHELPER_VERSION@@"
 PY_HELPER_OBJECTS_MARKER = "@@BAMBOO_PYHELPER_OBJECTS@@"
+PY_HELPER_TYPES_MARKER = "@@BAMBOO_PYHELPER_TYPES@@"
 
 #: Filenames the CPython helper is shipped under.  ``python-gdb.py`` is the
 #: installed name; ``libpython.py`` is what it is called in the CPython source
@@ -2894,7 +2910,21 @@ for candidate in candidates:
     loaded = candidate
     break
 
+# Whether the helper can actually read the interpreter.  This is the one
+# discriminator between the two reasons py-bt yields nothing: a helper built
+# for the wrong minor version, and a libpython stripped of DWARF.  Without
+# type information gdb cannot resolve PyObject, and every frame walk the
+# helper attempts fails at the first step.
+types_ok = "no"
+if loaded:
+    try:
+        gdb.lookup_type("PyObject")
+        types_ok = "yes"
+    except Exception:
+        types_ok = "no"
+
 print("LOADED_MARKER " + loaded)
+print("TYPES_MARKER " + types_ok)
 print("TRIED_MARKER " + "|".join(tried))
 print("VERSION_MARKER " + version)
 print("OBJECTS_MARKER " + "|".join(python_objects[:8]))
@@ -2925,6 +2955,7 @@ def _python_helper_bootstrap_command(override: str = "", hint: str = "") -> str:
         .replace("TRIED_MARKER", PY_HELPER_TRIED_MARKER)
         .replace("VERSION_MARKER", PY_HELPER_VERSION_MARKER)
         .replace("OBJECTS_MARKER", PY_HELPER_OBJECTS_MARKER)
+        .replace("TYPES_MARKER", PY_HELPER_TYPES_MARKER)
     )
     return "python exec(" + repr(source) + ")"
 
@@ -2990,6 +3021,7 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
     """
     loaded = ""
     version = ""
+    types_ok = False
     objects: list[str] = []
     searched: list[str] = []
     for line in text.splitlines():
@@ -3001,6 +3033,8 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
             searched = [item for item in payload.split("|") if item]
         elif stripped.startswith(PY_HELPER_VERSION_MARKER):
             version = stripped[len(PY_HELPER_VERSION_MARKER):].strip()
+        elif stripped.startswith(PY_HELPER_TYPES_MARKER):
+            types_ok = stripped[len(PY_HELPER_TYPES_MARKER):].strip() == "yes"
         elif stripped.startswith(PY_HELPER_OBJECTS_MARKER):
             payload = stripped[len(PY_HELPER_OBJECTS_MARKER):].strip()
             objects = [item for item in payload.split("|") if item]
@@ -3009,6 +3043,7 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
         "searched": searched,
         "python_version": version,
         "python_objects": objects,
+        "interpreter_types": types_ok,
     }
 
 
@@ -3374,6 +3409,33 @@ def collect_evidence(
     return evidence, raw
 
 
+def _debug_file_init(args: argparse.Namespace) -> tuple[str, ...]:
+    """Build the gdb settings that add a separate debug-file directory.
+
+    ATLAS releases ship libpython stripped of DWARF, which is what stops
+    ``py-bt`` even when the correct helper loads: without type information gdb
+    cannot resolve ``PyObject``, so the helper has nothing to walk.  When a
+    release does ship matching ``.debug`` files, pointing gdb at them restores
+    the Python-level backtrace.
+
+    The path must be visible *inside* the release container, so in practice it
+    lives under ``/cvmfs``.  Unlike the CPython helper this is not staged into
+    the job directory: debug files for a full release run to hundreds of
+    megabytes and copying them into a workspace that already holds a gigabyte
+    core would be its own problem.
+
+    Args:
+        args: Parsed arguments.
+
+    Returns:
+        Settings for ``run_gdb_phase(extra_init=...)``, empty when unset.
+    """
+    directory = (getattr(args, "debug_file_directory", "") or "").strip()
+    if not directory:
+        return ()
+    return (f"set debug-file-directory {directory}",)
+
+
 def _summarise_python(
     text: str, source: str, stderr: str, redact_enabled: bool,
     helper: dict[str, Any] | None = None,
@@ -3442,15 +3504,31 @@ def _summarise_python(
     if not has_frames:
         info = helper or {}
         if info.get("loaded"):
+            version = info.get("python_version") or ""
+            if info.get("interpreter_types"):
+                return {
+                    "available": False,
+                    "reason": (
+                        f"The CPython helper at {info['loaded']} loaded and gdb can resolve "
+                        "the interpreter's types, but py-bt still produced no Python frames. "
+                        "The interpreter was most likely not executing Python code at the "
+                        "point the core was taken — for a process captured inside a C-level "
+                        "shutdown or wait, that is expected and not a gap in the evidence."
+                    ),
+                }
             return {
                 "available": False,
                 "reason": (
-                    f"The CPython helper at {info['loaded']} loaded, but py-bt produced no "
-                    "Python frames. The usual cause is a helper built for a different "
-                    "CPython minor version than the one in the core"
-                    + (f" ({info['python_version']})" if info.get("python_version") else "")
-                    + ", or a libpython with no DWARF debug information for the helper to "
-                    "read interpreter structures from."
+                    f"The CPython helper at {info['loaded']} loaded, but gdb cannot resolve "
+                    "PyObject, so the helper has no interpreter structures to walk and py-bt "
+                    "produces nothing. This build's libpython carries no DWARF debug "
+                    "information"
+                    + (f" (CPython {version})" if version else "")
+                    + " — a property of how the release was packaged, not of the helper, "
+                    "which matched and loaded correctly. Point --debug-file-directory at a "
+                    "directory holding the matching .debug file if the release ships one; "
+                    "otherwise no Python-level backtrace is obtainable from this core and "
+                    "the C-level stacks are the whole of the evidence."
                 ),
             }
         return {"available": False, "reason": "py-bt produced no Python frames; this is likely not a Python process."}
@@ -4493,6 +4571,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--release-setup", default=None,
                         help="Release setup script for atlas-container mode "
                              "(default: <job-dir>/my_release_setup.sh).")
+    parser.add_argument("--debug-file-directory", default="",
+                        help="Directory holding separate .debug files, applied before the core "
+                             "is loaded. Needed when the release ships libpython stripped of "
+                             "DWARF, which stops py-bt even with the correct helper. Must be "
+                             "visible inside the release container, so in practice under /cvmfs.")
     parser.add_argument("--python-gdb-helper", default="",
                         help="Path to a CPython gdb helper (python-gdb.py) to source before py-bt. "
                              "Only needed when the release does not ship one next to its Python "

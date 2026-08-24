@@ -2645,3 +2645,98 @@ def test_interpreter_objects_are_reported(tmp_path: Path, monkeypatch: pytest.Mo
     assert parsed["python_objects"] == ["/cvmfs/rel/lib/libpython3.13.so.1.0"]
     assert parsed["python_version"] == "3.13"
     assert parsed["loaded"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Why py-bt produced nothing: DWARF vs version vs no Python on the stack
+# ---------------------------------------------------------------------------
+
+
+def test_missing_dwarf_is_named_as_the_cause(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The helper loaded and matched; PyObject is what gdb cannot resolve.
+
+    Guessing between "wrong version" and "no DWARF" sent the reader looking for
+    a different helper when the helper was already correct. The probe settles
+    it: without type information there is nothing for the helper to walk.
+    """
+    result = acd._summarise_python(
+        "", "", "", False,
+        {
+            "loaded": "/srv/.pygdb/3.13/python-gdb.py",
+            "searched": [],
+            "python_version": "3.13",
+            "interpreter_types": False,
+        },
+    )
+    assert result["available"] is False
+    assert "PyObject" in result["reason"]
+    assert "DWARF" in result["reason"]
+    assert "not of the helper" in result["reason"]
+    assert "--debug-file-directory" in result["reason"]
+
+
+def test_resolvable_types_point_at_the_stack_instead() -> None:
+    """Types resolve but no frames: the process was not in Python code."""
+    result = acd._summarise_python(
+        "", "", "", False,
+        {
+            "loaded": "/srv/.pygdb/3.13/python-gdb.py",
+            "searched": [],
+            "python_version": "3.13",
+            "interpreter_types": True,
+        },
+    )
+    assert "not executing Python code" in result["reason"]
+    assert "DWARF" not in result["reason"]
+
+
+def test_the_type_probe_runs_only_when_a_helper_loaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No helper means no types question to ask."""
+    root = _helper_tree(tmp_path, ("3.13",))
+    output, _executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/libpython3.13.so.1.0"], override=str(root),
+    )
+    parsed = acd._parse_python_helper(output)
+    # The stub gdb has no lookup_type, so the probe's except branch is taken.
+    assert parsed["loaded"].endswith("python-gdb.py")
+    assert parsed["interpreter_types"] is False
+
+
+def test_debug_file_directory_becomes_an_init_setting() -> None:
+    """It must be -iex: gdb binds separate debug files when an objfile is read."""
+    settings = acd._debug_file_init(
+        argparse.Namespace(debug_file_directory="/cvmfs/atlas.cern.ch/debug")
+    )
+    assert settings == ("set debug-file-directory /cvmfs/atlas.cern.ch/debug",)
+
+
+@pytest.mark.parametrize("value", ["", "   ", None])
+def test_no_debug_file_directory_adds_nothing(value: Any) -> None:
+    """An empty setting must not add a bare gdb command."""
+    assert acd._debug_file_init(argparse.Namespace(debug_file_directory=value)) == ()
+
+
+def test_debug_file_directory_is_applied_before_the_core_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Applied after loading it would silently do nothing."""
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        captured["argv"] = argv
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(acd.subprocess, "run", fake_run)
+    core = tmp_path / "core.1"
+    core.write_bytes(b"core")
+    acd.run_gdb_phase(
+        "gdb", core, None, "probe", [("program", "info program")], 60,
+        progress=False, extra_init=("set debug-file-directory /cvmfs/dbg",),
+    )
+    argv = captured["argv"]
+    assert "-iex" in argv
+    setting_at = argv.index("set debug-file-directory /cvmfs/dbg")
+    assert argv[setting_at - 1] == "-iex"
+    assert setting_at < argv.index("-c")

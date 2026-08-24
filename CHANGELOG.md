@@ -52,6 +52,35 @@ All notable changes to Bamboo are documented here.
   `--cleanenv`, so no host environment variable reaches the container.
 
 ### Fixed
+- **"py-bt produced nothing" guessed between two causes instead of testing**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). When the
+  helper loaded but produced no frames, the reason text offered a
+  minor-version mismatch *or* missing DWARF as possibilities. For job
+  7272161793 the version had already matched exactly — a 3.13 helper for a 3.13
+  core — so naming the version as a candidate sent the reader looking for a
+  different helper when the helper was correct.
+
+  The bootstrap now runs `gdb.lookup_type("PyObject")` after sourcing the
+  helper and reports the outcome as `interpreter_types`. That settles it: gdb
+  either has the interpreter's type information or it does not, and without it
+  the helper has nothing to walk regardless of version. The three outcomes are
+  now reported distinctly — no DWARF, types present but no Python on the stack
+  (expected for a process captured inside a C-level shutdown), and no helper at
+  all.
+
+### Added
+- **`--debug-file-directory` / `BAMBOO_CORE_DUMP_DEBUG_DIR`** (same module,
+  and `core_dump_analysis_impl.py`). ATLAS releases ship libpython stripped of
+  DWARF, which is what stops `py-bt` even with the correct helper. When a
+  release does ship matching `.debug` files, pointing gdb at them restores the
+  Python-level backtrace.
+
+  Applied as `-iex`, before the core is loaded: gdb binds separate debug files
+  when an objfile is first read, so the setting has no effect on anything
+  already loaded. Unlike the CPython helper it is not staged into the job
+  directory — debug files for a full release run to hundreds of megabytes and
+  the path is expected to be a CVMFS one, already visible in the container.
+
 - **A completed analysis was replayed indefinitely and said nothing about it**
   (`packages/askpanda_atlas/askpanda_atlas/core_dump_analysis_impl.py`,
   `core/bamboo/tools/bamboo_answer.py`). `start_analysis` returns the stored

@@ -453,3 +453,10 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # user's home, the job directory and a scratch path, so a helper anywhere else
 # does not exist as far as the container is concerned.
 # export BAMBOO_CORE_DUMP_PYTHON_GDB="/data/bamboo/tools/cpython-gdb"
+
+# Directory of separate .debug files, for when the release ships libpython
+# stripped of DWARF — which stops py-bt even when the correct helper loads,
+# because gdb cannot resolve PyObject and the helper has nothing to walk.
+# Applied before the core is loaded, and NOT copied into the job directory: it
+# is expected to be a CVMFS path, already visible inside the container.
+# export BAMBOO_CORE_DUMP_DEBUG_DIR="/cvmfs/atlas.cern.ch/repo/sw/software/25.2/.debug"
