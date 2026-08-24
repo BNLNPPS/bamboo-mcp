@@ -65,7 +65,7 @@ python -m bamboo.server_http --help
 
 Startup banner written to stderr:
 ```
-Bamboo MCP HTTP server  v1.0.7
+Bamboo MCP HTTP server  v1.0.8
   MCP endpoint : http://0.0.0.0:8000/mcp
   Health check : http://0.0.0.0:8000/healthz
   Workers      : 1

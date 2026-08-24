@@ -7,16 +7,20 @@ This module re-exports it so the rest of core can use the stable name
 from __future__ import annotations
 
 from askpanda_atlas.log_analysis import (  # noqa: F401  (re-export)
+    FailureContext,
     PandaLogAnalysisTool,
     classify_failure,
+    extract_failure_context,
     extract_log_excerpt,
     get_definition,
     panda_log_analysis_tool,
 )
 
 __all__ = [
+    "FailureContext",
     "PandaLogAnalysisTool",
     "classify_failure",
+    "extract_failure_context",
     "extract_log_excerpt",
     "get_definition",
     "panda_log_analysis_tool",

@@ -204,3 +204,81 @@ def test_reset_clears_state(tmp_path, monkeypatch):
     assert tool._docs == []
     assert tool._bm25 is None
     assert tool._cached_count == -1
+
+
+# ---------------------------------------------------------------------------
+# topic parameter tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_topic_argument_opens_correct_collection(tmp_path, monkeypatch):
+    """The 'topic' argument controls which collection the BM25 index is built from."""
+    monkeypatch.setenv(
+        "BAMBOO_CHROMA_COLLECTION_MAP",
+        '{"rucio": "rucio_docs", "panda": "panda_docs"}',
+    )
+    monkeypatch.setenv("BAMBOO_CHROMA_PATH", str(tmp_path))
+
+    docs = ["Rucio rule lifecycle explanation."]
+    ids = ["doc:rucio:001"]
+    scores = [3.5]
+
+    chroma_mod = _make_chroma_module(docs, ids)
+    bm25_mod = _make_bm25_module(scores)
+
+    tool = PandaDocBM25Tool()
+    with patch.dict(sys.modules, {"chromadb": chroma_mod, "rank_bm25": bm25_mod}):
+        await tool.call({"query": "rucio rule", "topic": "rucio"})
+
+    chroma_mod.PersistentClient.return_value.get_collection.assert_called_once_with(
+        name="rucio_docs"
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_topic_used_when_topic_absent(tmp_path, monkeypatch):
+    """When 'topic' is absent, _default_topic ('panda') is used."""
+    monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION_MAP", raising=False)
+    monkeypatch.delenv("BAMBOO_CHROMA_COLLECTION", raising=False)
+    monkeypatch.setenv("BAMBOO_CHROMA_PATH", str(tmp_path))
+
+    chroma_mod = _make_chroma_module(["panda doc"], ["id:1"])
+    bm25_mod = _make_bm25_module([2.0])
+
+    tool = PandaDocBM25Tool()
+    with patch.dict(sys.modules, {"chromadb": chroma_mod, "rank_bm25": bm25_mod}):
+        await tool.call({"query": "BADALLOC"})
+
+    chroma_mod.PersistentClient.return_value.get_collection.assert_called_once_with(
+        name="panda_docs"
+    )
+
+
+@pytest.mark.asyncio
+async def test_topic_change_invalidates_bm25_cache(tmp_path, monkeypatch):
+    """Switching topic mid-session forces a BM25 index rebuild."""
+    monkeypatch.setenv(
+        "BAMBOO_CHROMA_COLLECTION_MAP",
+        '{"panda": "panda_docs", "rucio": "rucio_docs"}',
+    )
+    monkeypatch.setenv("BAMBOO_CHROMA_PATH", str(tmp_path))
+
+    chroma_mod = _make_chroma_module(["a doc"], ["id:1"])
+    bm25_mod = _make_bm25_module([1.0])
+
+    tool = PandaDocBM25Tool()
+    with patch.dict(sys.modules, {"chromadb": chroma_mod, "rank_bm25": bm25_mod}):
+        await tool.call({"query": "first", "topic": "panda"})
+        # Switch topic — should clear cache and reopen collection.
+        await tool.call({"query": "second", "topic": "rucio"})
+
+    # Two separate get_collection calls because topic changed.
+    assert chroma_mod.PersistentClient.return_value.get_collection.call_count == 2
+
+
+def test_get_definition_includes_topic_property():
+    """get_definition exposes 'topic' in the inputSchema properties."""
+    defn = PandaDocBM25Tool.get_definition()
+    props = defn["inputSchema"]["properties"]
+    assert "topic" in props
+    assert props["topic"]["default"] == "panda"

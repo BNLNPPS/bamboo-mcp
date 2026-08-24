@@ -270,8 +270,9 @@ def _build_patches() -> list[tuple[str, Any]]:
         ("bamboo.tools.llm_passthrough.get_llm_manager", MagicMock(return_value=fake_manager)),
         ("bamboo.tools.planner.get_llm_selector", MagicMock(return_value=fake_selector)),
         ("bamboo.tools.planner.get_llm_manager", MagicMock(return_value=fake_manager)),
-        # job_status calls downstream MCP server
-        ("bamboo.tools.job_status.get_mcp_caller", MagicMock(return_value=mcp_caller)),
+        # job_status fetches from BigPanDA REST via cached_fetch_jsonish
+        # (same helper used by harvester_workers; both are covered by the
+        # askpanda_atlas._cache.cached_fetch_jsonish patch below)
         # log_analysis makes direct HTTP calls (metadata + log download)
         ("askpanda_atlas.log_analysis_impl._fetch_metadata",
          MagicMock(return_value={
@@ -355,8 +356,10 @@ async def test_evidence_tool_text_is_json_with_evidence_key(tool_name: str) -> N
         return_value=(200, "application/json", "{}", {"status": "done"})
     )
 
+    fetch_200 = (200, "application/json", "{}", {"job": {}, "files": []})
     with (
-        patch("bamboo.tools.job_status.get_mcp_caller", return_value=mcp_caller),
+        patch("askpanda_atlas._cache.cached_fetch_jsonish",
+              return_value=fetch_200),
         patch("askpanda_atlas.log_analysis_impl._fetch_metadata",
               return_value={
                   "job": {"jobstatus": "failed", "piloterrorcode": 0, "piloterrordiag": ""},

@@ -7,22 +7,27 @@ from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests  # type: ignore[import]
 
 from askpanda_atlas._cache import (  # type: ignore[import]
     METADATA_TTL,
     LOG_TTL,
+    PARTIAL_SUFFIX,
     _MISS,
     _get,
     _set,
     cached_fetch_jsonish,
     cached_fetch_log,
     clear,
+    head_remote_file,
     invalidate,
     stats,
+    stream_to_file,
 )
 
 
@@ -352,3 +357,317 @@ def test_cached_fetch_log_after_clear_refetches() -> None:
         cached_fetch_log(url)   # must re-fetch
 
     assert mock_get.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Uncached binary media: head_remote_file
+# ---------------------------------------------------------------------------
+
+
+def _head_response(
+    status: int = 200,
+    content_length: str | None = "1065033128",
+    content_type: str = "application/octet-stream",
+    accept_ranges: str = "bytes",
+    last_modified: str = "Wed, 19 Aug 2026 08:18:20 GMT",
+) -> MagicMock:
+    """Build a mock ``HEAD`` response.
+
+    Args:
+        status: HTTP status code.
+        content_length: Raw ``Content-Length`` header, or ``None`` to omit.
+        content_type: Raw ``Content-Type`` header.
+        accept_ranges: Raw ``Accept-Ranges`` header.
+        last_modified: Raw ``Last-Modified`` header.
+
+    Returns:
+        A mock response object.
+    """
+    headers = {
+        "Content-Type": content_type,
+        "Accept-Ranges": accept_ranges,
+        "Last-Modified": last_modified,
+    }
+    if content_length is not None:
+        headers["Content-Length"] = content_length
+    mock_resp = MagicMock()
+    mock_resp.status_code = status
+    mock_resp.headers = headers
+    return mock_resp
+
+
+def test_head_remote_file_parses_the_headers_it_needs() -> None:
+    """The preflight surfaces size, range support and the modification time."""
+    with patch("requests.head", return_value=_head_response()):
+        info = head_remote_file("https://bigpanda.cern.ch/media/x/core.18277")
+
+    assert info is not None
+    assert info.ok
+    assert info.content_length == 1065033128
+    assert info.accept_ranges is True
+    assert info.last_modified == "Wed, 19 Aug 2026 08:18:20 GMT"
+
+
+def test_head_remote_file_flags_an_html_body_as_not_ok() -> None:
+    """An HTML preflight is an authentication failure, not a success.
+
+    The SSO-gated endpoint answers HTTP 200, so the status code alone cannot
+    distinguish it from a real file.
+    """
+    response = _head_response(content_type="text/html; charset=utf-8")
+    with patch("requests.head", return_value=response):
+        info = head_remote_file("https://bigpanda.cern.ch/file/?lfn=x")
+
+    assert info is not None
+    assert info.is_html is True
+    assert info.ok is False
+
+
+def test_head_remote_file_reports_a_missing_content_length_as_none() -> None:
+    """An absent Content-Length is None, not zero.
+
+    Zero would mean "empty file" and would pass a disk preflight that should
+    have been treated as unknown.
+    """
+    with patch("requests.head", return_value=_head_response(content_length=None)):
+        info = head_remote_file("https://bigpanda.cern.ch/media/x/core.1")
+
+    assert info is not None
+    assert info.content_length is None
+
+
+def test_head_remote_file_distinguishes_refusal_from_unreachable() -> None:
+    """A 404 is reported through the object; a transport error returns None."""
+    with patch("requests.head", return_value=_head_response(status=404)):
+        refused = head_remote_file("https://bigpanda.cern.ch/media/x/gone")
+    with patch("requests.head", side_effect=requests.ConnectionError("no route")):
+        unreachable = head_remote_file("https://bigpanda.cern.ch/media/x/gone")
+
+    assert refused is not None and refused.status_code == 404 and not refused.ok
+    assert unreachable is None
+
+
+def test_head_remote_file_is_not_cached() -> None:
+    """The preflight leaves no entry in the store."""
+    with patch("requests.head", return_value=_head_response()):
+        head_remote_file("https://bigpanda.cern.ch/media/x/core.1")
+
+    assert stats()["entries"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Uncached binary media: stream_to_file
+# ---------------------------------------------------------------------------
+
+
+def _get_response(
+    status: int = 200,
+    content_type: str = "application/octet-stream",
+    chunks: tuple[bytes, ...] = (b"abcd", b"efgh"),
+) -> MagicMock:
+    """Build a mock streaming ``GET`` response.
+
+    Args:
+        status: HTTP status code.
+        content_type: Raw ``Content-Type`` header.
+        chunks: Body chunks yielded by ``iter_content``.
+
+    Returns:
+        A mock response usable as a context manager.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = status
+    mock_resp.headers = {"Content-Type": content_type}
+    mock_resp.iter_content = MagicMock(return_value=iter(chunks))
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    return mock_resp
+
+
+def test_stream_to_file_writes_and_publishes_the_file(tmp_path: Path) -> None:
+    """A verified transfer lands at the destination path.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    with patch("requests.get", return_value=_get_response()):
+        result = stream_to_file("https://x/core.18277", dest, expected_bytes=8)
+
+    assert result.ok
+    assert result.bytes_written == 8
+    assert dest.read_bytes() == b"abcdefgh"
+    assert not dest.with_name(dest.name + PARTIAL_SUFFIX).exists()
+
+
+def test_stream_to_file_rejects_an_html_body_before_writing(tmp_path: Path) -> None:
+    """An HTML body is an SSO login page and never reaches the disk.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    response = _get_response(content_type="text/html; charset=utf-8")
+    with patch("requests.get", return_value=response):
+        result = stream_to_file("https://x/core.18277", dest)
+
+    assert not result.ok
+    assert "SSO" in result.error
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + PARTIAL_SUFFIX).exists()
+
+
+def test_stream_to_file_rejects_a_short_transfer(tmp_path: Path) -> None:
+    """A transfer that ends cleanly but short is a failure.
+
+    Without the size check it is indistinguishable from success, and the
+    truncated file would be analysed as though it were complete.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    with patch("requests.get", return_value=_get_response()):
+        result = stream_to_file("https://x/core.18277", dest, expected_bytes=999)
+
+    assert not result.ok
+    assert "size mismatch" in result.error
+    assert not dest.exists()
+
+
+def test_stream_to_file_keeps_the_partial_file_for_a_retry(tmp_path: Path) -> None:
+    """A failed transfer leaves its bytes behind rather than deleting them.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    with patch("requests.get", return_value=_get_response()):
+        stream_to_file("https://x/core.18277", dest, expected_bytes=999)
+
+    assert dest.with_name(dest.name + PARTIAL_SUFFIX).read_bytes() == b"abcdefgh"
+
+
+def test_stream_to_file_resumes_from_a_partial_download(tmp_path: Path) -> None:
+    """A resumed transfer appends to the existing bytes and sends a Range header.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    dest.with_name(dest.name + PARTIAL_SUFFIX).write_bytes(b"abcd")
+    response = _get_response(status=206, chunks=(b"efgh",))
+
+    with patch("requests.get", return_value=response) as mock_get:
+        result = stream_to_file(
+            "https://x/core.18277", dest, expected_bytes=8, allow_resume=True,
+        )
+
+    assert result.ok and result.resumed
+    assert result.bytes_written == 8
+    assert dest.read_bytes() == b"abcdefgh"
+    assert mock_get.call_args.kwargs["headers"]["Range"] == "bytes=4-"
+
+
+def test_stream_to_file_restarts_when_the_server_ignores_range(tmp_path: Path) -> None:
+    """A server answering 200 to a Range request sent the whole body.
+
+    Appending it to the carried-over prefix would silently produce a corrupt
+    file of plausible length.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    dest.with_name(dest.name + PARTIAL_SUFFIX).write_bytes(b"abcd")
+    response = _get_response(status=200, chunks=(b"abcd", b"efgh"))
+
+    with patch("requests.get", return_value=response):
+        result = stream_to_file(
+            "https://x/core.18277", dest, expected_bytes=8, allow_resume=True,
+        )
+
+    assert result.ok and not result.resumed
+    assert dest.read_bytes() == b"abcdefgh"
+
+
+def test_stream_to_file_does_not_resume_a_complete_partial_file(tmp_path: Path) -> None:
+    """A ``.part`` already at the expected size is not appended to.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    dest.with_name(dest.name + PARTIAL_SUFFIX).write_bytes(b"abcdefgh")
+    response = _get_response(chunks=(b"abcd", b"efgh"))
+
+    with patch("requests.get", return_value=response) as mock_get:
+        result = stream_to_file(
+            "https://x/core.18277", dest, expected_bytes=8, allow_resume=True,
+        )
+
+    assert result.ok and not result.resumed
+    assert "Range" not in mock_get.call_args.kwargs["headers"]
+    assert dest.read_bytes() == b"abcdefgh"
+
+
+def test_stream_to_file_does_not_resume_without_a_known_size(tmp_path: Path) -> None:
+    """Without an expected size a partial file cannot be told from a complete one.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    dest.with_name(dest.name + PARTIAL_SUFFIX).write_bytes(b"abcd")
+
+    with patch("requests.get", return_value=_get_response()) as mock_get:
+        result = stream_to_file("https://x/core.18277", dest, allow_resume=True)
+
+    assert result.ok and not result.resumed
+    assert "Range" not in mock_get.call_args.kwargs["headers"]
+
+
+def test_stream_to_file_reports_a_404(tmp_path: Path) -> None:
+    """A missing file is reported rather than written as an error page.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    with patch("requests.get", return_value=_get_response(status=404)):
+        result = stream_to_file("https://x/core.18277", dest)
+
+    assert not result.ok
+    assert "404" in result.error
+    assert not dest.exists()
+
+
+def test_stream_to_file_survives_a_transport_error(tmp_path: Path) -> None:
+    """A dropped connection is reported, not raised.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    with patch("requests.get", side_effect=requests.ConnectionError("reset")):
+        result = stream_to_file("https://x/core.18277", dest)
+
+    assert not result.ok
+    assert result.status_code == 0
+    assert not dest.exists()
+
+
+def test_stream_to_file_never_caches(tmp_path: Path) -> None:
+    """A core dump must never enter the infinite-TTL store.
+
+    Routing one through the cached text path would decode a gigabyte of binary
+    into a str and pin it for the lifetime of the process.
+
+    Args:
+        tmp_path: Temporary directory.
+    """
+    dest = tmp_path / "core.18277"
+    with patch("requests.get", return_value=_get_response()):
+        stream_to_file("https://x/core.18277", dest, expected_bytes=8)
+
+    assert stats()["entries"] == 0

@@ -36,19 +36,21 @@ Streamlit opens a browser tab at `http://localhost:8501`.
 | **Experiment / plugin** | Selects `atlas`, `epic`, or `cgsim`. Loads display name from `<plugin>.ui_manifest`. |
 | **Fast-path routing** | ON (default) — deterministic routing for task/job/pilot questions. OFF — all questions go through the LLM planner. |
 | **Reconnect** | Clears the cached MCP connection and reconnects. |
-| **Clear chat** | Clears conversation history. |
+| **Clear chat** | Clears conversation history and any cached diagrams. |
 | **Tools registered on server** | Expandable list of all tools on the connected server. |
+| **Developer access** | Password-protected superuser unlock. Only shown when `BAMBOO_SUPERUSER_PASSWORD` is configured. See [Superuser mode](#superuser-mode). |
 
 ## Response detail panels
 
-After each assistant response, four expandable panels appear below the answer:
+After each assistant response, any Mermaid diagrams embedded in the response
+are rendered inline first, followed by up to four expandable detail panels.
 
 | Panel | Contents |
 |---|---|
 | **⏱ Tracing** | Span table with event type, tool name, duration, and detail (stdio only — see note below). |
 | **💰 Estimated cost** | Per-call LLM token counts and USD cost estimate (stdio only). |
-| **🔬 Evidence (inspect)** | Compact evidence dict from `bamboo_last_evidence` — task/job metadata, job counts, site breakdown. Populated only for task/job queries. |
-| **📄 Raw JSON** | Verbatim BigPanDA API response from `bamboo_last_evidence`. Populated only for task/job queries. |
+| **🔬 Evidence (inspect)** | Compact evidence dict from `bamboo_last_evidence`. Hidden for superuser-only tools in non-superuser sessions. |
+| **📄 Raw JSON** | Verbatim BigPanDA API response from `bamboo_last_evidence`. Hidden for superuser-only tools in non-superuser sessions. |
 
 > **Tracing in HTTP mode:** when connecting to a remote uvicorn server, the
 > server writes trace spans to its own file — the Streamlit client cannot read
@@ -56,26 +58,126 @@ After each assistant response, four expandable panels appear below the answer:
 > `tail` command to run on the server. Switch to **stdio transport** to get
 > full tracing locally.
 
-## Environment variables
+---
+
+## Mermaid diagram rendering
+
+When the LLM determines that a diagram would significantly clarify its answer —
+for example, when explaining an algorithm, a state machine, or a data flow — it
+may embed a Mermaid diagram in its response.
+
+The Streamlit UI automatically:
+
+1. Detects ` ```mermaid ``` ` fenced blocks in the LLM response.
+2. Strips them from the stored response text (so conversation history stays
+   clean and free of raw Mermaid syntax).
+3. Renders each diagram inline using `streamlit-mermaid`, immediately after
+   the text portion of the answer.
+
+Multiple diagrams per response are supported; each is captioned "Diagram N"
+when more than one is present.
+
+**When diagrams appear:** the LLM is instructed by the `_MERMAID_GUIDANCE`
+prompt rule, which is included in the synthesis prompt for tools that produce
+algorithmic or flow-based answers (currently `pilot_code_query`). The LLM
+decides autonomously whether a diagram adds value; it will not emit one for
+simple status lookups or factual queries.
+
+**Diagram types used:**
+
+| LLM choice | Best for |
+|---|---|
+| `flowchart TD` | Algorithms, decision trees, data flows |
+| `sequenceDiagram` | Protocols, call sequences between components |
+| `stateDiagram-v2` | Job or process state machines |
+
+**Dependency:** `streamlit-mermaid>=0.2.0` (included in `requirements-ui.txt`).
+If the package is not installed, diagram blocks are stripped silently and the
+text answer is shown without the visual.
+
+**TUI behaviour:** the TUI does not render Mermaid diagrams. Diagram blocks are
+stripped before replies are stored in history, so they never appear as raw syntax
+in the terminal.
+
+---
+
+## Superuser mode
+
+Superuser mode unlocks developer tools (currently `pilot_code_query`) for
+authenticated sessions. It is an **in-session UI gate** — it does not change
+which tools are registered on the MCP server (all tools are always available to
+any MCP client), but it controls what the Streamlit interface exposes.
+
+### Configuring
+
+Set `BAMBOO_SUPERUSER_PASSWORD` in `bamboo_env.sh`:
+
+```bash
+export BAMBOO_SUPERUSER_PASSWORD="yourpassword"
+```
+
+When this variable is set, a **Developer access** section appears at the bottom
+of the Streamlit sidebar. When it is unset or empty, the section is hidden and
+superuser features are inaccessible from the UI.
+
+### Authenticating (Streamlit)
+
+1. Enter the password in the **Password** field in the **Developer access** section.
+2. Click **Unlock**.
+3. On success the section shows 🔓 **Superuser mode active** and a **Lock** button.
+4. To re-lock, click **Lock**.
+
+The lock state is held in `st.session_state["superuser"]` for the lifetime of
+the browser session. Refreshing the page resets it to locked.
+
+### Authenticating (TUI)
+
+```
+/superuser yourpassword
+```
+
+On success, the terminal prints:
+```
+🔓 Superuser mode unlocked. Developer tools are now active.
+```
+
+The unlock persists for the TUI session. Restart the TUI to reset.
+
+### What changes when unlocked
+
+- The Evidence (inspect) and Raw JSON expanders become visible for
+  superuser-only tools such as `pilot_code_query`.
+- Future developer tools will be gated here as well.
+
+### Security model
+
+This is a **UI-level gate only**, not server-side authentication. The password
+is compared using `hmac.compare_digest` (constant-time) and never sent to the
+MCP server. Superuser tools are registered unconditionally on the server and are
+callable by any MCP client (e.g. Claude Desktop, MCP Inspector) regardless of
+UI lock state.
+
+For network-level authentication, see [`docs/security.md`](security.md).
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `BAMBOO_SUPERUSER_PASSWORD` | Plain-text password to unlock developer mode. Leave unset to hide superuser features entirely. |
+
+---
+
+## Streamlit environment variables
 
 | Variable | Purpose |
 |---|---|
 | `MCP_URL` | Default server URL (overridden by the Server URL field) |
 | `MCP_BEARER_TOKEN` | Default bearer token (overridden by the Bearer token field) |
 | `ASKPANDA_PLUGIN` | Default plugin selection: `atlas`, `epic`, or `cgsim` (default: `atlas`) |
-| `BAMBOO_FAST_PATH` | `0`/`off`/`false` to start with fast-path routing disabled (default: on). Togglable at runtime via the sidebar or `/fastpath`. |
+| `BAMBOO_FAST_PATH` | `0`/`off`/`false` to start with fast-path routing disabled (default: on) |
 | `BAMBOO_HISTORY_TURNS` | Max conversation turns in context (default: 10) |
-| `BAMBOO_MCP_CLIENT_TIMEOUT` | Timeout in seconds for MCP tool calls (default: 120). Raise for large task fetches. |
-
-## Connecting to a shared server (testbed)
-
-```bash
-export MCP_URL="http://your-server:8000/mcp"
-export MCP_BEARER_TOKEN="your-token"
-streamlit run interfaces/streamlit/chat.py
-```
-
-See [`docs/http-server.md`](http-server.md) for how to run the shared server.
+| `BAMBOO_MCP_CLIENT_TIMEOUT` | Timeout in seconds for MCP tool calls (default: 120) |
+| `BAMBOO_SUPERUSER_PASSWORD` | Password for Developer access panel |
 
 ---
 
@@ -110,49 +212,25 @@ Alternatively set `MCP_BEARER_TOKEN` in the environment.
 
 ## Inline vs No-Inline (Textual)
 
-The Textual TUI supports two rendering modes.
-
 ### --no-inline (Alternate Screen) — Recommended
 
-Uses the terminal’s alternate screen buffer (like `vim`, `less`).
+Uses the terminal's alternate screen buffer (like `vim`, `less`).
 
-**Advantages:**
-
-- Full terminal control
-- Proper resizing
-- Reliable scrolling
+- Full terminal control, proper resizing, reliable scrolling
 - Clean exit restores previous shell screen
 - Most stable mode
-
-Recommended for production terminal usage.
-
----
 
 ### --inline (Copy-Friendly Mode)
 
 Renders inside the normal terminal scrollback.
 
-**Advantages:**
-
 - Easier mouse selection and copy/paste
 - UI remains visible in shell history after exit
-
-**Trade-offs:**
-
-- Uses fixed inline height
-- More sensitive to other processes writing to stdout
-- Slightly less robust than alternate screen mode
-
-Example:
+- Uses fixed inline height; slightly less robust
 
 ```bash
 python interfaces/textual/chat.py --transport stdio --inline
-```
-
-Optional: control inline height
-
-```bash
-export BAMBOO_TUI_INLINE_HEIGHT=60
+export BAMBOO_TUI_INLINE_HEIGHT=60   # optional: control height
 ```
 
 ---
@@ -174,8 +252,13 @@ export BAMBOO_TUI_INLINE_HEIGHT=60
 | `/plugin <id>` | Switch active experiment plugin (e.g. `/plugin epic`) |
 | `/fastpath on\|off` | Toggle deterministic fast-path routing (off → use LLM planner) |
 | `/debug on\|off` | Toggle verbose tool call output |
+| `/links [N]` | List links from the last response; `/links N` opens link N in browser |
+| `/superuser <pw>` | Unlock developer mode (requires `BAMBOO_SUPERUSER_PASSWORD`) |
 | `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit` | Quit |
+
+`PageUp`/`PageDown` to scroll · `Ctrl+Q` to quit ·
+Hold **Option** (macOS) or **Shift** (Linux/Windows) to select text with the mouse.
 
 ---
 
@@ -188,53 +271,25 @@ to the server on every question.  This enables follow-up questions such as:
 - *"What about the failed jobs?"* (after a task query)
 - *"Is that the same error as last time?"* (after a log analysis)
 
-### How it works
-
-- Each user question and its assistant reply are appended to `_history`.
-- The full history is included as `messages` in every `bamboo_answer` call.
-- The server extracts prior turns and injects them between the system prompt
-  and the synthesised user message, so the LLM sees the conversation context.
-- History uses **raw question/answer text**, not the synthesised prompts that
-  embed task JSON or RAG excerpts — keeping token counts low.
-
-### History cap
-
 History is capped at `BAMBOO_HISTORY_TURNS` user+assistant pairs (default 10).
-Older turns are discarded from the front of the list when the cap is reached.
+Mermaid diagram blocks are stripped before replies are stored, so raw diagram
+syntax never accumulates in context.
 
-```bash
-export BAMBOO_HISTORY_TURNS=5   # keep only the last 5 question+answer pairs
-```
-
-### Resetting history
-
-- `/clear` clears the transcript **and** resets the history.
-- Restarting the TUI always starts with empty history (no persistence).
-
-### Inspecting history
-
-```
-/history
-```
-
-Displays a table of the turns currently in context — role, character count,
-and a truncated preview.  Useful for debugging follow-up resolution.
-
----
+Use `/history` to inspect current context and `/clear` to reset.
 
 ---
 
 ## Pilot Charts (Textual TUI)
 
-After every answer that comes from `panda_harvester_workers`, two ASCII chart panels are automatically appended:
+After every answer from `panda_harvester_workers`, two ASCII chart panels are
+automatically appended:
 
-**Status bar** — shows total pilot counts per status (running, submitted, finished, failed, etc.) as a horizontal bar chart with proportional `█` bars, the time window, and the grand total.
+**Status bar** — total pilot counts per status as a horizontal `█` bar chart.
 
-**Timeseries** — shows per-bucket pilot counts for the status mentioned in the question (e.g. `finished` for *"how many pilots finished in the last 20 minutes?"*) over the requested time window, with the bucket interval derived automatically from the window duration. Requires `ASKPANDA_OPENSEARCH` to be set and the OpenSearch cluster to be reachable (CERN network / VPN).
+**Timeseries** — per-bucket counts for the queried status over the requested
+window. Requires `ASKPANDA_OPENSEARCH` and reachability to the OpenSearch cluster.
 
-The charts are only shown when `nworkers_by_status` contains more than one entry — a single-status result is not worth charting.
-
-Use `/chart` to re-display the most recent pilot chart after scrolling past it.
+Use `/chart` to re-display the most recent chart.
 
 ### OpenSearch environment variables
 
@@ -243,34 +298,31 @@ Use `/chart` to re-display the most recent pilot chart after scrolling past it.
 | `ASKPANDA_OPENSEARCH` | Password for OpenSearch HTTP Basic auth. Required for timeseries charts. |
 | `ASKPANDA_OPENSEARCH_HOST` | OpenSearch cluster URL (default: `https://os-atlas.cern.ch/os`). |
 | `ASKPANDA_OPENSEARCH_USER` | HTTP auth username (default: `pilot-monitor-agent`). |
-| `ASKPANDA_OPENSEARCH_CA` | Path to CA certificate bundle (default: `/etc/pki/tls/certs/CERN-bundle.pem`). On macOS, copy from lxplus: `scp lxplus.cern.ch:/etc/pki/tls/certs/CERN-bundle.pem ~/cern-bundle.pem` |
-| `ASKPANDA_OPENSEARCH_VERIFY_CERTS` | Set to `false` to disable TLS cert verification (local dev without CA bundle). |
-
-The timeseries chart is silently skipped when OpenSearch is unreachable or the tool is not registered — it never disrupts the main answer.
+| `ASKPANDA_OPENSEARCH_CA` | Path to CA certificate bundle (default: `/etc/pki/tls/certs/CERN-bundle.pem`). |
+| `ASKPANDA_OPENSEARCH_VERIFY_CERTS` | `false` to disable TLS cert verification (local dev). |
 
 ---
 
-Both Streamlit and Textual interfaces use:
+Both interfaces use `interfaces/shared/mcp_client.py` for transport, connection
+lifecycle, and subprocess isolation. The default MCP call timeout is 120 s;
+override with `BAMBOO_MCP_CLIENT_TIMEOUT`.
 
-```
-interfaces/shared/mcp_client.py
-```
+---
 
-Responsibilities:
+# 3. AI Agent (CLI)
 
-- Support stdio and HTTP transports
-- Manage connection lifecycle (lazy connect for TUI stability)
-- Inherit environment variables (LLM configuration, plugin selection)
-- Isolate subprocess output to avoid terminal corruption
+The agent runs a multi-step Reason → Act → Observe → Evaluate loop, calling
+MCP tools iteratively until the evidence is sufficient to synthesise an answer.
+Intended for complex, multi-hop queries.
 
-### Timeout configuration
-
-The synchronous `MCPClientSync._run()` wrapper has a default timeout of
-**120 seconds** — large task status fetches from BigPanDA can take 60–90 s
-for tasks with thousands of jobs.  Override with:
+See [`docs/agent.md`](agent.md) for full documentation and testing instructions.
 
 ```bash
-export BAMBOO_MCP_CLIENT_TIMEOUT=180   # seconds
+python scripts/bamboo_agent.py \
+    --transport http \
+    --http-url http://localhost:8000/mcp \
+    --question "Your question here" \
+    --verbose
 ```
 
 ---
@@ -278,7 +330,7 @@ export BAMBOO_MCP_CLIENT_TIMEOUT=180   # seconds
 # Architecture Overview
 
 ```
-User Interface (Streamlit / Textual)
+User Interface (Streamlit / Textual / Agent CLI)
         ↓
 Shared MCP Client
         ↓

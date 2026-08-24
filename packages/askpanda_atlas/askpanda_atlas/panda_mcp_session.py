@@ -13,7 +13,17 @@ PANDA_MCP_BASE_URL
     e.g. ``https://aipanda120.cern.ch:8443/mcp/``.
     If unset the session is skipped and a warning is logged.
 PANDA_MCP_TOKEN
-    Optional bearer token sent as ``Authorization: Bearer <token>``.
+    Bearer token sent as ``Authorization: Bearer <token>``.  When unset,
+    Bamboo falls back to reading the ``id_token`` field from the file at
+    ``PANDA_MCP_TOKEN_FILE`` (see below).
+PANDA_MCP_TOKEN_FILE
+    Path to the OIDC token cache file written by ``get-panda-token``
+    (from the ``panda-mcp-client`` package).  Defaults to
+    ``~/.panda_id_token``.  The file must be a JSON object containing an
+    ``id_token`` field.  Token renewal is handled externally; Bamboo reads
+    the file once at session startup.  If neither ``PANDA_MCP_TOKEN`` nor a
+    readable token file is available, the session connects without a token
+    (which works for public endpoints).
 PANDA_MCP_ORIGIN
     Optional virtual-organisation name sent as ``Origin: <vo>``.
 PANDA_MCP_USE_SSE
@@ -24,12 +34,15 @@ PANDA_MCP_TLS_VERIFY
     **Use only for development/testing** — never in production.  The default
     is to verify certificates using the system CA store.
 PANDA_MCP_CA_BUNDLE
-    Path to a CA certificate bundle (PEM) to use for TLS verification,
-    e.g. ``/etc/pki/tls/certs/ca-bundle.crt``.  When unset, the system
-    default CA store is used (via ``ssl.create_default_context()``), which
-    works on most Linux systems that have the CERN Grid CA installed as a
-    system package.  Set this explicitly if the CERN CA is only available
-    as a standalone PEM file.
+    Path to a PEM CA bundle to use for TLS verification.  Takes priority
+    over ``SSL_CERT_FILE`` if both are set.  Use when the CERN Grid CA is
+    available as a standalone PEM file.
+SSL_CERT_FILE
+    Standard env var honoured by ``curl``, ``requests``, and the
+    ``panda-mcp-client`` proxy.  When set, Bamboo uses this PEM bundle
+    for the PanDA MCP TLS connection.  On lxplus the recommended value is
+    ``/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`` — the system
+    CA bundle that already includes the CERN Grid CA.
 
 Typical usage (inside an asyncio task at server startup)::
 
@@ -45,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import os
 import ssl
@@ -55,9 +69,64 @@ _logger = logging.getLogger(__name__)
 #: Logical server name used with MCPCaller.register_session / call.
 PANDA_MCP_SERVER_NAME: str = "panda"
 
+#: Default path for the OIDC token cache file written by ``get-panda-token``.
+_DEFAULT_TOKEN_FILE: str = "~/.panda_id_token"
+
+
+def _read_token_file(path: str) -> str | None:
+    """Read the ``id_token`` field from a ``panda-mcp-client`` token cache file.
+
+    The file is a JSON object produced by ``get-panda-token`` (from the
+    ``panda-mcp-client`` package) and contains at minimum the fields
+    ``id_token``, ``access_token``, and ``refresh_token``.  Bamboo uses
+    the ``id_token`` as the bearer token for the PanDA MCP server.
+
+    Args:
+        path: Filesystem path to the token cache file (``~`` is expanded).
+
+    Returns:
+        The ``id_token`` string on success, or ``None`` if the file does not
+        exist, cannot be parsed, or does not contain an ``id_token`` field.
+        All failure modes are logged at WARNING level so operators can
+        diagnose token issues without a crash.
+    """
+    expanded = os.path.expanduser(path)
+    if not os.path.exists(expanded):
+        _logger.debug("PANDA_MCP token file not found at %s — skipping.", expanded)
+        return None
+    try:
+        with open(expanded, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        _logger.warning(
+            "Could not read PANDA_MCP token file %s: %s — connecting without token.",
+            expanded,
+            exc,
+        )
+        return None
+
+    token = data.get("id_token", "")
+    if not token:
+        _logger.warning(
+            "PANDA_MCP token file %s has no 'id_token' field — connecting without token.",
+            expanded,
+        )
+        return None
+
+    _logger.debug("Loaded PanDA MCP id_token from %s.", expanded)
+    return token
+
 
 def _build_config() -> dict[str, Any] | None:
     """Read PanDA MCP connection config from environment variables.
+
+    Token resolution order:
+
+    1. ``PANDA_MCP_TOKEN`` environment variable (explicit override).
+    2. ``id_token`` field from the file at ``PANDA_MCP_TOKEN_FILE``
+       (default: ``~/.panda_id_token``), written by ``get-panda-token``.
+    3. No token — the session connects unauthenticated (works for public
+       endpoints).
 
     Returns:
         Dict with keys ``url``, ``headers`` (dict), ``use_sse`` (bool),
@@ -69,9 +138,18 @@ def _build_config() -> dict[str, Any] | None:
         return None
 
     headers: dict[str, str] = {}
+
+    # 1. Explicit env var takes priority.
     token = os.environ.get("PANDA_MCP_TOKEN", "").strip()
+
+    # 2. Fall back to the OIDC token cache file.
+    if not token:
+        token_file = os.environ.get("PANDA_MCP_TOKEN_FILE", _DEFAULT_TOKEN_FILE)
+        token = _read_token_file(token_file) or ""
+
     if token:
         headers["Authorization"] = f"Bearer {token}"
+        headers["X-Auth-Token"] = f"Bearer {token}"
 
     origin = os.environ.get("PANDA_MCP_ORIGIN", "").strip()
     if origin:
@@ -93,9 +171,14 @@ def _build_config() -> dict[str, Any] | None:
         ssl_value = False
     else:
         ssl_value = ssl.create_default_context()
+        # Honour the standard SSL_CERT_FILE env var (used by curl, requests,
+        # and the panda-mcp-client proxy).  When set, load it as the CA bundle
+        # instead of (or in addition to) the system default.
+        ssl_cert_file = os.environ.get("SSL_CERT_FILE", "").strip()
         ca_bundle = os.environ.get("PANDA_MCP_CA_BUNDLE", "").strip()
-        if ca_bundle:
-            ssl_value.load_verify_locations(cafile=ca_bundle)
+        bundle = ca_bundle or ssl_cert_file
+        if bundle:
+            ssl_value = ssl.create_default_context(cafile=bundle)
 
     return {
         "url": base_url,
@@ -154,9 +237,20 @@ async def run_panda_mcp_session(shutdown_event: asyncio.Event) -> None:
         _logger.info("PanDA MCP session task cancelled — shutting down.")
         raise
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        _logger.error(
-            "PanDA MCP session failed — tools will be unavailable: %s", exc
-        )
+        # ExceptionGroup (raised by asyncio.TaskGroup) wraps the real cause —
+        # log each inner exception individually so the root cause is visible.
+        inner = getattr(exc, "exceptions", None)
+        if inner:
+            for sub in inner:
+                _logger.error(
+                    "PanDA MCP session failed — tools will be unavailable:",
+                    exc_info=sub,
+                )
+        else:
+            _logger.error(
+                "PanDA MCP session failed — tools will be unavailable:",
+                exc_info=exc,
+            )
 
 
 async def _run_http_session(
@@ -260,4 +354,5 @@ async def _run_sse_session(
 __all__ = [
     "PANDA_MCP_SERVER_NAME",
     "run_panda_mcp_session",
+    "_DEFAULT_TOKEN_FILE",
 ]

@@ -13,7 +13,9 @@ import json
 from typing import Any
 
 from askpanda_atlas.log_analysis_impl import (  # noqa: F401  (re-exported)
+    FailureContext,
     classify_failure,
+    extract_failure_context,
     extract_log_excerpt,
     fetch_and_analyse,
     get_definition,

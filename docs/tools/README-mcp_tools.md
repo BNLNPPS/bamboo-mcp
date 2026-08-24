@@ -56,6 +56,36 @@ These tools query the SQLite database produced by a CGSim simulation run.
 
 ---
 
+## Source code analysis tools
+
+These tools fetch and analyse PanDA Pilot source code from GitHub.
+
+| Tool | Document | Description |
+|---|---|---|
+| `pilot_source_analysis` | [pilot_source_analysis.md](pilot_source_analysis.md) | Traceback-driven analysis — fetches pilot3 functions named in a job failure exception. |
+| `atlas.core_dump_analysis` | [core_dump_analysis.md](core_dump_analysis.md) | **ATLAS only.** gdb against a failed job's core dump inside the matching release container; answers what the payload was doing when it was killed. |
+| `code_query` | [code_query.md](code_query.md) | **Superuser.** On-demand fetch of any source file or function from a configurable repository; targeted Q&A, algorithm explanation, Mermaid diagrams. |
+
+---
+
+## Self-observability tools
+
+These tools query Bamboo's own prompt/response log index in OpenSearch.
+
+| Tool | Description |
+|---|---|
+| `opensearch_query` | General-purpose read-only DSL query against any allowed OpenSearch index. Accepts `index_pattern`, `query` (JSON DSL string), `max_hits`, `source_fields`. |
+| `opensearch_promptlog_query` | Convenience wrapper pre-wired to `bamboomcp-promptlog-*`. Schema-aware: documents turn counts, session replay, FAQ analysis, tool usage, ratings. Uses `raw_question.keyword` for accurate frequency aggregations. |
+| `bamboo_promptlog_status` | Drains the server-side event ring buffer of OpenSearch write notifications (destructive read, delivered exactly once). Used by TUI and Streamlit to surface write confirmations. |
+| `bamboo_promptlog_rate` | Updates the `rating` field (1–5) on an existing prompt-log document via partial OpenSearch `update`. Uses the write credential (`BAMBOO_OPENSEARCH_PROMPTLOG`). |
+
+Environment variables: `ASKPANDA_OPENSEARCH` (read), `BAMBOO_OPENSEARCH_PROMPTLOG` (write),
+`BAMBOO_OPENSEARCH_ALLOWED_INDICES` (read allow-list, default: `atlas_harvesterworkers-*,bamboomcp-promptlog-*`).
+
+See [`docs/opensearch.md`](../opensearch.md) for the full schema, DSL examples, and rating query patterns.
+
+---
+
 ## Infrastructure tools
 
 | Tool | Document | Description |
@@ -89,6 +119,8 @@ The following tools have no ePIC equivalent and are absent from the `askpanda_ep
 | `panda_jobs_query` | ATLAS-specific ingestion database |
 | `cric_query` | CRIC is an ATLAS computing resource catalogue |
 | `panda_server_health` | ATLAS PanDA MCP session wiring |
+
+`code_query` and `pilot_source_analysis` are built-in core tools (not plugin-specific) and are available to all experiments.
 
 ### `panda_task_status` implementation differences
 
@@ -127,3 +159,15 @@ using the RAG documentation tools.
 ### Entry point naming
 
 All plugin tools are loaded via Python entry points. The MCP server overwrites `get_definition()["name"]` with the entry point key at load time — for example, `panda_harvester_timeseries` is registered as `atlas.harvester_timeseries` and must be called by that name.
+
+---
+
+## Superuser tools
+
+Tools tagged `superuser` in their definition are always registered on the MCP server and callable by any MCP client. The Streamlit and TUI interfaces use the `BAMBOO_SUPERUSER_PASSWORD` env var to gate their evidence panels in non-authenticated sessions — this is a UI convenience, not a security boundary.
+
+| Tool | Tag | UI behaviour |
+|---|---|---|
+| `code_query` | `superuser`, `developer` | Evidence and Raw JSON panels hidden until superuser unlock |
+
+See [`docs/interfaces.md`](../interfaces.md#superuser-mode) for the full superuser setup guide.

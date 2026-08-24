@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import re
 import os
@@ -49,6 +50,9 @@ from interfaces.shared.mcp_client import MCPClientSync, MCPServerConfig
 
 DEFAULT_PLUGIN = os.getenv("ASKPANDA_PLUGIN", "atlas")
 
+#: Plain-text superuser password from env var.  Empty string = feature disabled.
+_SUPERUSER_PASSWORD: str = os.getenv("BAMBOO_SUPERUSER_PASSWORD", "")
+
 # Maximum number of user+assistant turn *pairs* to keep in context.
 # Each pair = 2 messages (1 user + 1 assistant), so 10 pairs = 20 messages.
 _DEFAULT_HISTORY_TURNS = 10
@@ -67,6 +71,7 @@ ANSWER_TOOL_CANDIDATES: List[str] = ["bamboo_answer", "askpanda_answer", "bamboo
 
 _TASK_CMD_RE = re.compile(r"^/task\s+(\d{1,12})\s*$", re.IGNORECASE)
 _JOB_CMD_RE = re.compile(r"^/job\s+(\d{1,12})\s*$", re.IGNORECASE)
+_RATE_CMD_RE = re.compile(r"^/rate\s+([1-5])\s*$", re.IGNORECASE)
 
 # Matches Markdown inline links: [label](url)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
@@ -243,6 +248,31 @@ def _pretty(obj: Any) -> str:
         return str(obj)
 
 
+def _strip_mermaid_blocks(text: str) -> tuple[str, int]:
+    r"""Remove fenced Mermaid code blocks from an LLM response.
+
+    The TUI cannot render Mermaid diagrams.  Storing raw Mermaid syntax in
+    conversation history pollutes the LLM context window on follow-up
+    questions.  This helper strips the blocks before display and storage,
+    returning the clean text and the count of diagrams removed so the caller
+    can append a short note directing the user to Streamlit.
+
+    Args:
+        text (str): Raw assistant response text, potentially containing one
+            or more ` ```mermaid ``` ` fenced blocks.
+
+    Returns:
+        tuple[str, int]: ``(clean_text, diagram_count)`` where ``clean_text``
+        has all Mermaid fenced blocks removed and double blank lines
+        collapsed, and ``diagram_count`` is the number of blocks stripped.
+    """
+    pattern = re.compile(r"```mermaid\s*\n.*?```", re.DOTALL)
+    count = len(pattern.findall(text))
+    clean = pattern.sub("", text)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+    return clean, count
+
+
 def _extract_text(result: Any) -> str:
     """Extract displayable text from an MCP tool result.
 
@@ -284,6 +314,10 @@ def _extract_text(result: Any) -> str:
         return "\n".join([p for p in parts2 if p]).strip()
 
     return _pretty(result)
+
+
+#: Imported from the shared guard module; extended by BAMBOO_SUPERUSER_TOOLS.
+from interfaces.shared.superuser_guard import is_superuser_question as _is_superuser_question  # noqa: E402
 
 
 def _tool_names_from_list_tools(list_tools_result: Any) -> List[str]:
@@ -526,9 +560,12 @@ class BambooTui(App):
         self._thinking_task: Optional[Any] = None  # Textual Timer for animated thinking indicator
         self._last_spans: List[Dict[str, Any]] = []  # Trace spans for last request
         self._last_response_links: List[Tuple[str, str]] = []  # (label, url) pairs from last assistant response
+        self._last_response_text: str = ""  # raw text of last assistant response, for /script
+        self._last_rated_doc: tuple[str, str] | None = None  # (index, doc_id) for /rate
         # Session-level cost accumulators — updated after every completed request.
         self._session_input_tokens: int = 0
         self._session_output_tokens: int = 0
+        self._superuser: bool = False  # Unlocked by /superuser <password>
         self._session_cost_usd: float = 0.0
         self._session_request_count: int = 0
         self._trace_file: str = os.path.join(
@@ -618,6 +655,8 @@ class BambooTui(App):
 
     async def _mcp_main(self) -> None:
         """Own the MCP lifecycle in a single task."""
+        _startup_timeout: int = int(os.getenv("BAMBOO_STARTUP_TIMEOUT", "20"))
+        self._startup_phase: str = "connecting"
         try:
             # Don't wrap _mcp_connect in wait_for — the MCPClientSync._run()
             # has its own timeout (BAMBOO_MCP_CLIENT_TIMEOUT, default 120 s).
@@ -625,11 +664,14 @@ class BambooTui(App):
             # which raises CancelledError through _run() even when the server
             # is starting correctly but slowly.
             await self._mcp_connect()
-            await asyncio.wait_for(self._refresh_tools(), timeout=20)
+            self._startup_phase = "loading tools"
+            await asyncio.wait_for(self._refresh_tools(), timeout=_startup_timeout)
             self._detect_answer_tool()
 
-            await asyncio.wait_for(self._load_banner(), timeout=20)
+            self._startup_phase = "loading banner"
+            await asyncio.wait_for(self._load_banner(), timeout=_startup_timeout)
             self._render_banner()
+            self._startup_phase = "ready"
 
             self._mcp_ready = True
             # Fetch LLM info from the server-side health tool — calling
@@ -647,18 +689,49 @@ class BambooTui(App):
                         break
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
-            llm_suffix = f"\n[LLM selected] {llm_info}" if llm_info and llm_info != "not configured" else ""
-            self._write_system(
-                f"Connected via {self.cfg.transport}. Answer tool: {self.answer_tool or 'UNKNOWN'}.{llm_suffix}"
+            # Inform the user that a live LLM round-trip is about to happen.
+            # Written here (after layout is complete) so the panel renders at
+            # full terminal width rather than the narrow pre-layout size.
+            self._write_system("Verifying LLM connection… please wait…")
+            # Run the LLM probe before writing the status line so the verified
+            # badge and any warning appear in the correct order.
+            probe_status, probe_warning = await self._run_llm_probe()
+
+            base_line = (
+                f"Connected via {self.cfg.transport}. "
+                f"Answer tool: {self.answer_tool or 'UNKNOWN'}."
             )
+            if llm_info and llm_info != "not configured":
+                # Build a Rich Text object so the tick can be coloured green
+                # without affecting the rest of the message.
+                msg = Text(base_line)
+                msg.append(f"\n[LLM selected] {llm_info}")
+                if probe_status == "ok":
+                    msg.append(" ✓ verified", style="green")
+            else:
+                msg = Text(base_line)
+            self._write_panel(msg, title=f"{_now()}  system", border_style="dim")
+            if probe_warning:
+                self._write_warning(probe_warning)
 
             await self._shutdown_event.wait()
 
         except asyncio.CancelledError:
             raise
+        except (asyncio.TimeoutError, TimeoutError):
+            phase = getattr(self, "_startup_phase", "unknown")
+            self._write_error(
+                f"Startup timed out while {phase} "
+                f"(limit: {_startup_timeout}s). "
+                "The server node may be under load. "
+                "Retry, or set BAMBOO_STARTUP_TIMEOUT to a higher value "
+                "(e.g. export BAMBOO_STARTUP_TIMEOUT=60)."
+            )
+            await self._shutdown_event.wait()
         except Exception as exc:
-            self._write_error(f"Startup failed: {type(exc).__name__}: {exc}")
-            self._write_system("Check ~/.textual/logs for details.")
+            self._write_error(
+                f"Startup failed: {type(exc).__name__}: {exc or '(no detail)'}"
+            )
             await self._shutdown_event.wait()
         finally:
             try:
@@ -719,6 +792,66 @@ class BambooTui(App):
         if callable(exit_fn):
             await self._to_thread(exit_fn, None, None, None)
             return
+
+    async def _run_llm_probe(self) -> tuple[str, str]:
+        """Call bamboo_llm_probe and return the probe status and any warning text.
+
+        Sends a minimal single-token request to the configured LLM provider via
+        the server-side probe tool.  Returns a ``(status, warning)`` tuple so the
+        caller can annotate the "Connected" line before writing it and display any
+        warning immediately after.
+
+        The method is best-effort: if the tool is absent (older server version) or
+        the response cannot be parsed, it returns ``("", "")`` silently.
+
+        Returns:
+            Tuple of ``(status, warning)`` where ``status`` is the probe status
+            string (e.g. ``"ok"``, ``"auth_error"``) and ``warning`` is a
+            human-readable warning message, or an empty string when no warning
+            should be displayed.
+        """
+        import json as _json  # noqa: PLC0415
+
+        _AUTH_WARNING = (
+            "⚠️  LLM authentication failed at startup. "
+            "Check that your API key is correct and has not expired, "
+            "then restart the server."
+        )
+        _CONFIG_WARNING = (
+            "⚠️  LLM is not configured. "
+            "Set the required API key environment variable and restart the server."
+        )
+        _PROVIDER_WARNING = (
+            "⚠️  LLM provider returned an error at startup. "
+            "Responses may not work — check server logs for details."
+        )
+
+        try:
+            raw = await self._to_thread(self.mcp.call_tool, "bamboo_llm_probe", {})
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Tool absent or call failed — degrade gracefully.
+            return "", ""
+
+        try:
+            text = _extract_text(raw)
+            probe = _json.loads(text)
+            status = probe.get("status", "")
+        except Exception:  # pylint: disable=broad-exception-caught
+            return "", ""
+
+        if status == "ok" or not status:
+            return status, ""
+
+        if status == "auth_error":
+            return status, _AUTH_WARNING
+        if status == "config_error":
+            detail = probe.get("detail", "")
+            return status, f"⚠️  LLM configuration error: {detail}"
+        if status in ("not_configured",):
+            return status, _CONFIG_WARNING
+        # rate_limit / timeout / provider_error — less critical, but still noteworthy.
+        detail = probe.get("detail", status)
+        return status, _PROVIDER_WARNING + f" ({detail})"
 
     def _render_banner_placeholder(self) -> None:
         """Render a fallback banner before plugin manifest data is loaded."""
@@ -1033,6 +1166,19 @@ class BambooTui(App):
             self._write_error("No answer tool found. Try /tools to inspect server tools.")
             return
 
+        # Pre-dispatch superuser guard: block questions routing to superuser
+        # tools when the session is not authenticated.
+        if (
+            _SUPERUSER_PASSWORD
+            and not self._superuser
+            and _is_superuser_question(question, self.tool_names)
+        ):
+            self._write_system(
+                "🔒 This question requires superuser mode. "
+                "Run /superuser <password> to unlock developer tools."
+            )
+            return
+
         # Append the current user turn to history before sending.
         self._history.append({"role": "user", "content": question})
 
@@ -1082,15 +1228,29 @@ class BambooTui(App):
             if out.startswith("__CRIC_TABLE_READY__:"):
                 out = await self._fetch_cric_table(out)
 
-            self._replace_thinking(thinking, out)
+            # Strip Mermaid diagram blocks before display and history storage.
+            # The TUI cannot render Mermaid; raw syntax in history pollutes the
+            # LLM context window on follow-up questions.
+            clean_out, diagram_count = _strip_mermaid_blocks(out)
+            if diagram_count:
+                clean_out += (
+                    f"\n\n_[{diagram_count} Mermaid diagram{'s' if diagram_count > 1 else ''} "
+                    f"omitted — open in Streamlit to view.]_"
+                )
 
-            # Record the assistant reply and enforce the history cap.
-            self._history.append({"role": "assistant", "content": out})
+            self._replace_thinking(thinking, clean_out)
+
+            # Record the assistant reply (clean, no Mermaid syntax) and enforce the history cap.
+            self._history.append({"role": "assistant", "content": clean_out})
             self._cap_history()
 
             # Auto-chart: silently append a pilot chart when the response
             # came from panda_harvester_workers and has multiple statuses.
             await self._try_auto_chart()
+
+            # Poll the server for any buffered OpenSearch prompt-log events
+            # (write confirmations or errors) and surface them in the transcript.
+            await self._fetch_promptlog_events()
 
         except Exception as exc:
             self._replace_thinking(thinking, None)
@@ -1135,9 +1295,52 @@ class BambooTui(App):
             )
             return
 
+        m_rate = _RATE_CMD_RE.match(cmdline.strip())
+        if m_rate:
+            await self._handle_rate_command(int(m_rate.group(1)))
+            return
+
         await self._dispatch_slash_command(cmdline)
 
-    async def _dispatch_slash_command(self, cmdline: str) -> None:
+    async def _handle_rate_command(self, rating: int) -> None:
+        """Submit a star rating for the most recent response.
+
+        Args:
+            rating: Integer 1–5.
+        """
+        _STARS = {1: "★☆☆☆☆", 2: "★★☆☆☆", 3: "★★★☆☆", 4: "★★★★☆", 5: "★★★★★"}
+        if self._last_rated_doc is None:
+            self._write_system(
+                "No response to rate yet — ask a question first."
+            )
+            return
+        if "bamboo_promptlog_rate" not in self.tool_names:
+            self._write_system(
+                "bamboo_promptlog_rate tool not available — "
+                "is BAMBOO_OPENSEARCH_PROMPTLOG set on the server?"
+            )
+            return
+        index, doc_id = self._last_rated_doc
+        try:
+            res = await self._to_thread(
+                self.mcp.call_tool,
+                "bamboo_promptlog_rate",
+                {"index": index, "doc_id": doc_id, "rating": rating},
+            )
+            text = _extract_text(res) or "{}"
+            parsed = json.loads(text)
+            if parsed.get("error"):
+                self._write_system(f"Rating failed: {parsed['error']}")
+            else:
+                stars = _STARS.get(rating, str(rating))
+                self._write_system(
+                    f"Rated {stars} ({rating}/5) — "
+                    f"index={index!r} id={doc_id!r}"
+                )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._write_system(f"Rating error: {exc}")
+
+    async def _dispatch_slash_command(self, cmdline: str) -> None:  # noqa: C901
         """Dispatch a slash command to the appropriate handler.
 
         Split out from :meth:`_handle_command` to keep cyclomatic complexity
@@ -1191,6 +1394,67 @@ class BambooTui(App):
         if cmd == "/links":
             self._cmd_links(args)
             return
+        if cmd == "/superuser":
+            self._cmd_superuser(args)
+            return
+        if cmd == "/rates":
+            scope = args[0].lower() if args else ""
+            if scope == "today":
+                date_clause = (
+                    "today (filter @timestamp gte:now/d)"
+                )
+            elif scope == "week":
+                date_clause = "this week (filter @timestamp gte:now-7d/d)"
+            elif scope == "month":
+                date_clause = "this month (filter @timestamp gte:now-30d/d)"
+            else:
+                date_clause = "all time (no date filter)"
+            rates_q = (
+                f"Show all rated responses for {date_clause} as a markdown "
+                "table sorted by rating descending. "
+                "Call the opensearch_promptlog_query tool. "
+                "Pass max_hits=50 as a separate argument. "
+                "Pass source_fields=[@timestamp,turn_number,session_id,"
+                "model,tools_used,raw_question,rating] as a separate argument. "
+                "Pass this exact JSON as the query argument (nothing else): "
+                '{"query":{"exists":{"field":"rating"}},'
+                '"sort":[{"rating":{"order":"desc"}}]} '
+                "Each hit includes _id automatically. "
+                "Format as markdown table with these exact columns: "
+                "Doc ID (full _id value) | Time | Turn | "
+                "Session (first 8 chars) | Model | "
+                "Tools | Question (raw_question field, first 60 chars) | Rating. "
+                "The Doc ID is the only way to retrieve the full response. "
+            )
+            await self._handle_question(rates_q)
+            return
+        if cmd == "/faq":
+            scope = args[0].lower() if args else ""
+            if scope == "today":
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo today? "
+                    "Use a terms aggregation on raw_question.keyword filtered to gte:now/d."
+                )
+            elif scope == "week":
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo this week? "
+                    "Use a terms aggregation on raw_question.keyword filtered to gte:now-7d/d."
+                )
+            elif scope == "month":
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo this month? "
+                    "Use a terms aggregation on raw_question.keyword filtered to gte:now-30d/d."
+                )
+            else:
+                faq_q = (
+                    "What are the most frequently asked questions in Bamboo across all time? "
+                    "Use a terms aggregation on raw_question.keyword with no date filter."
+                )
+            await self._handle_question(faq_q)
+            return
+        if cmd == "/script":
+            self._cmd_script(args[0] if args else "")
+            return
         self._write_system(f"Unknown command: {cmdline} (try /help)")
 
     def _cmd_help(self) -> None:
@@ -1204,6 +1468,10 @@ class BambooTui(App):
             "  /json                 Show verbatim BigPanDA API response (raw server JSON)\n"
             "  /inspect              Show structured evidence dict (job counts, sites, errors)\n"
             "  /chart                Show ASCII bar chart of Harvester pilot counts by status\n"
+            "  /faq [today|week|month]  Most frequently asked questions (default: all time)\n"
+            "  /rates [today|week|month] Show rated responses as a table (default: all time)\n"
+            "  /script [filename]       Write code block(s) from last response to file\n"
+            "  /rate <1-5>           Rate the last response (1=poor, 5=excellent)\n"
             "  /tracing              Show timing + trace spans for last request\n"
             "  /history              Show turns currently held in context memory\n"
             "  /plugin <id>          Switch plugin (affects banner tool name)\n"
@@ -1212,6 +1480,7 @@ class BambooTui(App):
             "  /costs                Show estimated LLM token cost for the last request + session total\n"
             "  /clear                Clear transcript, context memory, and HTTP cache\n"
             "  /links [N]            List links from last response; /links N opens link N in browser\n"
+            "  /superuser <pw>       Unlock developer mode (requires BAMBOO_SUPERUSER_PASSWORD)\n"
             "  /exit, /quit          Exit the app\n"
             "\n"
             "Tip: Use PageUp/PageDown to scroll. To copy text, hold Option (macOS) or\n"
@@ -1369,6 +1638,39 @@ class BambooTui(App):
         self._write_panel(table, title=f"{_now()}  costs (estimated)", border_style="green")
         if note:
             self._write_system(note)
+
+    def _cmd_superuser(self, args: List[str]) -> None:
+        """Attempt to unlock superuser / developer mode with a password.
+
+        Checks the supplied password against :data:`_SUPERUSER_PASSWORD`
+        using a constant-time compare.  On success, sets
+        :attr:`_superuser` to ``True`` for the lifetime of the session.
+        On failure, prints a generic rejection message that does not
+        reveal whether a password is configured.
+
+        Usage: ``/superuser <password>``
+
+        Args:
+            args (List[str]): Remaining command tokens; first element is
+                the password attempt.
+        """
+        if not _SUPERUSER_PASSWORD:
+            self._write_system(
+                "Superuser mode is not configured "
+                "(set BAMBOO_SUPERUSER_PASSWORD to enable)."
+            )
+            return
+        if not args:
+            self._write_system("Usage: /superuser <password>")
+            return
+        attempt = args[0]
+        if hmac.compare_digest(attempt.encode(), _SUPERUSER_PASSWORD.encode()):
+            self._superuser = True
+            self._write_system(
+                "🔓 Superuser mode unlocked. Developer tools are now active."
+            )
+        else:
+            self._write_system("Incorrect password.")
 
     def _cmd_links(self, args: List[str]) -> None:
         """List links from the last assistant response, or open one by number.
@@ -1630,12 +1932,82 @@ class BambooTui(App):
 
         self.action_focus_input()
 
+    async def _fetch_promptlog_events(self) -> None:
+        """Poll the server for buffered OpenSearch prompt-log events and display them.
+
+        Calls ``bamboo_promptlog_status`` on the MCP server, which drains the
+        server-side event ring buffer and returns write confirmations and errors
+        accumulated since the previous call.  Each event is rendered as a system
+        or error panel in the transcript.
+
+        ``log_prompt`` fires as a background ``asyncio.create_task`` inside
+        ``call_llm`` and performs a synchronous OpenSearch network call via
+        ``asyncio.to_thread``.  This method therefore retries up to
+        ``_PROMPTLOG_POLL_ATTEMPTS`` times with ``_PROMPTLOG_POLL_INTERVAL_S``
+        seconds between attempts so the background task has time to complete
+        before we give up.
+
+        The call is silently skipped when the tool is not registered on the
+        server (i.e. prompt logging is disabled or the server is an older
+        version without the tool).
+        """
+        _PROMPTLOG_POLL_ATTEMPTS = 6
+        _PROMPTLOG_POLL_INTERVAL_S = 0.5
+
+        if "bamboo_promptlog_status" not in self.tool_names:
+            return
+        try:
+            for _ in range(_PROMPTLOG_POLL_ATTEMPTS):
+                await asyncio.sleep(_PROMPTLOG_POLL_INTERVAL_S)
+                res = await self._to_thread(
+                    self.mcp.call_tool, "bamboo_promptlog_status", {}
+                )
+                text = _extract_text(res) or "{}"
+                parsed = json.loads(text)
+                events = parsed.get("events") or []
+                if events:
+                    for event in events:
+                        severity = str(event.get("severity", "info"))
+                        message = str(event.get("message", ""))
+                        if not message:
+                            continue
+                        # Extract (index, doc_id) so /rate can reference
+                        # the most recently indexed turn.
+                        _m = re.search(
+                            r"index='([^']+)'.*?id='([^']+)'",
+                            message,
+                        )
+                        if _m:
+                            self._last_rated_doc = (_m.group(1), _m.group(2))
+                        if severity == "error":
+                            self._write_error(message)
+                        else:
+                            self._write_system(message)
+                    return  # events received — done
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # Never let observability polling affect the main response path.
+
+    #: Phase labels shown in sequence while the server is working.
+    #: Each phase is shown for ``_THINKING_TICKS_PER_PHASE`` ticks before
+    #: advancing to the next one (then cycling).  Dot count cycles every tick
+    #: independently so the animation always appears live within each phase.
+    _THINKING_PHASES: tuple[str, ...] = (
+        "Routing question",
+        "Retrieving evidence",
+        "Synthesising answer",
+    )
+    #: Number of 1-second ticks to display each phase before advancing.
+    _THINKING_TICKS_PER_PHASE: int = 4
+
     def _write_thinking(self) -> bool:
         """Start the animated thinking indicator below the transcript.
 
-        Uses :meth:`set_interval` (Textual's own timer mechanism) to cycle
-        through ``Thinking.`` → ``Thinking..`` → ``Thinking...`` once per
-        second, with the current wall-clock time updated on each frame.
+        Uses :meth:`set_interval` (Textual's own timer mechanism) to update
+        the indicator every second.  Each tick advances the dot sequence
+        (``·`` → ``··`` → ``···``) to confirm liveness.  The phase label
+        (Routing / Retrieving / Synthesising) advances every
+        :attr:`_THINKING_TICKS_PER_PHASE` ticks so the user sees a meaningful
+        description of the current stage throughout the wait.
 
         :meth:`set_interval` integrates with Textual's event loop directly,
         avoiding the timing issues that ``asyncio.ensure_future`` + ``asyncio.sleep``
@@ -1648,15 +2020,21 @@ class BambooTui(App):
             return False
         self.thinking_widget.add_class("active")
 
-        frames = ["Thinking.", "Thinking..", "Thinking..."]
+        dots = [".", "..", "..."]
         counter = [0]  # mutable cell so the closure can increment it
 
         def _tick() -> None:
             import datetime as _dt
             now = _dt.datetime.now().strftime("%H:%M:%S")
+            tick = counter[0]
+            phase = self._THINKING_PHASES[
+                (tick // self._THINKING_TICKS_PER_PHASE) % len(self._THINKING_PHASES)
+            ]
+            dot = dots[tick % len(dots)]
             if self.thinking_widget:
                 self.thinking_widget.update(
-                    Text(f"{now}  {frames[counter[0] % len(frames)]}", style="dim italic")
+                    Text(f"{now}  {phase}{dot}", style="dim italic"),
+                    layout=False,
                 )
             counter[0] += 1
 
@@ -1678,7 +2056,7 @@ class BambooTui(App):
             self._thinking_task = None
         if self.thinking_widget:
             self.thinking_widget.remove_class("active")
-            self.thinking_widget.update("")
+            self.thinking_widget.update("", layout=False)
         if answer is not None:
             self._write_assistant(answer)
 
@@ -1802,6 +2180,7 @@ class BambooTui(App):
             msg (str): Message text (Markdown or pre-formatted plain text).
         """
         self._last_response_links = self._extract_links(msg)
+        self._last_response_text = msg
         display_msg = self._expand_links_for_display(msg)
         renderable = Text(display_msg) if self._is_preformatted(display_msg) else Markdown(display_msg)
         self._write_panel(renderable, title=f"{_now()}  Bamboo MCP", border_style="dim")
@@ -1809,6 +2188,200 @@ class BambooTui(App):
             n = len(self._last_response_links)
             word = "link" if n == 1 else "links"
             self._write_system(f"{n} {word} in this response — type /links to list, /links N to open.")
+
+    @staticmethod
+    def _extract_code_blocks(text: str) -> list[tuple[str, str]]:
+        """Extract fenced code blocks from a Markdown response.
+
+        Matches blocks delimited by triple backticks, optionally with a
+        language identifier.  Returns blocks in order of appearance.
+
+        Args:
+            text: Raw Markdown response text.
+
+        Returns:
+            List of ``(language, code)`` tuples.  ``language`` is the
+            identifier after the opening fence (e.g. ``"python"``,
+            ``"bash"``), or an empty string when none is specified.
+            ``code`` is the block content with leading/trailing whitespace
+            stripped.
+        """
+        import re as _re
+        pattern = _re.compile(r"```(\w*)\s*\n(.*?)```", _re.DOTALL)
+        return [(lang.lower(), code.strip()) for lang, code in pattern.findall(text)]
+
+    @staticmethod
+    def _extract_suggested_filename(text: str) -> str:
+        """Extract a suggested script filename from a Markdown response.
+
+        Recognises common patterns the LLM uses to label a script:
+
+        - ``Script: calculate_pi.py``
+        - ``**Script:** calculate_pi.py``
+        - ``File: calculate_pi.py``
+        - ``**File:** calculate_pi.py``
+        - ``Filename: calculate_pi.py``
+        - Code fence with inline filename: ` ```python calculate_pi.py `
+
+        Args:
+            text: Raw Markdown response text.
+
+        Returns:
+            The suggested filename string, or an empty string when none
+            is found.
+        """
+        import re as _re
+        # "Script: foo.py", "File: foo.py", "Filename: foo.py"
+        # with optional Markdown bold markers
+        # Match "Script: foo.py", "File: foo.py" etc. — allow any surrounding
+        # whitespace, Unicode separators, and optional Markdown bold markers.
+        label_re = _re.compile(
+            r"(?:^|[\n\r])[ \t]*\*{0,2}(?:Script|File|Filename)\*{0,2}:[ \t]*([\w.][\w.\-]*)"
+            r"[ \t]*(?:[\n\r]|$)",
+            _re.IGNORECASE | _re.UNICODE,
+        )
+        m = label_re.search(text)
+        if m:
+            return m.group(1).strip()
+        # Also try a simpler fallback: any word that looks like a filename
+        # on a line by itself immediately after "Script" or "File"
+        simple_re = _re.compile(
+            r"(?:Script|File|Filename):\s*([\w.\-]+\.(?:py|sh|js|ts|cpp|c|java|go|rs|r|sql|yaml|yml|toml|json))"
+            r"\b",
+            _re.IGNORECASE,
+        )
+        m = simple_re.search(text)
+        if m:
+            return m.group(1).strip()
+        # Code fence with inline filename: ```python calculate_pi.py
+        fence_re = _re.compile(
+            r"```\w*\s+([\w.\-]+\.\w+)\s*\n",
+        )
+        m = fence_re.search(text)
+        if m:
+            return m.group(1).strip()
+        # "Save the script as random_numbers.C" / "name it foo.py" etc.
+        save_re = _re.compile(
+            r"(?:save|name|call)\s.*?\bas\s+([\w.][\w.\-]*\.\w+)",
+            _re.IGNORECASE,
+        )
+        m = save_re.search(text)
+        if m:
+            return m.group(1).strip()
+        return ""
+
+    @staticmethod
+    def _lang_to_extension(lang: str) -> str:
+        """Map a code fence language identifier to a file extension.
+
+        Args:
+            lang: Language string from the code fence (e.g. ``"python"``).
+
+        Returns:
+            File extension including the leading dot (e.g. ``".py"``).
+            Defaults to ``.txt`` for unknown or empty languages.
+        """
+        _MAP = {
+            "python": ".py", "py": ".py",
+            "bash": ".sh", "sh": ".sh", "shell": ".sh",
+            "javascript": ".js", "js": ".js",
+            "typescript": ".ts", "ts": ".ts",
+            "json": ".json",
+            "yaml": ".yaml", "yml": ".yaml",
+            "toml": ".toml",
+            "cpp": ".cpp", "c++": ".cpp", "c": ".c", "root": ".C",
+            "java": ".java",
+            "ruby": ".rb",
+            "go": ".go",
+            "rust": ".rs",
+            "sql": ".sql",
+            "r": ".r",
+        }
+        return _MAP.get(lang.lower(), ".txt")
+
+    def _cmd_script(self, filename: str) -> None:
+        """Write code block(s) from the last response to a local file.
+
+        Resolution order for the output filename:
+        1. Explicit filename supplied by the user (``/script foo.py``).
+        2. Filename suggested in the response body (e.g. ``Script: foo.py``).
+        3. Auto-generated name from language + timestamp.
+
+        The proposed path is shown to the user before writing; the write
+        proceeds immediately (TUI is single-user/expert context).
+
+        Args:
+            filename: Optional target filename supplied by the user.
+        """
+        import os as _os
+        from datetime import datetime as _dt
+
+        if not self._last_response_text:
+            self._write_system("No previous response available for /script.")
+            return
+
+        blocks = self._extract_code_blocks(self._last_response_text)
+        if not blocks:
+            self._write_system(
+                "No code blocks found in the last response.  "
+                "The response must contain a fenced ``` code block."
+            )
+            return
+
+        cwd = _os.getcwd()
+        stamp = _dt.now().strftime("%H%M%S")
+        # Try to honour a filename suggested in the response body
+        suggested = self._extract_suggested_filename(self._last_response_text)
+        written: list[str] = []
+
+        for i, (lang, code) in enumerate(blocks):
+            ext = self._lang_to_extension(lang)
+            if filename and i == 0:
+                # First block: use the user-supplied filename, adding the
+                # detected extension if the user omitted one.
+                if _os.path.splitext(filename)[1]:
+                    target = filename
+                else:
+                    target = filename + ext
+            elif filename and len(blocks) > 1:
+                # Subsequent blocks: strip extension from user-supplied name
+                # and append each block's own language extension.
+                base = _os.path.splitext(filename)[0] or filename
+                target = f"{base}_{i + 1}{ext}"
+            elif suggested and i == 0:
+                # First block: honour the LLM-suggested filename exactly.
+                target = suggested
+            elif suggested and len(blocks) > 1:
+                # Subsequent blocks: use suggested base + own extension.
+                base = _os.path.splitext(suggested)[0]
+                target = f"{base}_{i + 1}{ext}"
+            else:
+                label = lang if lang else "script"
+                suffix = f"_{i + 1}" if len(blocks) > 1 else ""
+                target = f"{label}_{stamp}{suffix}{ext}"
+
+            path = _os.path.join(cwd, target)
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(code + "\n")
+                written.append(path)
+            except OSError as exc:
+                self._write_error(f"/script: could not write {path!r}: {exc}")
+                return
+
+        if len(written) == 1:
+            self._write_system(f"Script written to: {written[0]}")
+        else:
+            joined = "\n  ".join(written)
+            self._write_system(f"{len(written)} scripts written:\n  {joined}")
+
+    def _write_warning(self, msg: str) -> None:
+        """Write a warning message with yellow border.
+
+        Args:
+            msg: Warning message text.
+        """
+        self._write_panel(Text(msg), title=f"{_now()}  warning", border_style="yellow")
 
     def _write_error(self, msg: str) -> None:
         """Write an error message.
@@ -2215,7 +2788,37 @@ def main() -> None:
         )
 
     app = BambooTui(cfg=cfg, plugin_id=args.plugin)
-    inline = True if args.inline or not args.no_inline else False
+
+    # Textual's alternate-screen mode (--no-inline) uses absolute cursor
+    # positioning without erasing lines before writing.  On SSH pseudo-TTYs
+    # (e.g. lxplus) the terminal does not clear the alternate screen buffer on
+    # entry, so every repaint overlays on previous content producing ghost
+    # frames.  This is a fundamental limitation of Textual's non-inline
+    # renderer on SSH — not fixable in application code without patching
+    # Textual itself.
+    #
+    # When running over SSH we therefore force inline mode, which uses relative
+    # cursor movement (delta updates only) and renders correctly on all
+    # terminals.  Set BAMBOO_FORCE_NO_INLINE=1 to override this if your
+    # terminal is known to handle alternate screen correctly over SSH.
+    _ssh = bool(
+        os.environ.get("SSH_CLIENT")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("SSH_CONNECTION")
+    )
+    _force_no_inline = os.environ.get("BAMBOO_FORCE_NO_INLINE", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if _ssh and args.no_inline and not _force_no_inline:
+        import sys as _sys
+        print(
+            "[bamboo] SSH session detected — using inline mode "
+            "(set BAMBOO_FORCE_NO_INLINE=1 to use alternate screen).",
+            file=_sys.stderr,
+        )
+        inline = True
+    else:
+        inline = True if args.inline or not args.no_inline else False
     app.run(inline=inline, inline_no_clear=True, mouse=False)
 
 

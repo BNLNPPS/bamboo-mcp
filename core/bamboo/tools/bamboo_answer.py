@@ -27,7 +27,11 @@ from bamboo.llm.exceptions import LLMError
 from bamboo.llm.types import Message
 from bamboo.tools.base import MCPContent, coerce_messages, text_content
 from bamboo.tools.llm_passthrough import bamboo_llm_answer_tool
-from bamboo.tools.bamboo_executor import execute_plan, get_last_pilot_monitoring_evidence
+from bamboo.tools.bamboo_executor import (
+    execute_plan,
+    get_last_core_dump_offer,
+    get_last_traceback_evidence,
+)
 from bamboo.tools.planner import (
     bamboo_plan_tool,
     Plan,
@@ -81,9 +85,13 @@ _CONCEPTUAL_RE: re.Pattern[str] = re.compile(
 )
 # Matches PanDA server liveness questions — \"is panda alive\", \"is the panda server ok\", etc.
 # Deliberately avoids matching task/job/site questions that mention \"panda\" incidentally.
-# Signal phrases that indicate the user wants source-level analysis of a
-# pilot_monitoring_error.  Only consulted after confirming the last tool call
-# was panda_log_analysis with failure_type='pilot_monitoring_error'.
+# Signal phrases that indicate the user wants source-level analysis of a pilot
+# exception.  Only consulted after confirming the last panda_log_analysis call
+# found a Python traceback reaching pilot3 code (get_last_traceback_evidence).
+#
+# The phrases below must cover the wording of the offer that panda_log_analysis
+# appends to its own answer ("Ask me to show the pilot source for a code-level
+# diagnosis") — a user who accepts an offer by echoing it must route correctly.
 _PILOT_SOURCE_SIGNALS: frozenset[str] = frozenset({
     "pilot code",
     "pilot source",
@@ -116,16 +124,26 @@ _PILOT_SOURCE_SIGNALS: frozenset[str] = frozenset({
     "list_processes",
     "getpwuid",
     "psutils",
+    # Wording of the appended code-analysis offer, so accepting it routes here.
+    "show the pilot source",
+    "show me the pilot source",
+    "code-level",
+    "code level",
+    "code analysis",
+    "analyse the code",
+    "analyze the code",
+    "show me the code",
+    "traceback",
 })
 
 
 def _is_pilot_source_request(question: str) -> bool:
     """Return True if the question is asking for pilot source-level analysis.
 
-    Only meaningful when the last panda_log_analysis call returned
-    failure_type='pilot_monitoring_error'.  The function is intentionally
-    permissive — it is always guarded by the evidence check so false positives
-    cannot misfire when there is no prior pilot_monitoring_error in context.
+    Only meaningful when the last panda_log_analysis call found a pilot
+    traceback.  The function is intentionally permissive — it is always guarded
+    by the evidence check in get_last_traceback_evidence, so false positives
+    cannot misfire when there is no prior pilot traceback in context.
 
     Args:
         question: User question text.
@@ -135,6 +153,176 @@ def _is_pilot_source_request(question: str) -> bool:
     """
     q = question.lower()
     return any(sig in q for sig in _PILOT_SOURCE_SIGNALS)
+
+
+# ---------------------------------------------------------------------------
+# Core-dump analysis signals.
+#
+# Two distinct entry points, deliberately kept apart:
+#   * an explicit request naming a job ("analyse the core dump of job 123"),
+#     which is allowed for any failure type; and
+#   * a bare affirmative answering the offer that panda_log_analysis makes
+#     after a looping-job kill, which carries no job ID of its own.
+# ---------------------------------------------------------------------------
+
+_CORE_DUMP_SIGNALS: frozenset[str] = frozenset({
+    "core dump",
+    "core-dump",
+    "coredump",
+    "core file",
+    "gdb",
+    "backtrace",
+    "back trace",
+})
+
+# The other half of rule 1c: asking what the payload was *doing* when it was
+# killed.  A regex rather than literals because the job reference sits in the
+# middle of the phrase — "what was job 7263525363 stuck on" — so substring
+# matching on "what was it stuck on" silently misses the commonest phrasing.
+#
+# Note what is deliberately absent: a bare "why did job X hang".  That is a
+# diagnosis request, not a core-dump request, and it must reach
+# panda_log_analysis first — see _is_core_dump_request.
+_CORE_DUMP_STATE_RE: re.Pattern[str] = re.compile(
+    r"(?i)\b(?:"
+    r"what\s+(?:was|were)\s+(?:it|that|the\s+job|the\s+payload|job\s+[0-9]{4,12})"
+    r"\s+(?:actually\s+)?(?:doing|stuck|waiting|hung|blocked)"
+    r"|where\s+(?:was|were)\s+(?:it|the\s+job|job\s+[0-9]{4,12})\s+stuck"
+    r"|what\s+(?:was|were)\s+(?:it|the\s+job)\s+stuck\s+(?:on|in)"
+    r")\b"
+)
+
+
+def _is_core_dump_request(question: str) -> bool:
+    """Return True if the question explicitly asks for core-dump analysis.
+
+    Rule 1c's signal test.  Unlike the affirmative path this is not gated on a
+    prior offer, so it stays usable for any failure type — a crash as much as a
+    looping-job hang — and the tool itself resolves the framing from the pilot
+    error code.
+
+    Deliberately narrower than "any question about a hang".  A bare "why did
+    job X hang" is left to ``panda_log_analysis``: the core-dump tool fetches a
+    multi-gigabyte core and holds the single analysis slot for about a minute,
+    which is the wrong opening move for a question that a log analysis usually
+    answers outright — and when it does not, that same log analysis makes the
+    offer that rule 1d picks up.  So the expensive path is reached either by
+    naming it or by accepting it, never by guessing.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        True if the question names a core-dump artifact or asks what the
+        payload was doing when it was killed.
+    """
+    q = (question or "").lower()
+    if any(sig in q for sig in _CORE_DUMP_SIGNALS):
+        return True
+    return bool(_CORE_DUMP_STATE_RE.search(q))
+
+
+# Matches a short, content-free affirmative: "yes", "yes please", "ok do it",
+# "go ahead", "please analyse it", "sure".  Anchored at both ends and length-
+# bounded by the alternation itself, so a sentence that merely *contains* "yes"
+# ("yes but what about the stage-out") does not match and falls through to
+# normal routing, where the user's actual question is answered.
+_CORE_DUMP_AFFIRMATIVE_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:"
+    r"(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|affirmative)"
+    r"(?:[,!.\s]+(?:please|do\s+it|go\s+ahead|thanks?))*"
+    r"|(?:please\s+)?(?:do\s+it|go\s+ahead|go\s+for\s+it|proceed|carry\s+on)"
+    r"|(?:yes[,!.\s]+)?(?:please\s+)?analys[ei]\s+it"
+    r"|(?:yes[,!.\s]+)?(?:please\s+)?analyze\s+it"
+    r"|(?:yes[,!.\s]+)?(?:please\s+)?run\s+it"
+    r")[!.\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_core_dump_affirmative(question: str) -> bool:
+    """Return True if *question* is a bare affirmative and nothing else.
+
+    Only meaningful when a core-dump offer is outstanding — the caller always
+    pairs this with :func:`~bamboo.tools.bamboo_executor.get_last_core_dump_offer`,
+    so a "yes" with no offer behind it cannot misfire.
+
+    Args:
+        question: The raw user message.
+
+    Returns:
+        True when the whole message is an affirmative with no other content.
+    """
+    return bool(_CORE_DUMP_AFFIRMATIVE_RE.match((question or "").strip()))
+
+
+# Matches a request to run the analysis *again* rather than read the stored
+# result.  Without this the tool replays a completed run forever: a core is
+# expensive to fetch, so `start` returns the existing evidence unless
+# `restart` is set, and no phrasing could reach that argument.
+_CORE_DUMP_RESTART_RE: re.Pattern[str] = re.compile(
+    r"(?i)\b(?:"
+    r"re-?(?:run|analys[ei]|analyze|do|try)"
+    # A bare "again" is safe here: this is only consulted once rule 1c has
+    # already matched a core-dump request carrying a job ID, and in that
+    # context "again" does not mean anything else.
+    r"|again"
+    r"|(?:from\s+scratch|afresh|a\s+fresh\s+(?:run|analysis)|force\s+a?\s*(?:re-?run|restart))"
+    r"|fresh\s+analysis|start\s+over"
+    r")\b"
+)
+
+
+def _wants_core_dump_restart(question: str) -> bool:
+    """Return True if the question asks for a *new* run, not the stored one.
+
+    A completed analysis is replayed by default because refetching a gigabyte
+    core to answer the same question twice is wasteful.  That default is right
+    until the reason for asking again is that something changed — the analyzer,
+    the host, the release — at which point the stored evidence is precisely
+    what the reader does not want.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        True when the phrasing asks for the analysis to be run again.
+    """
+    return bool(_CORE_DUMP_RESTART_RE.search(question or ""))
+
+
+def _build_core_dump_plan(
+    job_id: int, mode: str, explain: str, restart: bool = False,
+) -> "Plan":
+    """Build a FAST_PATH plan calling the ATLAS core-dump tool.
+
+    Args:
+        job_id: PanDA job ID whose core dump to analyse.
+        mode: ``"auto"``, ``"hang"`` or ``"crash"``.
+        explain: Human-readable routing rationale for the plan record.
+        restart: Re-run even when a completed analysis already exists.  Only
+            ever set from explicit phrasing — never inferred — because it
+            spends a gigabyte transfer and the single analysis slot.
+
+    Returns:
+        A :class:`Plan` routing to ``atlas.core_dump_analysis``.
+    """
+    arguments: dict[str, Any] = {"job_id": job_id, "action": "start", "mode": mode}
+    if restart:
+        arguments["restart"] = True
+    return Plan(
+        route=PlanRoute.FAST_PATH,
+        confidence=1.0,
+        tool_calls=[ToolCall(
+            # Entry-point name: the MCP server overwrites a plugin tool's
+            # internal name with its entry-point key, so "core_dump_analysis"
+            # alone does not resolve.
+            tool="atlas.core_dump_analysis",
+            arguments=arguments,
+        )],
+        reuse_policy=ReusePolicy(),
+        explain=explain,
+    )
 
 
 _PANDA_HEALTH_RE: re.Pattern[str] = re.compile(
@@ -342,8 +530,37 @@ def _extract_history(messages: list[Message], current_question: str) -> list[Mes
     return prior
 
 
+def _friendly_llm_error_import(exc: ImportError) -> str:
+    """Return a user-readable message for a bare ``ImportError`` from a provider.
+
+    This is a safety-net handler for LLM provider clients that omit the
+    ``try/except ImportError`` guard around their lazy SDK import.  Well-behaved
+    providers convert ``ImportError`` to
+    :class:`~bamboo.llm.exceptions.LLMConfigError` themselves; this function
+    ensures the user still sees an actionable message rather than a raw
+    traceback if one slips through.
+
+    Args:
+        exc: The ``ImportError`` raised by a provider's lazy SDK import.
+
+    Returns:
+        A plain-text string suitable for display in the TUI or returned as
+        tool output.
+    """
+    return f"\u2699\ufe0f  A required LLM provider package is not installed: {exc}"
+
+
 def _friendly_llm_error(exc: LLMError) -> str:
     """Return a concise, user-readable explanation of an LLM provider error.
+
+    For :class:`~bamboo.llm.exceptions.LLMConfigError`, the message is
+    specialised based on its content:
+
+    * If the error mentions a missing package (``"not installed"`` /
+      ``"no module named"``), the original exception text is surfaced
+      verbatim so the user sees the ``pip install`` hint rather than a
+      misleading API-key message.
+    * Otherwise the generic API-key configuration hint is shown.
 
     Args:
         exc: An :class:`~bamboo.llm.exceptions.LLMError` subclass instance.
@@ -359,6 +576,12 @@ def _friendly_llm_error(exc: LLMError) -> str:
     raw = str(exc)
 
     if isinstance(exc, LLMConfigError):
+        raw_lower = raw.lower()
+        # Missing-package errors contain "not installed" — surface the exact
+        # message so the user sees the pip install command rather than a
+        # misleading hint about API keys.
+        if "not installed" in raw_lower or "no module named" in raw_lower:
+            return f"\u2699\ufe0f  {raw}"
         return (
             "\u2699\ufe0f  LLM not configured — check your API key environment variables "
             "(e.g. MISTRAL_API_KEY, OPENAI_API_KEY) and restart the server."
@@ -573,6 +796,153 @@ _JOBS_DB_SIGNALS: frozenset[str] = frozenset({
     "failed on",
     "finished on",
 })
+
+#: Signal phrases that unambiguously indicate a job stats / performance query
+#: against the ``atlas_panda_job_stats-*`` OpenSearch index.  These phrases
+#: reference pilot timing sub-fields, wall-clock / queue time metrics, memory
+#: usage, memory-leak diagnostics, CPU efficiency, HS06 accounting, I/O
+#: throughput, or carbon footprint fields that are only present in that
+#: index, not in the live DuckDB snapshot.
+#:
+#: Checked BEFORE the jobs-DB fast-path so that questions like
+#: "What is the average wall-clock time for failed jobs?" route to
+#: ``atlas.job_stats`` rather than ``panda_jobs_query``.
+#:
+#: Deliberately excludes ambiguous phrases like "failed jobs" or "error rate"
+#: that overlap with ``_JOBS_DB_SIGNALS``; those are handled by the LLM planner
+#: when ``BAMBOO_FAST_PATH=0``.
+_JOB_STATS_SIGNALS: frozenset[str] = frozenset({
+    # Pilot timing sub-fields
+    "stage-in time",
+    "stagein time",
+    "stage-out time",
+    "stageout time",
+    "stage in time",
+    "stage out time",
+    "pilottiming",
+    "pilot timing",
+    "payload execution time",
+    "payload setup time",
+    "initial setup time",
+    "getjob time",
+    "get job time",
+    # Wall-clock and queue time
+    "wall-clock time",
+    "wallclock time",
+    "wall clock time",
+    "queue time",
+    "queuing time",
+    "queueing time",
+    "queue wait time",
+    "queue wait",
+    "queuetime",
+    "job_walltime",
+    "job_queuetime",
+    # Memory (unambiguous — not in DuckDB jobs snapshot)
+    "memory usage",
+    "rss memory",
+    "avgrss",
+    "maxrss",
+    "avgpss",
+    "maxpss",
+    "avgvmem",
+    "maxvmem",
+    "avgswap",
+    "maxswap",
+    "resident set",
+    "virtual memory",
+    "swap usage",
+    # CPU and HS06 (unambiguous)
+    "cpu efficiency",
+    "cpu_eff",
+    "hs06",
+    "hs06sec",
+    "cpuconsumptiontime",
+    # I/O throughput (unambiguous)
+    "write throughput",
+    "read throughput",
+    "ratewbytes",
+    "raterbytes",
+    "inputfilebytes",
+    "outputfilebytes",
+    "totrbytes",
+    "totwbytes",
+    "input data volume",
+    "output data volume",
+    # Carbon footprint (unambiguous)
+    "carbon",
+    "co2",
+    "gco2",
+    "carbon footprint",
+    # Error field names only (unambiguous as OpenSearch field tokens).
+    # Bare phrases ("pilot error", "ddm error", "exe error") are excluded:
+    # "show jobs with pilot error code 1324" is a DuckDB listing question,
+    # not an OpenSearch aggregation — let the jobs-DB fast-path handle it.
+    "piloterrorcode",
+    "piloterrordiag",
+    "ddmerrorcode",
+    "ddmerrordiag",
+    "exeerrorcode",
+    "exeerrordiag",
+    # Memory-leak diagnostics (linear fit fields; the only meaning "memory
+    # leak" / "leak rate" has anywhere in Bamboo MCP is this job_stats model,
+    # so natural phrases are safe to include alongside the literal tokens).
+    "leak_slope",
+    "leak_intersect",
+    "leak_chi2",
+    "memory leak",
+    "leak rate",
+    "memory leak rate",
+    # Software environment (field-name tokens only — natural phrases like
+    # "python version" or "os version" are ambiguous with generic questions
+    # unrelated to job stats, so they are deliberately excluded and left to
+    # the LLM planner, same treatment as atlasrelease/cmtconfig/homepackage).
+    "lsetup_time",
+    "os_version",
+    "python_version",
+})
+
+
+def _is_job_stats_question(question: str) -> bool:
+    """Return True when the question targets the job stats OpenSearch index.
+
+    Detects questions about pilot timing sub-fields (stage-in, stage-out,
+    payload execution, etc.), wall-clock / queue time, memory usage, CPU
+    efficiency, HS06 accounting, I/O throughput, carbon footprint, pilot /
+    DDM / execution error codes, or a specific Python/OS version (e.g.
+    "python 3.7", "EL9") — all of which are only available in
+    atlas_panda_job_stats-*.
+
+    Checked before the jobs-DB fast-path so job stats questions route to
+    atlas.job_stats rather than panda_jobs_query.
+
+    A specific version number/shorthand (unlike the bare word "version",
+    which is deliberately excluded from _JOB_STATS_SIGNALS as too
+    ambiguous) is unambiguous in this domain, so it's safe to fast-path.
+    Regression test: "Which sites are still using python 3.7?" and "Which
+    sites are still on EL7?" both matched _is_jobs_db_question (via
+    "sites") before this function recognised the version mention, routing
+    into the jobs/CRIC database-disambiguation prompt or (worse) to
+    panda_jobs_query, which has no python_version/os_version column.
+    Reuses :func:`_extract_python_version_from_question` and
+    :func:`_extract_os_version_from_question` (defined later in this
+    module) as the single source of truth for what counts as a version
+    mention, so routing detection and argument extraction can never drift
+    apart.
+
+    Args:
+        question: User question text (before any normalisation).
+
+    Returns:
+        True if the question should be routed to atlas.job_stats.
+    """
+    q = question.lower()
+    if any(sig in q for sig in _JOB_STATS_SIGNALS):
+        return True
+    if _extract_python_version_from_question(question) is not None:
+        return True
+    return _extract_os_version_from_question(question) is not None
+
 
 # Job-specific signals for site-health detection: a subset of _JOBS_DB_SIGNALS
 # that excludes generic counting phrases like "how many" and "count", and also
@@ -815,6 +1185,116 @@ _PILOT_DOC_PREFIXES: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Topic classification for multi-collection RAG routing
+# ---------------------------------------------------------------------------
+
+#: Keyword signals that indicate a Rucio data-management question.
+_RUCIO_SIGNALS: frozenset[str] = frozenset({
+    "rucio", "did ", "data identifier", "replica", "replication rule",
+    "rse ", "storage element", "rucio rule",
+})
+
+#: Keyword signals that indicate a ROOT data-analysis framework question.
+_ROOT_SIGNALS: frozenset[str] = frozenset({
+    "root ", " root\n", "tfile", "ttree", "tbranch", "tleaf",
+    "rdataframe", "rdf::", "root framework", "root cern",
+})
+
+#: Keyword signals that indicate a Bamboo MCP core question (bamboo-mcp repo).
+#:
+#: Matched *after* :data:`_BAMBOO_SERVICES_SIGNALS` so that a question
+#: containing both "bamboo mcp" and "services" is routed to
+#: ``bamboo_services`` rather than ``bamboo_mcp``.
+_BAMBOO_SIGNALS: frozenset[str] = frozenset({
+    "bamboo mcp", "bamboo-mcp", "bamboo config", "configure bamboo",
+    "bamboo tool", "bamboo server", "bamboo answer", "bamboo setup",
+    "bamboo install", "install bamboo", "bamboo plugin",
+    "bamboo interface", "bamboo ui", "bamboo tui", "bamboo cli",
+    "bamboo streamlit",
+})
+
+#: Keyword signals that indicate a Bamboo MCP Services question
+#: (bamboo-mcp-services repo — ingestion agents, CRIC agent, etc.).
+#:
+#: Checked *before* :data:`_BAMBOO_SIGNALS` because these phrases are more
+#: specific: a question about "bamboo mcp services" contains "bamboo mcp" but
+#: the more precise match must win.
+_BAMBOO_SERVICES_SIGNALS: frozenset[str] = frozenset({
+    "bamboo mcp services", "bamboo-mcp-services", "bamboo services",
+    "mcp services agent", "mcp services config",
+    "supervisor agent", "ingestion agent", "cric agent",
+    "document monitor agent", "document monitor",
+    "bamboo-mcp-services install", "install bamboo services",
+    "bamboo services install", "bamboo services setup",
+    "bamboo services config",
+})
+
+
+def _topic_for_question(question: str, plugin_id: str = "atlas") -> str:
+    """Infer the ChromaDB collection topic for a documentation question.
+
+    Uses lightweight keyword matching to assign a topic key that
+    :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic` maps
+    to a concrete logical collection name.  Plugin-level defaults take
+    precedence over keyword signals for plugin-specific tools (ePIC, CGSim),
+    and keyword signals for cross-cutting topics (Rucio, ROOT, Bamboo) take
+    precedence over the generic PanDA/ATLAS default.
+
+    Bamboo signal matching uses two ordered sets to handle the ambiguity
+    between the two Bamboo components:
+
+    1. :data:`_BAMBOO_SERVICES_SIGNALS` is checked first (more specific) →
+       returns ``"bamboo_services"``, which maps to ``bamboo_services_docs``.
+    2. :data:`_BAMBOO_SIGNALS` is checked second → returns ``"bamboo_mcp"``,
+       which maps to ``bamboo_mcp_docs``.
+
+    Deployments that have not yet split ``bamboo_docs`` into two separate
+    collections can keep ``"bamboo_mcp": "bamboo_docs"`` and
+    ``"bamboo_services": "bamboo_docs"`` in ``BAMBOO_CHROMA_COLLECTION_MAP``
+    to fall back to the single collection transparently.
+
+    Args:
+        question: The user question text (already lowercased by callers, but
+            this function lowercases defensively).
+        plugin_id: Active plugin identifier.  Controls the default topic when
+            no cross-cutting keyword signal is present.
+
+    Returns:
+        str: A topic key recognised by
+        :func:`~bamboo.tools._chroma_routing.resolve_collection_for_topic`,
+        e.g. ``"atlas"``, ``"rucio"``, ``"root"``, ``"bamboo_mcp"``,
+        ``"bamboo_services"``, ``"panda"``.
+    """
+    # Plugin-specific topics always win — don't let keyword signals bleed
+    # across plugin boundaries (e.g. an ePIC question mentioning "panda").
+    if plugin_id == "cgsim":
+        return "cgsim"
+    if plugin_id == "epic":
+        return "epic"
+
+    q_lower = question.lower()
+
+    # Bamboo Services signals checked before core Bamboo signals — more
+    # specific phrases (e.g. "bamboo mcp services") must win over the shorter
+    # "bamboo mcp" substring they contain.
+    if any(sig in q_lower for sig in _BAMBOO_SERVICES_SIGNALS):
+        return "bamboo_services"
+    if any(sig in q_lower for sig in _BAMBOO_SIGNALS):
+        return "bamboo_mcp"
+
+    # Cross-cutting topics: ROOT, Rucio.
+    if any(sig in q_lower for sig in _ROOT_SIGNALS):
+        return "root"
+    if any(sig in q_lower for sig in _RUCIO_SIGNALS):
+        return "rucio"
+
+    # ATLAS plugin defaults to atlas_docs; everything else falls back to panda.
+    if plugin_id == "atlas":
+        return "atlas"
+    return "panda"
+
+
 def _is_pilot_question(question: str) -> bool:
     """Return ``True`` when the question is about Harvester pilots/workers.
 
@@ -953,6 +1433,97 @@ def _extract_site_from_question(question: str) -> str | None:
     return None
 
 
+# Captures a bare Python major(.minor) version mention, e.g. "python 3.7",
+# "python3.7", "python 2". Mirrors _JOB_STATS_VERSION_RE but with a capture
+# group so the version string can be extracted, not just detected.
+_PYTHON_VERSION_EXTRACT_RE: re.Pattern[str] = re.compile(r"\bpython\s*([23](?:\.\d+)?)\b")
+
+# Captures an OS version mention in either "EL<N>" form (e.g. "EL7", "EL9")
+# or "os [version] <N>" form (e.g. "os version 7", "OS 9.7"). Checked in
+# this order since "EL<N>" is the more common ATLAS shorthand and is
+# unambiguous, whereas the bare "os" form needs a word boundary to avoid
+# matching inside unrelated words.
+_OS_VERSION_EL_RE: re.Pattern[str] = re.compile(r"\bel\s*(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+_OS_VERSION_WORD_RE: re.Pattern[str] = re.compile(
+    r"\bos\s*(?:version\s*)?(\d+(?:\.\d+)?)\b", re.IGNORECASE
+)
+
+
+def _extract_python_version_from_question(question: str) -> str | None:
+    """Extract a bare Python version mention from a question, if present.
+
+    This is a deterministic safety net for the ``atlas.job_stats``
+    argument-level override, applied only within job-stats-routed
+    branches — so there's no risk of it firing on unrelated questions.
+    It exists because the sub-LLM that translates the question into query
+    parameters (see ``job_stats_schema.build_query_prompt``) can miss the
+    version even when routing correctly identified the question as a
+    job-stats question; this guarantees the filter is applied regardless.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Version prefix string (e.g. ``"3.7"``), or ``None`` if not found.
+    """
+    m = _PYTHON_VERSION_EXTRACT_RE.search(question.lower())
+    return m.group(1) if m else None
+
+
+def _extract_os_version_from_question(question: str) -> str | None:
+    """Extract an OS version mention from a question, if present.
+
+    Recognises both the common ATLAS "EL<N>" shorthand (e.g. "EL7", "EL9")
+    and explicit "os version <N>" / "OS <N>" phrasing. See
+    :func:`_extract_python_version_from_question` for why this exists as a
+    deterministic safety net alongside the sub-LLM extraction.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Version prefix string (e.g. ``"7"``, ``"9.7"``), or ``None`` if not
+        found.
+    """
+    m = _OS_VERSION_EL_RE.search(question)
+    if m:
+        return m.group(1)
+    m = _OS_VERSION_WORD_RE.search(question)
+    return m.group(1) if m else None
+
+
+def _build_job_stats_args(question: str) -> dict[str, str]:
+    """Build the ``atlas.job_stats`` tool-call arguments for a question.
+
+    Extracts ``site``, ``python_version``, and ``os_version`` overrides
+    deterministically from the question text, in addition to the
+    sub-LLM's own extraction inside the ``atlas.job_stats`` tool. This
+    guarantees the filter is applied even if the sub-LLM misses it,
+    mirroring the existing ``site`` safety-net pattern. Shared by both
+    job-stats fast-path call sites (``_run_fast_path_intercepts`` and
+    ``_build_deterministic_plan``) to keep them under the complexity
+    threshold and avoid duplicating the extraction logic.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        Arguments dict with ``question`` always present, plus ``site``,
+        ``python_version``, and/or ``os_version`` when detected.
+    """
+    stats_args: dict[str, str] = {"question": question}
+    site = _extract_site_from_question(question)
+    if site:
+        stats_args["site"] = site
+    python_version = _extract_python_version_from_question(question)
+    if python_version:
+        stats_args["python_version"] = python_version
+    os_version = _extract_os_version_from_question(question)
+    if os_version:
+        stats_args["os_version"] = os_version
+    return stats_args
+
+
 def _extract_time_window_from_question(
     question: str,
 ) -> tuple[str, str] | None:
@@ -1033,7 +1604,240 @@ def _extract_time_window_from_question(
     return None
 
 
-def _build_deterministic_plan(
+def _is_code_query_question(question: str) -> bool:
+    """Return True when the question is asking to inspect a source code file.
+
+    Matches the same signals as the superuser pre-dispatch guard in the UI
+    (``interfaces.shared.superuser_guard``) so that routing is consistent:
+    questions blocked by the guard are also what the planner would route to
+    ``code_query``.
+
+    Signals:
+    - Any ``*.py`` filename or path reference (e.g. ``pilot.py``,
+      ``pilot/util/processes.py``, ``core/bamboo/tools/foo.py``).
+    - An inspection verb (``look at``, ``explain``, ``review``, …) combined
+      with a repository keyword (``pilot``, ``bamboo``, ``source``, ``code``,
+      …) — covers phrasing like *"explain how the pilot works"*.
+
+    Note:
+        Generic question starters (``"how does"``, ``"how do"``, ``"what does"``,
+        ``"what do"``) are intentionally excluded from the verb set.  They are
+        documentation question phrases, not source-inspection signals.  A question
+        like *"how does the pilot work?"* is a documentation query and must route
+        to RAG (``panda_doc_search``), not ``code_query``.  Stronger verbs
+        (``"explain"``, ``"review"``, ``"inspect"``) are retained because they
+        carry genuine inspection intent when combined with a repo keyword.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        bool: ``True`` when the question matches a code-query routing signal.
+    """
+    q = question.lower()
+    # Signal 1: any *.py token (bare filename or slash-path) — always code_query
+    if re.search(r"\b[\w][\w/]*\.py\b", q):
+        return True
+    # Exclusion: diagram/visualisation requests without a file path route to
+    # RAG instead, where _MERMAID_GUIDANCE handles diagram generation directly.
+    _diagram_kws = {"diagram", "state machine", "flowchart", "mermaid", "chart", "visuali"}
+    if any(d in q for d in _diagram_kws):
+        return False
+    # Signal 2: inspection verb + repository/code keyword.
+    # Excludes generic question starters ("how does", "how do", "what does",
+    # "what do") — those are documentation questions, not code-inspection intent.
+    # Only verbs that unambiguously signal source-code inspection intent.
+    # Broad verbs ("get", "list", "show me", "describe", "understand") are
+    # intentionally excluded because they fire too easily on documentation
+    # questions ("how do pilots get jobs?", "describe the pilot architecture").
+    _verbs = {
+        "look at", "read", "review", "analyse", "analyze",
+        "debug", "inspect", "examine",
+        "walk me through", "walk through",
+        "download", "fetch", "grab", "pull",
+        "open", "load", "print",
+    }
+    _repo_kws = {
+        "pilot", "bamboo", "panda", "plugin", "module",
+        "function", "class", "source", "code", "script", "file",
+    }
+    has_verb = any(v in q for v in _verbs)
+    has_kw = any(k in q for k in _repo_kws)
+    return has_verb and has_kw
+
+
+# Signal phrases that indicate the user is querying Bamboo's own prompt log
+# (self-observability queries rather than PanDA/ATLAS domain questions).
+# Must be checked before the doc-search fallback so that "show me all
+# questions asked today" or "what are the most frequently asked questions?"
+# route to opensearch_promptlog_query rather than RAG.
+_PROMPTLOG_SIGNALS: frozenset[str] = frozenset({
+    # Turn / session vocabulary
+    "turns", "turn number", "my last session", "last session",
+    "replay session", "replay my session", "session id",
+    "how many turns", "how many sessions",
+    # Self-query vocabulary
+    "questions asked", "questions today", "asked today",
+    "frequently asked", "most asked", "faq", "faqs",
+    "most frequent", "common questions", "popular questions",
+    "what did i ask", "what have i asked",
+    # Tool-usage analytics
+    "which tools", "tools used", "tool usage", "tool calls",
+    "tools called", "how many times was", "opensearch_promptlog",
+    # Model / provider introspection
+    "which model", "token count", "token usage",
+    "input tokens", "output tokens",
+    # Prompt-log index
+    "prompt log", "prompt logging", "bamboomcp-promptlog",
+    # Ratings
+    "rating", "ratings", "rated", "star rating", "star ratings",
+    "lowest rated", "highest rated", "average rating",
+    # User pseudonym queries (GDPR tokens embedded in user_prompt)
+    "from user", "by user", "user_",
+})
+
+# Multi-word phrase signals for promptlog queries (checked via substring match).
+_PROMPTLOG_PHRASES: tuple[str, ...] = (
+    "questions asked",
+    "asked today",
+    "asked this week",
+    "frequently asked",
+    "most asked",
+    "most frequent",
+    "common question",
+    "popular question",
+    "what did i ask",
+    "what have i asked",
+    "show me all questions",
+    "all questions",
+    "replay session",
+    "replay my",
+    "my last session",
+    "last session",
+    "how many turns",
+    "how many sessions",
+    "which tools",
+    "tools used",
+    "tool usage",
+    "tool calls",
+    "how many times was",
+    "prompt log",
+    "token count",
+    "token usage",
+    "which model",
+    "all the rates",
+    "all rates",
+    "show rates",
+    "show me rates",
+    "the rates",
+    "my ratings",
+    "all ratings",
+    "rated today",
+    "rated this",
+    "lowest rated",
+    "highest rated",
+    "average rating",
+    "star rating",
+    "from user",
+    "by user",
+    "ratings from",
+    "questions from user",
+)
+
+
+def _is_promptlog_question(question: str) -> bool:
+    """Return True when the question targets Bamboo's own prompt/session logs.
+
+    Covers self-observability queries such as:
+    - "show me all questions asked today"
+    - "what are the frequently asked questions?"
+    - "how many turns did my last session have?"
+    - "which tools were used most often this week?"
+
+    These questions should route to ``opensearch_promptlog_query`` rather
+    than the RAG doc-search fallback.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        bool: ``True`` when the question matches a prompt-log routing signal.
+    """
+    q = question.lower()
+    tokens = set(re.findall(r"\b\w+\b", q))
+    if tokens & _PROMPTLOG_SIGNALS:
+        return True
+    return any(phrase in q for phrase in _PROMPTLOG_PHRASES)
+
+
+def _build_promptlog_plan(question: str, reuse: ReusePolicy) -> Plan:
+    """Build a fast-path Plan routing to ``opensearch_promptlog_query``.
+
+    Passes ``max_hits=100`` when the question contains an "all" intent
+    keyword (e.g. "show me all ratings"), and ``max_hits=50`` otherwise.
+    The OpenSearch hard cap is 100; the default of 10 is too low for any
+    useful display of ratings or session history.
+
+    Args:
+        question: User question text.
+        reuse: Reuse policy forwarded from the calling plan builder.
+
+    Returns:
+        A :class:`Plan` routing to ``opensearch_promptlog_query``.
+    """
+    _ALL_INTENT: tuple[str, ...] = (
+        "all ", "show all", "show me all", "every ", "full list",
+        "list all", "all ratings", "all questions", "all turns",
+        "all sessions", "all interactions",
+    )
+    q_lower = question.lower()
+    max_hits = 100 if any(p in q_lower for p in _ALL_INTENT) else 50
+    return Plan(
+        route=PlanRoute.FAST_PATH,
+        confidence=0.95,
+        tool_calls=[ToolCall(
+            tool="opensearch_promptlog_query",
+            arguments={"query": question, "max_hits": max_hits},
+        )],
+        reuse_policy=reuse,
+        explain="Deterministic: prompt-log signals → opensearch_promptlog_query.",
+    )
+
+
+def _build_code_query_plan(question: str, reuse: ReusePolicy) -> Plan:
+    """Build a fast-path Plan routing to ``code_query``.
+
+    Extracts the first ``*.py`` file path from the question (if present) and
+    constructs the tool arguments.  When no path is found the question itself
+    is passed as context so the tool can return a clear error.
+
+    Args:
+        question: User question text.
+        reuse: Reuse policy forwarded from the calling plan builder.
+
+    Returns:
+        A :class:`Plan` routing to ``code_query``.
+    """
+    path_match = re.search(r"\b([\w][\w/]*\.py)\b", question, re.IGNORECASE)
+    file_path = path_match.group(1) if path_match else None
+    cq_args: dict[str, str] = {"question": question}
+    if file_path:
+        cq_args["file_path"] = file_path
+    explain = (
+        f"Deterministic: source code file signal "
+        f"({'file_path=' + file_path if file_path else 'no path extracted'}) "
+        f"\u2192 code_query."
+    )
+    return Plan(
+        route=PlanRoute.FAST_PATH,
+        confidence=0.88,
+        tool_calls=[ToolCall(tool="code_query", arguments=cq_args)],
+        reuse_policy=reuse,
+        explain=explain,
+    )
+
+
+def _build_deterministic_plan(  # noqa: C901
     question: str,
     task_id: int | None,
     job_id: int | None,
@@ -1041,24 +1845,49 @@ def _build_deterministic_plan(
 ) -> "Plan | None":
     """Build a Plan without an LLM call for unambiguous routing cases.
 
-    Returns a validated Plan for the six clear-cut routes, or ``None`` when
-    the question is ambiguous enough to need the LLM planner.
+    Returns a validated Plan for a clear-cut deterministic route, or
+    ``None`` when no fast-path signal matches — including plain
+    documentation-style questions — so the caller (``_route``) defers to
+    the LLM planner (``bamboo_plan_tool``), which is itself capable of
+    choosing RETRIEVE with doc_search/doc_bm25 for genuine doc questions.
+
+    This function previously defaulted every "no ID, no signal matched"
+    question straight to a deterministic RAG plan (see CHANGELOG for the
+    "queuing time" / "python versions used" incidents this caused: any
+    phrasing gap in ANY of the signal sets below silently produced a wrong
+    "documentation doesn't cover this" answer instead of ever reaching the
+    LLM planner, even though the planner's own routing prompt already knew
+    how to handle the phrasing). Returning ``None`` here closes that
+    failure mode for every fast-path domain, not just job stats.
 
     Fast-path rules (in priority order):
     1b. Job ID + pilot-source signals + stored pilot_monitoring_error → ``pilot_source_analysis`` FAST_PATH
+    1c. Job ID + core-dump signals (ATLAS)  → ``atlas.core_dump_analysis``  FAST_PATH
     1. Job ID + analysis keywords   → ``panda_log_analysis``       FAST_PATH
     2. Job ID (no task ID)          → ``panda_job_status``         FAST_PATH
     3. Task ID                      → ``panda_task_status``        FAST_PATH
     4. Pilot/Harvester signals      → ``panda_harvester_workers``  FAST_PATH
-    5. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
-    6. No IDs                       → doc_search + doc_bm25        RETRIEVE
+    5. CRIC signals                 → ``cric_query``               FAST_PATH
+    6. CGSim plugin, non-conceptual → ``cgsim.sim_query``          FAST_PATH
+    7. Job stats signals            → ``atlas.job_stats``          FAST_PATH
+    8. Jobs DB signals (no IDs)     → ``panda_jobs_query``         FAST_PATH
+    9. Prompt-log signals           → ``opensearch_promptlog_query`` FAST_PATH
+    10. Source code signals         → ``code_query``               FAST_PATH
+    11. Nothing matched             → ``None`` (defer to LLM planner)
+
+    Rule 1d — a bare affirmative answering a stored core-dump offer — is
+    deliberately **not** here.  It is handled in :meth:`BambooAnswerTool._route`
+    ahead of the social intercept, because by the time control reaches this
+    function a bare "ok" has already been answered by ``_is_ack`` and a bare
+    "yes" has been rewritten by the topic guard's follow-up reformulation.  See
+    the comment at that call site.
 
     Args:
         question: User question text.
         task_id: Extracted task ID, or None.
         job_id: Extracted job ID, or None.
-        plugin_id: Active plugin identifier; determines which doc tools to use
-            for the fallback RAG retrieval route.
+        plugin_id: Active plugin identifier; determines which PanDA-family
+            routing rules apply and which CGSim/CRIC rules are reachable.
 
     Returns:
         A validated :class:`~bamboo.tools.planner.Plan`, or ``None`` to
@@ -1066,52 +1895,104 @@ def _build_deterministic_plan(
     """
     reuse = ReusePolicy()
 
-    # Rule 1b: follow-up pilot source analysis — checked FIRST.
-    # If the last panda_log_analysis returned pilot_monitoring_error and the
-    # question contains pilot-source signals, route to pilot_source_analysis
-    # using the stored log_excerpt.  This must come before rule 1 (log analysis)
-    # because questions like "Why did the pilot code raise that? job 7099503721"
-    # match _is_log_analysis_request ("why" + job ID) and would otherwise
-    # re-run panda_log_analysis instead of fetching the pilot source.
-    if job_id and _is_pilot_source_request(question):
-        monitoring_evidence = get_last_pilot_monitoring_evidence()
-        if monitoring_evidence is not None:
+    # PanDA-specific routing rules (job status, log analysis, task status,
+    # pilot workers) only apply to PanDA-family plugins.  Non-PanDA plugins
+    # (e.g. "cgsim") skip this entire block: numeric IDs in their questions
+    # are domain identifiers (simulation job IDs, etc.), not PanDA job IDs,
+    # and routing them to panda_* tools would produce nonsensical responses.
+    # Adding a new non-PanDA plugin: include its plugin_id in _PANDA_PLUGINS
+    # only if it should use PanDA job/task/pilot routing; otherwise leave it
+    # out and it will fall through to its own fast-path below.
+    _PANDA_PLUGINS: frozenset[str] = frozenset({"atlas", "epic"})
+    if plugin_id in _PANDA_PLUGINS:
+        # Rule 1b: follow-up pilot source analysis — checked FIRST.
+        # If the last panda_log_analysis found a Python traceback reaching into
+        # pilot3 code and the question contains pilot-source signals, route to
+        # pilot_source_analysis using the stored log_excerpt.  This must come
+        # before rule 1 (log analysis) because questions like "Why did the pilot
+        # code raise that? job 7099503721" match _is_log_analysis_request
+        # ("why" + job ID) and would otherwise re-run panda_log_analysis instead
+        # of fetching the pilot source.
+        #
+        # The gate is any pilot traceback, not failure_type ==
+        # 'pilot_monitoring_error' — see get_last_traceback_evidence.  Narrowing
+        # it to one failure type made source analysis unreachable for every
+        # other pilot exception.
+        if job_id and _is_pilot_source_request(question):
+            traceback_evidence = get_last_traceback_evidence()
+            if traceback_evidence is not None:
+                return Plan(
+                    route=PlanRoute.FAST_PATH,
+                    confidence=1.0,
+                    tool_calls=[ToolCall(
+                        # Wire name, as for atlas.core_dump_analysis: the
+                        # server exposes this plugin tool under its
+                        # entry-point key, and bamboo_executor keys both
+                        # _last_evidence_store and the _SYSTEM_PILOT_SOURCE
+                        # prompt selection on the name written here.
+                        tool="atlas.pilot_source_analysis",
+                        arguments={
+                            "job_id": job_id,
+                            "log_excerpt": traceback_evidence.get("log_excerpt", ""),
+                            "pilot_error_diag": traceback_evidence.get("piloterrordiag", ""),
+                            # Pins the GitHub fetch to the release tag the job
+                            # ran, so traceback line numbers match the source.
+                            "pilot_version": traceback_evidence.get("pilot_version") or "",
+                        },
+                    )],
+                    reuse_policy=reuse,
+                    explain=(
+                        "Deterministic: job ID + pilot-source keywords + prior "
+                        "pilot traceback evidence → pilot source analysis."
+                    ),
+                )
+
+        # Rule 1c: explicit core-dump request naming a job.
+        #
+        # Must precede rule 1: "why did job 123 hang" matches
+        # _is_log_analysis_request ("why" + job ID), so without this the
+        # explicit request would silently re-run panda_log_analysis — which has
+        # already been run, and which is what produced the offer in the first
+        # place.
+        #
+        # ATLAS only.  _CORE_DUMP_ANALYSIS_AVAILABLE is False in the ePIC
+        # mirror, so an ePIC question reaching here would name a tool that is
+        # not registered; the executor would report it unknown rather than
+        # falling back usefully.
+        if job_id and plugin_id == "atlas" and _is_core_dump_request(question):
+            restart = _wants_core_dump_restart(question)
+            return _build_core_dump_plan(
+                job_id,
+                # "auto" rather than a pinned mode: an explicit request may
+                # name any job, and the tool resolves the framing from the
+                # pilot error code.
+                mode="auto",
+                explain=(
+                    "Deterministic: job ID + core-dump keywords → core dump analysis"
+                    + (" (restart requested)." if restart else ".")
+                ),
+                restart=restart,
+            )
+
+        # Rule 1: job ID + analysis keywords → log analysis.
+        if job_id and _is_log_analysis_request(question):
             return Plan(
                 route=PlanRoute.FAST_PATH,
                 confidence=1.0,
                 tool_calls=[ToolCall(
-                    tool="pilot_source_analysis",
-                    arguments={
-                        "job_id": job_id,
-                        "log_excerpt": monitoring_evidence.get("log_excerpt", ""),
-                        "pilot_error_diag": monitoring_evidence.get("piloterrordiag", ""),
-                    },
+                    tool="panda_log_analysis",
+                    arguments={"job_id": job_id, "query": question, "context": ""},
                 )],
                 reuse_policy=reuse,
-                explain=(
-                    "Deterministic: job ID + pilot-source keywords + prior "
-                    "pilot_monitoring_error evidence → pilot source analysis."
-                ),
+                explain="Deterministic: job ID + analysis keywords → log analysis.",
             )
 
-    if job_id and _is_log_analysis_request(question):
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_log_analysis",
-                arguments={"job_id": job_id, "query": question, "context": ""},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: job ID + analysis keywords → log analysis.",
-        )
-
-    if job_id and not task_id:
+        # Rule 2: job ID (no task ID) → job status.
         # Guard: if the question is conceptual/definitional ("what does X mean",
         # "what is a looping job") the job ID is incidental context from a prior
         # turn.  Fall through to the LLM planner so it can answer from docs/RAG
         # instead of fetching fresh (and irrelevant) job status data.
-        if not _is_conceptual_question(question):
+        if job_id and not task_id and not _is_conceptual_question(question):
             return Plan(
                 route=PlanRoute.FAST_PATH,
                 confidence=1.0,
@@ -1123,17 +2004,18 @@ def _build_deterministic_plan(
                 explain="Deterministic: job ID, no task ID → job status.",
             )
 
-    if task_id:
-        return Plan(
-            route=PlanRoute.FAST_PATH,
-            confidence=1.0,
-            tool_calls=[ToolCall(
-                tool="panda_task_status",
-                arguments={"task_id": task_id, "query": question, "include_jobs": True},
-            )],
-            reuse_policy=reuse,
-            explain="Deterministic: task ID present → task status.",
-        )
+        # Rule 3: task ID → task status.
+        if task_id:
+            return Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=1.0,
+                tool_calls=[ToolCall(
+                    tool="panda_task_status",
+                    arguments={"task_id": task_id, "query": question, "include_jobs": True},
+                )],
+                reuse_policy=reuse,
+                explain="Deterministic: task ID present → task status.",
+            )
 
     # Pilot / Harvester fast-path: pilot-specific signal phrases are unambiguously
     # on-topic and resolve to panda_harvester_workers without a topic-guard LLM call.
@@ -1191,6 +2073,24 @@ def _build_deterministic_plan(
             explain="Deterministic: CGSim plugin, no task/job ID, non-conceptual → sim_query.",
         )
 
+    # Job stats fast-path: pilot timing sub-fields, wall-clock/queue time,
+    # memory, CPU efficiency, HS06, I/O throughput, carbon, or error codes
+    # in the atlas_panda_job_stats-* index.  Must come BEFORE the jobs DB
+    # fast-path because signals like 'queue time' and 'wall-clock time' also
+    # loosely match _JOBS_DB_SIGNALS.
+    if plugin_id in _PANDA_PLUGINS and _is_job_stats_question(question):
+        stats_args = _build_job_stats_args(question)
+        return Plan(
+            route=PlanRoute.FAST_PATH,
+            confidence=0.9,
+            tool_calls=[ToolCall(
+                tool="atlas.job_stats",
+                arguments=stats_args,
+            )],
+            reuse_policy=reuse,
+            explain="Deterministic: job stats signals → atlas.job_stats.",
+        )
+
     # Jobs DB fast-path: no IDs but the question is about live job stats.
     if _is_jobs_db_question(question):
         jobs_args: dict[str, str] = {"question": question}
@@ -1208,29 +2108,33 @@ def _build_deterministic_plan(
             explain="Deterministic: jobs DB signals, no task/job ID → jobs query.",
         )
 
-    # No IDs: general knowledge / documentation question → always retrieve.
-    # top_k=5 for both to keep synthesis prompt within ~2500 input tokens,
-    # well clear of the 30s TUI timeout even on follow-up turns with history.
-    from bamboo.tools.bamboo_executor import _PLUGIN_DOC_TOOLS, _DEFAULT_DOC_TOOLS  # noqa: PLC0415
-    _doc_tools = list(_PLUGIN_DOC_TOOLS.get(plugin_id, _DEFAULT_DOC_TOOLS))
-    doc_search = _doc_tools[0] if _doc_tools else "panda_doc_search"
-    doc_bm25 = _doc_tools[1] if len(_doc_tools) > 1 else "panda_doc_bm25"
-    return Plan(
-        route=PlanRoute.RETRIEVE,
-        confidence=1.0,
-        tool_calls=[
-            ToolCall(
-                tool=doc_search,
-                arguments={"query": question, "top_k": 5},
-            ),
-            ToolCall(
-                tool=doc_bm25,
-                arguments={"query": question, "top_k": 5},
-            ),
-        ],
-        reuse_policy=reuse,
-        explain=f"Deterministic: no task/job ID → RAG retrieval ({doc_search}, {doc_bm25}).",
-    )
+    # Prompt-log fast-path: Bamboo self-observability queries.
+    # Must come BEFORE the doc-search fallback so that questions like
+    # "show me all questions asked today" or "what are the most frequently
+    # asked questions?" route to opensearch_promptlog_query rather than RAG.
+    # Checked after all PanDA-domain rules so numeric IDs still win.
+    if _is_promptlog_question(question):
+        return _build_promptlog_plan(question, reuse)
+
+    # Code query fast-path: source code file inspection question.
+    # Must come after all ID-driven and domain-specific rules so a question
+    # like "why did job 123 fail?" that also mentions "pilot.py" in the log
+    # still routes to panda_log_analysis, not code_query.
+    if _is_code_query_question(question):
+        return _build_code_query_plan(question, reuse)
+
+    # Nothing matched: defer to the LLM planner rather than assuming this is
+    # a documentation question. The planner's own routing prompt already
+    # knows how to select doc_search + doc_bm25 with route=RETRIEVE for
+    # genuine conceptual/doc questions (see _build_atlas_planner_prompt /
+    # _build_cgsim_planner_prompt in planner.py) — so returning None here
+    # does not lose RAG capability, it just routes it through the planner
+    # instead of guaranteeing it deterministically for every unmatched
+    # question, some of which are live-data questions phrased in a way none
+    # of the signal sets above anticipated (e.g. "queuing time" vs. the
+    # registered "queue time", or "which python versions are used" vs. the
+    # registered "python_version" token).
+    return None
 
 
 # Matches content-free follow-up phrases that carry no domain information.
@@ -1239,7 +2143,9 @@ def _build_deterministic_plan(
 _FOLLOWUP_PATTERN = re.compile(
     r"^(please\s+)?(tell me more|explain more|more details?|elaborate|"
     r"go on|continue|explain further|can you expand|"
-    r"more information|more info|say more|more)"
+    r"more information|more info|say more|more|"
+    r"yes\s+please|yes|yeah|yep|ok|okay|sure|go ahead|"
+    r"do it|do that|fetch it|get it|fetch the file|get the file)"
     r"(\s+please)?\s*[.!?]*$",
     re.IGNORECASE,
 )
@@ -1535,6 +2441,108 @@ _CRIC_HISTORY_SIGNALS: frozenset[str] = frozenset({
 })
 
 
+# Signals in the last assistant message that indicate a code_query response.
+# All are specific enough that they only appear in code analysis answers.
+_CODE_QUERY_HISTORY_SIGNALS: tuple[str, ...] = (
+    "github.com/",
+    "raw.githubusercontent.com",
+    "source code",
+    "function body",
+    "def ",       # Python function definition quoted verbatim
+    "import ",    # Python import quoted verbatim
+    "truncated: showing",  # our truncation note
+    "pilot.py",   # common enough to be specific in this context
+    "pilot3",
+)
+
+# Continuation words that, combined with a repo keyword, indicate the user
+# wants to continue or extend a code review already in progress.
+_CODE_REVIEW_CONTINUATION_RE: re.Pattern[str] = re.compile(
+    r"\b("
+    r"verify|verif(?:y|ied|ication)|"
+    r"full(?:\s+file|\s+source|\s+code)?|"
+    r"complet(?:e|ed?|ion)|"
+    r"rest(?:\s+of)?|remaining|"
+    r"continu(?:e|ing|ation)|"
+    r"whole(?:\s+file|\s+source|\s+code)?|"
+    r"all(?:\s+of\s+it)?|"
+    r"more(?:\s+of\s+it)?|"
+    r"the\s+(?:rest|remaining|full|complete|whole|entire)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_CODE_REVIEW_REPO_KW_RE: re.Pattern[str] = re.compile(
+    r"\b(pilot|bamboo|panda|file|source|code|module|script|function)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_code_review_continuation(question: str) -> bool:
+    """Return True when the question is continuing an in-progress code review.
+
+    Matches phrases like *"Please verify the full file"*, *"Show the remaining
+    code"*, or *"Can I see the complete source?"* — questions that reference
+    an ongoing code review but are not content-free affirmatives.  Always
+    requires both a continuation word **and** a repository keyword so common
+    non-code phrases like *"Full queue list please"* are not matched.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        ``True`` when the question matches the code-review continuation pattern.
+    """
+    return (
+        bool(_CODE_REVIEW_CONTINUATION_RE.search(question))
+        and bool(_CODE_REVIEW_REPO_KW_RE.search(question))
+    )
+
+
+def _last_tool_was_code_query(history: Sequence[Any]) -> bool:
+    """Return True when the most recent assistant turn was a code_query response.
+
+    Scans the last assistant message for vocabulary that is specific to
+    ``code_query`` responses — GitHub URLs, Python source fragments, or the
+    truncation note — to determine whether a content-free affirmative like
+    *"yes please"* should re-route to ``code_query``.
+
+    Args:
+        history: Prior conversation turns in chronological order.
+
+    Returns:
+        ``True`` if the most recent assistant message looks like a code_query
+        response.
+    """
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = str(msg.get("content", "")).lower()
+            return any(sig.lower() in content for sig in _CODE_QUERY_HISTORY_SIGNALS)
+    return False
+
+
+def _extract_file_path_from_history(history: Sequence[Any]) -> str | None:
+    """Extract the most recently mentioned ``*.py`` file path from history.
+
+    Scans both user and assistant messages in reverse order and returns the
+    first ``*.py`` token found.  Used to re-supply the ``file_path`` argument
+    when routing a content-free affirmative follow-up back to ``code_query``.
+
+    Args:
+        history: Prior conversation turns in chronological order.
+
+    Returns:
+        The file path string (e.g. ``"pilot.py"`` or
+        ``"pilot/util/processes.py"``), or ``None`` when none is found.
+    """
+    for msg in reversed(history):
+        content = str(msg.get("content", ""))
+        m = re.search(r"\b([\w][\w/]*\.py)\b", content, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _last_tool_was_cric(history: Sequence[Any]) -> bool:
     """Return True when the most recent assistant turn contains CRIC evidence.
 
@@ -1694,6 +2702,116 @@ async def _run_db_query_fast_path(
     return None
 
 
+async def _run_early_intercepts(
+    question: str,
+    history: list[Message],
+    bypass_fast_path: bool,
+    plugin_id: str = "atlas",
+) -> "list[MCPContent] | None":
+    """Run the intercepts that must precede the topic guard, in order.
+
+    The order is the substance of this function.  Rule 1d runs first because
+    the social intercept below would otherwise swallow the affirmatives it
+    depends on: ``_is_ack`` matches "ok", "okay", "great", "perfect" and
+    "sounds good", and a user answering a core-dump offer with any of those
+    would be told "You're welcome" while the analysis never started.
+
+    Neither intercept is gated on *bypass_fast_path*, and rule 1d's exemption
+    is deliberate.  ``bypass_fast_path`` exists to send a *question* to the LLM
+    planner instead of a deterministic rule, but a bare "yes" is not a question
+    the planner can route: ``_run_topic_guard`` reformulates content-free
+    follow-ups into a documentation query before any planner sees them, so
+    skipping rule 1d does not reroute the turn, it destroys it.  That is the
+    observed failure — with the fast path off, "yes please" against an
+    outstanding core-dump offer was answered with "the documentation search did
+    not return relevant results".  Resolving an offer the *previous* turn made
+    deterministically is conversational state resolution, in the same class as
+    the social replies below, not a routing shortcut.
+
+    Args:
+        question: The raw user message, before any reformulation.
+        history: Prior conversation turns.
+        bypass_fast_path: When True, the deterministic *routing* intercepts
+            downstream of this function are skipped so the question reaches the
+            topic guard and LLM planner.  Accepted here so the parameter list
+            still documents the mode, and unused for the reason above.
+        plugin_id: Active plugin identifier.
+
+    Returns:
+        ``list[MCPContent]`` when an intercept produced the answer, or ``None``
+        to continue with normal routing.
+    """
+    del bypass_fast_path  # Intentionally not consulted — see the docstring.
+
+    accepted = await _run_core_dump_offer_intercept(question, history, plugin_id)
+    if accepted is not None:
+        return accepted
+
+    # Social intercept — zero LLM cost for greetings and acknowledgements.
+    if _is_greeting(question):
+        return text_content(_GREETING_RESPONSE)
+    if _is_ack(question):
+        return text_content(_ACK_RESPONSE)
+    return None
+
+
+async def _run_core_dump_offer_intercept(
+    question: str,
+    history: list[Message],
+    plugin_id: str = "atlas",
+) -> "list[MCPContent] | None":
+    """Rule 1d — accept an outstanding core-dump offer with a bare affirmative.
+
+    Called from :meth:`BambooAnswerTool._route` **before** the social intercept
+    and the topic guard, for two independent reasons.  ``_is_ack`` matches
+    "ok", "okay", "great", "perfect" and "sounds good", so an affirmative reply
+    to the offer would otherwise be answered with "You're welcome" and the
+    analysis would never start.  And ``_run_topic_guard`` reformulates
+    content-free follow-ups, so ``_build_deterministic_plan`` never sees the
+    user's "yes" at all — it sees a rewritten RAG query.  The promptlog fast
+    path sits early for exactly this reason and says so in its own comment.
+
+    Both conditions are required: a stored offer *and* a message that is
+    nothing but an affirmative.  A "yes" in any other context is left alone.
+    Because both conditions come from state this process created — the offer
+    was built deterministically by ``panda_log_analysis`` in an earlier turn —
+    the rule runs in both routing modes; see :func:`_run_early_intercepts`.
+
+    Args:
+        question: The raw user message, before any reformulation.
+        history: Prior conversation turns.
+        plugin_id: Active plugin identifier.  ATLAS only —
+            ``_CORE_DUMP_ANALYSIS_AVAILABLE`` is False in the ePIC mirror, so
+            naming the tool elsewhere would produce "Unknown tool".
+
+    Returns:
+        ``list[MCPContent]`` when the offer was accepted and the analysis
+        started, or ``None`` to continue with normal routing.
+    """
+    if plugin_id != "atlas":
+        return None
+    offer = get_last_core_dump_offer()
+    if offer is None or not _is_core_dump_affirmative(question):
+        return None
+    return await execute_plan(
+        _build_core_dump_plan(
+            offer["job_id"],
+            # Pinned, not "auto": the offer is only ever made for a looping-job
+            # kill (pilot code 1150), which resolves to "hang" anyway.  Stating
+            # it removes a metadata round trip and the failure mode where that
+            # fetch fails and leaves the framing unresolved.
+            mode="hang",
+            explain=(
+                "Deterministic: affirmative reply to a stored core-dump offer "
+                "→ core dump analysis."
+            ),
+        ),
+        question,
+        history,
+        plugin_id=plugin_id,
+    )
+
+
 async def _run_fast_path_intercepts(
     question: str,
     history: list[Message],
@@ -1735,6 +2853,18 @@ async def _run_fast_path_intercepts(
     )
 
     if not task_id_early and not job_id_early:
+        # Promptlog fast-path — checked before topic guard so the original
+        # question is used and history-based reformulation cannot corrupt it.
+        # "Show me all the rates from today" must not be rewritten to a
+        # PanDA jobs question by the topic guard.
+        if _is_promptlog_question(question):
+            return await execute_plan(
+                _build_promptlog_plan(question, ReusePolicy()),
+                question,
+                history,
+                plugin_id=plugin_id,
+            )
+
         # PanDA server health fast-path — highest priority before site/pilot/jobs.
         if _is_panda_health_question(question):
             plan = Plan(
@@ -1794,11 +2924,54 @@ async def _run_fast_path_intercepts(
             if fast_plan is not None:
                 return await execute_plan(fast_plan, question, history)
 
+        # Job stats fast-path — must come BEFORE the jobs DB fast-path
+        # because stats signals like 'queue time' and 'wall-clock time'
+        # also loosely match _JOBS_DB_SIGNALS and would otherwise route
+        # to panda_jobs_query instead of atlas.job_stats.
+        if plugin_id in frozenset({"atlas", "epic"}) and _is_job_stats_question(question):
+            stats_args = _build_job_stats_args(question)
+            stats_plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.9,
+                tool_calls=[ToolCall(
+                    tool="atlas.job_stats",
+                    arguments=stats_args,
+                )],
+                reuse_policy=ReusePolicy(),
+                explain="Deterministic: job stats signals → atlas.job_stats.",
+            )
+            return await execute_plan(stats_plan, question, history, plugin_id=plugin_id)
+
         # Jobs DB fast-path and CRIC fast-path — handled by shared helper
         # that also performs multi-DB disambiguation.
         db_result = await _run_db_query_fast_path(question, history, plugin_id=plugin_id)
         if db_result is not None:
             return db_result
+
+        # Code query follow-up: a content-free affirmative OR a code-review
+        # continuation phrase after a code_query response re-routes to
+        # code_query with the same file path from history.
+        # Bypasses the topic guard because these carry no PanDA domain words.
+        if history and _last_tool_was_code_query(history) and (
+            _is_content_free_followup(question)
+            or _is_code_review_continuation(question)
+        ):
+            file_path = _extract_file_path_from_history(history)
+            cq_args: dict[str, str] = {"question": question}
+            if file_path:
+                cq_args["file_path"] = file_path
+            plan = Plan(
+                route=PlanRoute.FAST_PATH,
+                confidence=0.90,
+                tool_calls=[ToolCall(tool="code_query", arguments=cq_args)],
+                reuse_policy=ReusePolicy(),
+                explain=(
+                    f"Deterministic: content-free affirmative after code_query "
+                    f"→ re-fetch code_query "
+                    f"({'file_path=' + file_path if file_path else 'no path'})."
+                ),
+            )
+            return await execute_plan(plan, question, history)
 
     return None
 
@@ -1928,6 +3101,8 @@ class BambooAnswerTool:
             )
         except LLMError as exc:
             return text_content(_friendly_llm_error(exc))
+        except ImportError as exc:
+            return text_content(_friendly_llm_error_import(exc))
 
     async def _route(
         self,
@@ -1962,11 +3137,14 @@ class BambooAnswerTool:
         if bypass_routing:
             return await _bypass_response(question, history)
 
-        # Social intercept — zero LLM cost for greetings and acknowledgements.
-        if _is_greeting(question):
-            return text_content(_GREETING_RESPONSE)
-        if _is_ack(question):
-            return text_content(_ACK_RESPONSE)
+        # Early intercepts — rule 1d, then greetings and acknowledgements.
+        # Grouped into one helper because the ordering between them is the
+        # whole point: see _run_early_intercepts.
+        early = await _run_early_intercepts(
+            question, history, bypass_fast_path, plugin_id,
+        )
+        if early is not None:
+            return early
 
         # Fast-path intercepts — pilot and jobs DB — bypass the topic guard
         # for clearly on-topic questions.  Skipped when bypass_fast_path is
@@ -2016,6 +3194,13 @@ class BambooAnswerTool:
             "messages": [*history, {"role": "user", "content": question}],
             "plugin_id": plugin_id,
         }
+        # Restrict the planner tool catalog to the active plugin's namespace
+        # so the LLM cannot select tools from other plugins.  Without this,
+        # the full catalog (including panda_job_status, panda_log_analysis,
+        # etc.) is visible and the LLM picks PanDA tools for questions that
+        # contain job IDs, even when the CGSim plugin is active.
+        if plugin_id and plugin_id not in ("atlas", ""):
+            plan_args["namespaces"] = [plugin_id]
         if hints:
             plan_args["hints"] = hints
 
@@ -2031,6 +3216,7 @@ __all__ = [
     "QUERYABLE_DATABASES",
     "_resolve_target_database",
     "_build_clarification_response",
+    "_is_job_stats_question",
     "_is_jobs_db_question",
     "_is_cric_question",
     "_is_conceptual_question",
@@ -2040,10 +3226,29 @@ __all__ = [
     "_is_panda_health_question",
     "_is_pilot_source_request",
     "_PILOT_SOURCE_SIGNALS",
+    "_is_core_dump_request",
+    "_is_core_dump_affirmative",
+    "_build_core_dump_plan",
+    "_wants_core_dump_restart",
+    "_run_core_dump_offer_intercept",
+    "_run_early_intercepts",
+    "_CORE_DUMP_SIGNALS",
+    "_CORE_DUMP_STATE_RE",
+    "_CORE_DUMP_AFFIRMATIVE_RE",
+    "_topic_for_question",
+    "_RUCIO_SIGNALS",
+    "_ROOT_SIGNALS",
+    "_BAMBOO_SIGNALS",
+    "_BAMBOO_SERVICES_SIGNALS",
     "_extract_site_from_question",
     "_extract_time_window_from_question",
     "_run_db_query_fast_path",
     "_last_tool_was_cric",
+    "_last_tool_was_code_query",
+    "_extract_file_path_from_history",
+    "_is_code_query_question",
+    "_is_code_review_continuation",
+    "_build_code_query_plan",
     "_is_cric_followup",
     "_PILOT_SIGNALS",
     "_PILOT_DOC_PREFIXES",

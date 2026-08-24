@@ -82,10 +82,70 @@ import logging
 import os
 import re
 import uuid
+from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# UI notification callback — optional bridge to TUI / Streamlit.
+# ---------------------------------------------------------------------------
+
+#: Signature: ``fn(severity: str, message: str) -> None``.
+#: *severity* is one of ``"debug"``, ``"info"``, ``"warning"``, ``"error"``.
+NotifyFn = Callable[[str, str], None]
+
+#: Registered UI notification callback, or ``None`` when no UI is attached.
+_notify_callback: NotifyFn | None = None
+
+
+def register_notify_callback(fn: NotifyFn) -> None:
+    """Register a callback that receives prompt-log status notifications.
+
+    The callback is invoked synchronously inside the background thread that
+    writes to OpenSearch, so it **must** be thread-safe.  For Textual UIs use
+    ``app.call_from_thread``; for Streamlit append to ``st.session_state``.
+
+    Only one callback is active at a time.  Calling this function a second
+    time replaces the previous registration.
+
+    Args:
+        fn: Callable with signature ``(severity: str, message: str) -> None``
+            where *severity* is ``"debug"``, ``"info"``, ``"warning"``, or
+            ``"error"``.
+    """
+    global _notify_callback  # pylint: disable=global-statement
+    _notify_callback = fn
+
+
+def clear_notify_callback() -> None:
+    """Remove the currently registered UI notification callback.
+
+    Safe to call even when no callback is registered.
+    """
+    global _notify_callback  # pylint: disable=global-statement
+    _notify_callback = None
+
+
+def _notify(severity: str, message: str) -> None:
+    """Invoke the registered UI notification callback if one is set.
+
+    Exceptions raised by the callback are swallowed and logged at DEBUG level
+    so a broken callback can never kill the prompt-logging background thread.
+
+    Args:
+        severity: One of ``"debug"``, ``"info"``, ``"warning"``, ``"error"``.
+        message: Human-readable status message.
+    """
+    if _notify_callback is None:
+        return
+    try:
+        _notify_callback(severity, message)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.debug("prompt_log: notify callback raised %s: %s", type(exc).__name__, exc)
+
 
 # ---------------------------------------------------------------------------
 # Process-wide session ID — set once at import time.
@@ -110,14 +170,87 @@ _consecutive_failures: int = 0
 
 #: Set to True once the threshold is reached; cleared only on process restart.
 _circuit_open: bool = False
+#: Set to True after the index template has been applied once per process.
+_template_applied: bool = False
 
 # ---------------------------------------------------------------------------
-# OpenSearch connection constants (shared with harvester_timeseries_impl.py).
+# Per-turn event log — polled by the bamboo_promptlog_status MCP tool.
 # ---------------------------------------------------------------------------
 
-_DEFAULT_HOST: str = "https://os-atlas.cern.ch/os"
-_DEFAULT_USER: str = "pilot-monitor-agent"
-_DEFAULT_CA: str = "/etc/pki/tls/certs/CERN-bundle.pem"
+#: Ring buffer of the most recent prompt-log events.  Each entry is a dict
+#: with keys ``"turn"``, ``"severity"``, and ``"message"``.  The buffer holds
+#: at most 20 entries; oldest are discarded automatically.
+_event_log: deque[dict[str, Any]] = deque(maxlen=20)
+
+#: Stores the (index, doc_id) of the most recently indexed document so
+#: rating tools can locate the document without a search query.
+_last_doc_store: deque[tuple[str, str]] = deque(maxlen=1)
+
+
+def drain_events() -> list[dict[str, Any]]:
+    """Return all buffered prompt-log events and clear the buffer.
+
+    Called by ``BambooPromptLogStatusTool`` after each LLM response so the
+    TUI and Streamlit interfaces can surface write confirmations and errors
+    without requiring in-process callbacks (which do not work across the
+    stdio subprocess boundary).
+
+    Returns:
+        List of event dicts, each with ``"turn"`` (int), ``"severity"``
+        (``"info"`` / ``"warning"`` / ``"error"``), and ``"message"`` (str)
+        keys.  Empty list when nothing has been logged since the last drain.
+    """
+    events = list(_event_log)
+    _event_log.clear()
+    return events
+
+
+def get_last_doc_id() -> tuple[str, str] | None:
+    """Return ``(index, doc_id)`` of the most recently indexed document.
+
+    Used by rating tools to locate the correct document without a search.
+    Returns ``None`` when no document has been indexed in this process.
+
+    Returns:
+        Tuple of ``(index_name, doc_id)`` or ``None``.
+    """
+    return _last_doc_store[-1] if _last_doc_store else None
+
+
+def update_rating(index: str, doc_id: str, rating: int) -> dict[str, Any]:
+    """Update the ``rating`` field of an existing prompt-log document.
+
+    Calls the OpenSearch ``update`` API with a partial document.  Uses
+    the write credential (``BAMBOO_OPENSEARCH_PROMPTLOG``) since it
+    modifies an existing document.
+
+    Args:
+        index: Index name, e.g. ``bamboomcp-promptlog-2026.05.26``.
+        doc_id: OpenSearch document ``_id``.
+        rating: Integer rating 1–5.
+
+    Returns:
+        The raw OpenSearch update response dict.
+
+    Raises:
+        ValueError: If *rating* is not in the range 1–5.
+        RuntimeError: If ``BAMBOO_OPENSEARCH_PROMPTLOG`` is not set.
+        ImportError: If ``opensearch-py`` is not installed.
+    """
+    if not 1 <= rating <= 5:
+        raise ValueError(f"rating must be 1–5, got {rating!r}")
+    client = _create_os_client()
+    return client.update(
+        index=index,
+        id=doc_id,
+        body={"doc": {"rating": rating}},
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenSearch connection constants
+# ---------------------------------------------------------------------------
+
 _DEFAULT_INDEX_BASE: str = "bamboomcp-promptlog"
 
 # ---------------------------------------------------------------------------
@@ -330,9 +463,10 @@ def _build_index_name() -> str:
 def _create_os_client() -> Any:
     """Create an authenticated OpenSearch client for prompt logging.
 
-    Reads connection parameters from the same environment variables used by
-    :mod:`~askpanda_atlas.harvester_timeseries_impl` so that operators only
-    need one set of credentials.
+    Delegates to :func:`bamboo.llm.opensearch_client.create_os_client` using
+    the ``BAMBOO_OPENSEARCH_PROMPTLOG`` write password.  Kept as a module-level
+    function so existing call sites and tests that patch it by name continue to
+    work without modification.
 
     Returns:
         An :class:`opensearchpy.OpenSearch` client instance.
@@ -341,30 +475,92 @@ def _create_os_client() -> Any:
         ImportError: If ``opensearch-py`` is not installed.
         RuntimeError: If ``BAMBOO_OPENSEARCH_PROMPTLOG`` is not set.
     """
-    from opensearchpy import OpenSearch  # optional dep — guarded at call site
+    from bamboo.llm.opensearch_client import create_os_client as _shared_factory
 
     password = os.environ.get("BAMBOO_OPENSEARCH_PROMPTLOG", "")
     if not password:
         raise RuntimeError(
             "BAMBOO_OPENSEARCH_PROMPTLOG is not set — prompt logging is disabled."
         )
+    return _shared_factory(password)
 
-    host = os.environ.get("ASKPANDA_OPENSEARCH_HOST", _DEFAULT_HOST)
-    user = os.environ.get("ASKPANDA_OPENSEARCH_USER", _DEFAULT_USER)
-    ca = os.environ.get("ASKPANDA_OPENSEARCH_CA", _DEFAULT_CA)
-    verify_raw = os.environ.get("ASKPANDA_OPENSEARCH_VERIFY_CERTS", "true").lower()
-    verify = verify_raw != "false"
 
-    client_kwargs: dict[str, Any] = {
-        "hosts": [host],
-        "http_auth": (user, password),
-        "use_ssl": True,
-        "verify_certs": verify,
-    }
-    if verify and os.path.exists(ca):
-        client_kwargs["ca_certs"] = ca
+_PROMPTLOG_TEMPLATE: dict = {
+    "index_patterns": ["bamboomcp-promptlog-*"],
+    "template": {
+        "mappings": {
+            "properties": {
+                "@timestamp": {
+                    "type": "date",
+                    "format": "strict_date_optional_time||epoch_millis",
+                },
+                "session_id": {"type": "keyword"},
+                "turn_number": {"type": "integer"},
+                "provider": {"type": "keyword"},
+                "model": {"type": "keyword"},
+                "max_tokens": {"type": "integer"},
+                "tools_used": {"type": "keyword"},
+                "input_tokens": {"type": "integer"},
+                "output_tokens": {"type": "integer"},
+                "system_prompt": {"type": "text"},
+                "raw_question": {"type": "text"},
+                "user_prompt": {"type": "text"},
+                "response": {"type": "text"},
+                "rating": {"type": "integer"},
+            }
+        }
+    },
+}
+_PROMPTLOG_TEMPLATE_NAME: str = "bamboomcp-promptlog"
 
-    return OpenSearch(**client_kwargs)
+
+def _ensure_index_template(client: Any) -> None:
+    """Apply the bamboomcp-promptlog index template if not yet applied.
+
+    Idempotent — skipped after the first successful call per process (or
+    after a permanent 403 permission error).
+
+    A 403 AuthorizationException means the OpenSearch user lacks
+    ``indices:admin/index_template/put`` permission.  Retrying would be
+    pointless, so the flag is set to suppress further attempts and the
+    failure is logged at INFO level rather than WARNING — it does not
+    affect document writes, only date-range mapping quality.
+
+    All other failures are logged at WARNING level and do not abort writes.
+
+    Args:
+        client: An authenticated :class:`opensearchpy.OpenSearch` client.
+    """
+    global _template_applied  # pylint: disable=global-statement
+    if _template_applied:
+        return
+    try:
+        client.indices.put_index_template(
+            name=_PROMPTLOG_TEMPLATE_NAME,
+            body=_PROMPTLOG_TEMPLATE,
+        )
+        _template_applied = True
+        logger.debug(
+            "prompt_log: index template '%s' applied", _PROMPTLOG_TEMPLATE_NAME
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        exc_str = str(exc)
+        if "403" in exc_str or "AuthorizationException" in exc_str:
+            # Permanent permission error — suppress future attempts and log
+            # quietly; document writes are unaffected.
+            _template_applied = True
+            logger.info(
+                "prompt_log: index template '%s' skipped (insufficient permissions) — "
+                "date range queries may not work if mapping was auto-detected as text",
+                _PROMPTLOG_TEMPLATE_NAME,
+            )
+        else:
+            logger.warning(
+                "prompt_log: failed to apply index template '%s': %s — "
+                "date range queries may not work if mapping was auto-detected as text",
+                _PROMPTLOG_TEMPLATE_NAME,
+                exc,
+            )
 
 
 def _write_document(doc: dict[str, Any]) -> None:
@@ -386,34 +582,58 @@ def _write_document(doc: dict[str, Any]) -> None:
     if _circuit_open:
         return
 
+    index = _build_index_name()
+    turn = doc.get("turn_number", "?")
+    _notify("debug", f"prompt_log: sending turn {turn} to index '{index}'…")
+    logger.debug("prompt_log: sending turn %s to index '%s'", turn, index)
+
     try:
         client = _create_os_client()
-        index = _build_index_name()
-        client.index(index=index, body=doc)
+        _ensure_index_template(client)
+        resp = client.index(index=index, body=doc)
+        doc_id = resp.get("_id", "?") if isinstance(resp, dict) else "?"
+        result = resp.get("result", "?") if isinstance(resp, dict) else "?"
+        session_id = doc.get("session_id", "?")
+        msg = (
+            f"prompt_log: turn {turn} indexed — "
+            f"index={index!r} id={doc_id!r} result={result!r} "
+            f"session={session_id!r}"
+        )
+        logger.debug(msg)
+        _notify("info", msg)
+        _event_log.append({"turn": turn, "severity": "info", "message": msg})
+        _last_doc_store.append((index, doc_id))
         # Success — reset failure counter.
         _consecutive_failures = 0
     except ImportError:
-        logger.debug("prompt_log: opensearch-py not installed — skipping log write")
+        imp_msg = (
+            f"prompt_log: turn {turn} — opensearch-py not installed; "
+            f"install with: pip install opensearch-py"
+        )
+        logger.debug(imp_msg)
+        _notify("warning", imp_msg)
+        _event_log.append({"turn": turn, "severity": "warning", "message": imp_msg})
     except Exception as exc:  # pylint: disable=broad-exception-caught
         _consecutive_failures += 1
         if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
             _circuit_open = True
-            logger.error(
-                "prompt_log: circuit breaker tripped after %d consecutive "
-                "write failures — prompt logging disabled for this session. "
-                "Check BAMBOO_OPENSEARCH_PROMPTLOG credentials and write "
-                "access to index '%s'. Last error: %s",
-                _consecutive_failures,
-                _build_index_name(),
-                exc,
+            err_msg = (
+                f"prompt_log: circuit breaker tripped after {_consecutive_failures} "
+                f"consecutive write failures — prompt logging disabled for this session. "
+                f"Check BAMBOO_OPENSEARCH_PROMPTLOG credentials and write "
+                f"access to index '{index}'. Last error: {exc}"
             )
+            logger.error(err_msg)
+            _notify("error", err_msg)
+            _event_log.append({"turn": turn, "severity": "error", "message": err_msg})
         else:
-            logger.warning(
-                "prompt_log: write failure %d/%d — %s",
-                _consecutive_failures,
-                _CIRCUIT_BREAKER_THRESHOLD,
-                exc,
+            warn_msg = (
+                f"prompt_log: write failure {_consecutive_failures}/"
+                f"{_CIRCUIT_BREAKER_THRESHOLD} — {exc}"
             )
+            logger.warning(warn_msg)
+            _notify("warning", warn_msg)
+            _event_log.append({"turn": turn, "severity": "warning", "message": warn_msg})
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +651,7 @@ async def log_prompt(
     max_tokens: int,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    raw_question: str | None = None,
 ) -> None:
     """Fire-and-forget: build a redacted document and ship it to OpenSearch.
 
@@ -449,6 +670,10 @@ async def log_prompt(
         system_prompt: The system prompt string for this call, before redaction.
         user_prompt: The synthesised user prompt for this call (contains the
             question and injected evidence), before redaction.
+        raw_question: The user's original question as typed, before synthesis
+            prompt construction.  Stored as a ``keyword`` field to enable
+            accurate frequency aggregations (``raw_question.keyword``).
+            When ``None`` the field is omitted from the document.
         response: Raw LLM response text, before redaction.
         tools_used: Names of the MCP tools called during this turn (e.g.
             ``["cric_query"]``).
@@ -466,7 +691,7 @@ async def log_prompt(
     global _turn_counter  # pylint: disable=global-statement
     _turn_counter += 1
     turn_number = _turn_counter
-    timestamp = datetime.now(tz=timezone.utc).isoformat()
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
     doc: dict[str, Any] = {
         "@timestamp": timestamp,
@@ -477,6 +702,7 @@ async def log_prompt(
         "max_tokens": max_tokens,
         "system_prompt": redact_names(system_prompt),
         "user_prompt": redact_names(user_prompt),
+        **({"raw_question": raw_question} if raw_question is not None else {}),
         "response": redact_names(response),
         "tools_used": tools_used,
         "input_tokens": input_tokens,
@@ -494,6 +720,10 @@ async def log_prompt(
 __all__ = [
     "log_prompt",
     "redact_names",
+    "drain_events",
+    "register_notify_callback",
+    "clear_notify_callback",
+    "NotifyFn",
     "_SESSION_ID",
     "_DEFAULT_INDEX_BASE",
     "_CIRCUIT_BREAKER_THRESHOLD",

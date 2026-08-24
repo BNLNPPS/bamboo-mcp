@@ -315,16 +315,18 @@ async def test_rag_route_no_history_unchanged() -> None:
     tool = BambooAnswerTool()
     with (
         patch("bamboo.tools.bamboo_answer.check_topic", guard_mock),
-        patch("bamboo.tools.bamboo_answer.execute_plan", plan_mock),
+        patch("bamboo.tools.bamboo_answer.bamboo_plan_tool") as mock_plan_tool,
     ):
+        mock_plan_tool.call = plan_mock
         result = await tool.call({"question": "What is PanDA?"})
 
     assert result[0]["text"] == llm_reply
-    # With no history, execute_plan history arg should be empty
-    history_arg = list(plan_mock.call_args[0][2]) if plan_mock.call_args[0] else []
-    assert not any(m.get("role") == "assistant" for m in history_arg)
-    assert history_arg == []
-    # No assistant messages injected.
+    # With no history, the planner's messages list should contain only the
+    # current question — no assistant messages injected.
+    plan_args = plan_mock.call_args[0][0]
+    messages_arg = plan_args["messages"]
+    assert not any(m.get("role") == "assistant" for m in messages_arg)
+    assert messages_arg == [{"role": "user", "content": "What is PanDA?"}]
 
 
 # ---------------------------------------------------------------------------

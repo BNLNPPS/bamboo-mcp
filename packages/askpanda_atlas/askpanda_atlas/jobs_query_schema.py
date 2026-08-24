@@ -455,7 +455,20 @@ def invalidate_schema_cache() -> None:
 CANNOT_ANSWER_SENTINEL: str = "CANNOT_ANSWER"
 
 #: Instructions injected into the LLM system prompt for SQL generation.
+#: ``{today_date}``, ``{now_utc}``, and ``{schema_context}`` are filled by
+#: :func:`build_sql_prompt`.
 SQL_GENERATION_SYSTEM_TEMPLATE: str = """\
+TODAY={today_date} NOW={now_utc} (UTC — use this as the reference for all relative \
+date/time expressions)
+
+DATE RULE: statechangetime reflects the last status-transition timestamp stored
+in the ingestion snapshot.  The snapshot contains jobs fetched during the
+LAST ~1 HOUR only — rows with statechangetime older than ~1 hour are NOT present.
+Time-range filters on statechangetime beyond 1 hour will therefore return 0 rows.
+If the question asks for a window longer than 1 hour, omit the statechangetime
+filter and query the current snapshot without a time constraint; or note the
+data limitation in your query comment using -- (never in the SELECT output).
+
 You are a read-only SQL assistant for a PanDA jobs database (DuckDB dialect).
 
 {schema_context}
@@ -465,7 +478,9 @@ Rules:
 - Do not use INSERT, UPDATE, DELETE, DROP, CREATE, or any DDL or DML.
 - Do not reference information_schema or any system tables.
 - Do not use semicolons.
-- Always filter by _queue to scope queries to a specific computing site.
+- Filter by _queue ONLY when the question mentions a specific site or queue.
+  For global/cross-site questions (e.g. "all queues", "globally", no site named),
+  omit the _queue filter entirely.
 - IMPORTANT: _queue values are full queue names like 'BNL_ATLAS_TIER1' or
   'BNL_ATLAS_TIER1-condor', not bare site abbreviations like 'BNL'.
   When the question says "(filter _queue ILIKE 'SITE%')", use that pattern exactly.
@@ -482,6 +497,7 @@ Rules:
   from COUNT(*) on the jobs table.
 - The database contains jobs from approximately the last hour per queue.
 - Use _fetched_utc for freshness checks; use statechangetime for job state history.
+  Remember: statechangetime data only spans ~1 hour — see DATE RULE above.
 - jobstatus values: defined, waiting, sent, starting, running, holding, merging,
   finished, failed, cancelled, closed.
 - If the question cannot be answered by a SQL query against the available tables,
@@ -512,6 +528,14 @@ Example queries:
   SELECT _queue, COUNT(*) AS failed_jobs FROM jobs WHERE jobstatus = 'failed' GROUP BY _queue ORDER BY failed_jobs DESC LIMIT 500
 - "Which jobs are running at BNL?" →
   SELECT pandaid, produserid, durationsec, cpuefficiency FROM jobs WHERE _queue ILIKE 'BNL%' AND jobstatus = 'running' ORDER BY durationsec DESC LIMIT 500
+- "Show me a histogram of job failures per hour for the last ten hours" →
+  SELECT DATE_TRUNC('HOUR', statechangetime) AS failure_hour, _queue, COUNT(*) AS failed_jobs
+  FROM jobs WHERE jobstatus = 'failed'
+  GROUP BY failure_hour, _queue ORDER BY failure_hour ASC LIMIT 500
+- "How many failed jobs are there globally right now?" →
+  SELECT COUNT(*) AS failed_jobs FROM jobs WHERE jobstatus = 'failed' LIMIT 500
+- "Show job counts by status across all queues" →
+  SELECT jobstatus, COUNT(*) AS n FROM jobs GROUP BY jobstatus ORDER BY n DESC LIMIT 500
 """
 
 
@@ -520,6 +544,10 @@ def build_sql_prompt(
     schema_context: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the LLM message list for SQL generation.
+
+    Injects the current UTC date and time on the first line of the system
+    prompt so the LLM has an accurate temporal anchor for relative expressions
+    such as "today", "this hour", or "the last N hours".
 
     Args:
         question: Natural-language question from the user.
@@ -530,10 +558,15 @@ def build_sql_prompt(
         A list of ``{"role": str, "content": str}`` dicts suitable for
         passing to any Bamboo LLM provider.
     """
+    import datetime  # deferred — only needed at call time
+
     if schema_context is None:
         schema_context = build_schema_context()
 
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     system_content = SQL_GENERATION_SYSTEM_TEMPLATE.format(
+        today_date=now_utc.strftime("%Y-%m-%d"),
+        now_utc=now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         schema_context=schema_context,
     )
     return [

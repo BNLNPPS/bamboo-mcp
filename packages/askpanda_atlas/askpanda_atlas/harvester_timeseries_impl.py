@@ -137,10 +137,10 @@ def _default_window() -> tuple[str, str]:
 def create_os_client() -> Any:
     """Create an authenticated OpenSearch client from environment variables.
 
-    Reads connection parameters from the environment.  Certificate
-    verification can be disabled by setting
-    ``ASKPANDA_OPENSEARCH_VERIFY_CERTS=false`` (useful for local
-    development without the CERN CA bundle).
+    Delegates to :func:`bamboo.llm.opensearch_client.create_os_client` using
+    the ``ASKPANDA_OPENSEARCH`` read password.  Kept as a module-level
+    function so existing call sites and tests that patch it by name continue
+    to work without modification.
 
     Returns:
         An authenticated :class:`opensearchpy.OpenSearch` client.
@@ -149,31 +149,15 @@ def create_os_client() -> Any:
         RuntimeError: If ``ASKPANDA_OPENSEARCH`` is not set.
         ImportError: If ``opensearch-py`` is not installed.
     """
+    from bamboo.llm.opensearch_client import create_os_client as _shared_factory
+
     password = os.environ.get("ASKPANDA_OPENSEARCH", "")
     if not password:
         raise RuntimeError(
             "Environment variable ASKPANDA_OPENSEARCH is not set. "
             "Set it to your OpenSearch password to enable timeseries charts."
         )
-
-    from opensearchpy import OpenSearch  # type: ignore[import]
-
-    host = os.environ.get("ASKPANDA_OPENSEARCH_HOST", _DEFAULT_HOST)
-    user = os.environ.get("ASKPANDA_OPENSEARCH_USER", _DEFAULT_USER)
-    ca = os.environ.get("ASKPANDA_OPENSEARCH_CA", _DEFAULT_CA)
-    verify_raw = os.environ.get("ASKPANDA_OPENSEARCH_VERIFY_CERTS", "true").lower()
-    verify: bool | str = verify_raw != "false"
-
-    client_kwargs: dict[str, Any] = {
-        "hosts": [host],
-        "http_auth": (user, password),
-        "use_ssl": True,
-        "verify_certs": verify,
-    }
-    if verify and ca:
-        client_kwargs["ca_certs"] = ca
-
-    return OpenSearch(**client_kwargs)
+    return _shared_factory(password)
 
 
 # ---------------------------------------------------------------------------
@@ -322,10 +306,19 @@ def get_definition() -> dict[str, Any]:
     return {
         "name": "panda_harvester_timeseries",
         "description": (
-            "Fetch per-bucket Harvester pilot counts from OpenSearch for a "
-            "single status over a time window.  Used to render ASCII "
-            "time-series charts in the TUI.  Requires ASKPANDA_OPENSEARCH "
-            "to be set."
+            "Fetch per-bucket Harvester pilot counts from OpenSearch "
+            "(atlas_harvesterworkers-*) for a given status over a time window. "
+            "Use this tool when the user asks about pilot failure rates, "
+            "failure percentages, which sites had high failure counts, "
+            "or how pilot failures (or any status) trended over time. "
+            "Examples: 'which sites had pilot failures above 20% today', "
+            "'pilot failure rate at BNL this week', "
+            "'how did failed pilots trend at CERN yesterday', "
+            "'show running pilot counts for the last 6 hours'. "
+            "Pass status='failed' for failure-rate questions. "
+            "Omit site= to retrieve counts across all sites; pass site= to "
+            "scope to one computing site. "
+            "Requires ASKPANDA_OPENSEARCH to be set."
         ),
         "inputSchema": {
             "type": "object",
@@ -375,9 +368,13 @@ def get_definition() -> dict[str, Any]:
 class PandaHarvesterTimeseriesTool:
     """MCP tool fetching per-bucket Harvester pilot counts from OpenSearch.
 
-    Queries the ``atlas_harvesterworkers-*`` index for a single status
-    over a configurable time window, returning a compact bucket list
-    suitable for ASCII chart rendering in the TUI.
+    Queries the ``atlas_harvesterworkers-*`` index for a given status over a
+    configurable time window.  Returns a compact bucket list that the LLM can
+    use to reason about failure rates, trends, and cross-site comparisons, and
+    that the TUI can render as an ASCII time-series chart.
+
+    Pass ``status='failed'`` for failure-rate and high-failure-site questions.
+    Omit ``site`` to retrieve counts across all sites.
     """
 
     def __init__(self) -> None:

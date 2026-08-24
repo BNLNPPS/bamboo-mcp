@@ -19,13 +19,47 @@ Interface
   ``list[MCPContent]`` whose ``text`` field is a JSON-serialised dict
   with ``evidence`` and ``text`` keys.
 
+Extraction strategy
+-------------------
+Excerpt extraction is *traceback-first*.  Before consulting any error-code
+lookup table the log is scanned for a real Python traceback using the format
+invariants in :mod:`askpanda_atlas._traceback_parse`; when one is found the
+excerpt is built around it and the exception is also returned as structured
+evidence (``exception_type``, ``exception_message``, ``deepest_pilot_frame``).
+
+Only when no traceback exists does extraction fall back to the previous
+behaviour: the ``_PILOT_CODE_PATTERNS`` anchor for the job's pilot error code,
+then ``piloterrordiag`` as a literal regex, then the tail of the log.  Those
+fallbacks are unreliable because ``piloterrordiag`` is written by a different
+pilot code path than the log record, so the wordings frequently differ — pilot
+error code 1310 reports ``"Exception caught during payload execution"`` in
+metadata while the log record reads ``"execute payloads caught an exception
+(cannot recover): timed out, Traceback ..."``.  When the anchor missed, the
+excerpt used to degrade to the tail of the log, which for a failed job is
+stage-out and log-archiving boilerplate that contains no diagnostic content.
+
 Evidence keys
 -------------
 job_id, monitor_url, jobstatus, jobsubstatus, computingsite, cloud,
 atlasrelease, jeditaskid, attemptnr, maxattempt, piloterrorcode,
 piloterrordiag, exeerrorcode, exeerrordiag, taskbuffererrorcode,
 taskbuffererrordiag, ddmerrorcode, ddmerrordiag, starttime, endtime,
-duration, failure_type, log_url, log_excerpt, log_available.
+duration, failure_type, log_url, log_excerpt, log_available,
+traceback_available, exception_type, exception_message, exception_frames,
+deepest_pilot_frame, traceback_count, pilot_version, code_analysis_offer_md,
+core_dump_probe_state, core_dump_available, core_dump_candidates,
+core_dump_total_bytes, core_dump_offer_md.
+
+Core-dump probe
+---------------
+The job-log listing fetched for the log downloads is also read for core files
+(``core.<pid>``), so a looping-job kill can be followed by a core-dump
+analysis without a second request.  The probe distinguishes a usable core from
+one truncated mid-write and from a looping-job kill that produced no core at
+all, because those mean different things to the person reading the answer.
+``core_dump_offer_md`` is emitted only for a looping-job kill with a usable
+core; the evidence keys are populated for every failure type so that an
+explicit request works regardless of how the job failed.
 """
 from __future__ import annotations
 
@@ -38,8 +72,48 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from askpanda_atlas._fallback_http import get_base_url
+from askpanda_atlas._traceback_parse import (
+    ExceptionInfo,
+    TracebackBlock,
+    find_primary_exception,
+    parse_pilot_version,
+    parse_pilot_version_from_pilotid,
+    truncate_traceback,
+)
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Core-dump probe
+# ---------------------------------------------------------------------------
+
+# Whether a core-dump analysis tool is registered for this experiment, and so
+# whether an analysis follow-up may be offered to the user.  The probe itself
+# is experiment-neutral — it only reads the job's file listing — but the
+# analysis tool reconstructs the job's ATLAS release container, which is
+# ATLAS-specific.  Offering analysis where no tool is registered would produce
+# an offer that cannot be accepted, so the ePIC mirror sets this to False (see
+# tests/plugin_mirror_spec.py).  The evidence keys are still populated for
+# both, since "does this job have a core dump" is a useful answer either way.
+_CORE_DUMP_ANALYSIS_AVAILABLE: bool = True
+
+# Pilot error code emitted when the pilot's looping-job detector kills a
+# payload that has stopped writing output.  The pilot requests a core dump at
+# that point, so this is the failure mode where analysis is worth offering
+# proactively; an explicit request still works for any failure type.
+_LOOPING_JOB_PILOT_CODE: int = 1150
+
+# The pilot names core files core.<pid>.  Anchored on both ends so that
+# unrelated names containing "core" (core_dump_config.txt, .corefile) cannot
+# match.
+_CORE_FILE_RE: re.Pattern[str] = re.compile(r"^core\.\d+$")
+
+# Probe outcomes, in the order the probe considers them.
+CORE_DUMP_PRESENT: str = "present"
+CORE_DUMP_TRUNCATED: str = "truncated"
+CORE_DUMP_TIMED_OUT: str = "timed_out"
+CORE_DUMP_ABSENT: str = "absent"
+CORE_DUMP_NOT_PROBED: str = "not_probed"
 
 # ---------------------------------------------------------------------------
 # Failure classification patterns
@@ -78,8 +152,32 @@ _FAILURE_PATTERNS: list[tuple[str, list[str]]] = [
     ("pilot_error", ["piloterrorcode"]),
 ]
 
+# Failure categories produced only by _classify_from_exception (never by the
+# substring table above).  Listed here for documentation and for consumers that
+# need to enumerate the full category vocabulary.
+#
+# transform_download_timeout / transform_download_failed
+#     The pilot failed while downloading the job's transformation script (e.g.
+#     runGen) over HTTP, inside get_analysis_trf -> download_transform ->
+#     download_file.  The payload never started, so any diag text mentioning
+#     "payload execution" (pilot error 1310 does) is misleading.
+# pilot_exception
+#     An unrecognised exception raised inside pilot3 code.  Preferred over
+#     payload_error, which wrongly implies the user's payload was at fault.
+_EXCEPTION_ONLY_CATEGORIES: frozenset[str] = frozenset({
+    "transform_download_timeout",
+    "transform_download_failed",
+    "pilot_exception",
+})
+
 # Map pilot error codes to a search string likely to appear near the failure
 # in the log, used to anchor the context-window extraction.
+#
+# This table is now a *fallback*: extract_log_excerpt first looks for a real
+# Python traceback (see _traceback_parse), which needs no per-code entry.  The
+# table still helps for failures the pilot reports without raising an exception
+# (stage-in timeouts, looping-job kills, memory limits), where there is no
+# traceback to anchor on.
 _PILOT_CODE_PATTERNS: dict[int, str] = {
     1099: "Failed to stage-in file",
     1104: r"work directory .* is too large",
@@ -88,6 +186,13 @@ _PILOT_CODE_PATTERNS: dict[int, str] = {
     1201: "caught signal",
     1235: "job has exceeded the memory limit",
     1305: "",          # payload failure — use tail of payload.stdout instead
+    # 1310: exception raised while the pilot was preparing or running the
+    # payload.  The metadata diag ("Exception caught during payload execution")
+    # does not appear in the log; the log record reads "execute payloads caught
+    # an exception".  Normally the traceback-first path handles this code, so
+    # this anchor only matters for the rare 1310 job whose log lost its
+    # traceback (truncated upload, killed pilot).
+    1310: "caught an exception",
     1324: "Service not available",
     # 1354: UID not found when scanning the process table for CPU monitoring.
     # This is a pilot infrastructure error, not a user payload failure.
@@ -108,14 +213,34 @@ _CONTEXT_LINES: int = 40
 _TRAILING_LINES: int = 30
 # For pilotlog.txt fallback: number of tail lines when no pattern matches
 _PAYLOAD_TAIL_LINES: int = 300
-# Maximum log excerpt length sent to the LLM (characters)
-_MAX_EXCERPT_CHARS: int = 6000
+# Maximum log excerpt length sent to the LLM (characters).
+# Raised from 6000: tracebacks that pass through the CVMFS standard library are
+# long (the runGen transform-download timeout traceback is ~4 kB on its own),
+# and a 6000-char budget left too little room for surrounding pilot context.
+_MAX_EXCERPT_CHARS: int = 8000
 # Characters reserved for payload.stderr within the excerpt budget.
 # Guarantees the stderr traceback is always included even when stdout is long.
 _STDERR_RESERVED_CHARS: int = 2000
-# Characters taken from the end of payload.stdout (char-based, not line-based).
-# Char-based slicing guarantees recency regardless of line length — verbose
-# INFO lines won't push ERROR lines out of the budget the way a line-count does.
+# Characters reserved for the primary traceback within the excerpt budget.
+# The traceback is the highest-value content in the excerpt, so it is allocated
+# first and the surrounding context gets the remainder — never the other way
+# round.
+_TRACEBACK_RESERVED_CHARS: int = 5000
+# Lines of log context collected immediately after the traceback.  The pilot
+# usually logs the resulting error code and state transition here.
+_TRACEBACK_TRAILING_LINES: int = 10
+# Character cap on that trailing context, so it cannot crowd out the preceding
+# context that explains what the pilot was attempting.
+_TRACEBACK_TRAILING_CHARS: int = 600
+# Retained for backwards compatibility only.  The stderr reservation is now
+# applied by the caller that actually appends payload.stderr
+# (_fetch_logs_payload), which passes the reduced budget into
+# extract_failure_context.  A direct extract_log_excerpt call has no stderr to
+# append and therefore gets the full budget.
+#
+# Char-based (not line-based) slicing is still used for the no-traceback payload
+# tail: it guarantees recency regardless of line length, whereas a line count on
+# verbose logs pushes the ERROR lines out of the budget.
 _STDOUT_CHAR_TAIL: int = _MAX_EXCERPT_CHARS - _STDERR_RESERVED_CHARS
 
 
@@ -211,26 +336,87 @@ def _setup_log_has_error(setup_text: str) -> bool:
     return False
 
 
-def _fetch_file_index(
+def _listing_entries(payload: Any) -> list[Any]:
+    """Extract the raw file-entry list from a filebrowser JSON payload.
+
+    Args:
+        payload: Parsed JSON body, either a bare list of entries or a dict
+            wrapping one under ``files``/``data``/``results``.
+
+    Returns:
+        The raw entry list, or an empty list when no recognisable list is
+        present.
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        # Some BigPanDA versions wrap the list under a "files" key.
+        for key in ("files", "data", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _normalise_listing_entry(entry: Any) -> dict[str, Any] | None:
+    """Normalise one filebrowser entry into a path-keyed record.
+
+    The ``dirname`` field carries the path and ``name`` carries only the
+    basename, so the relative path has to be reassembled.  Entries with no
+    usable name are dropped.
+
+    Note that the entry's own ``media_link`` is deliberately not carried
+    forward: BigPanDA omits the separator between ``dirname`` and ``name``
+    for nested files, producing links such as ``.../workDirin.txt``.  Media
+    URLs are constructed from the job's log GUID instead.
+
+    Args:
+        entry: One element of the listing's ``files`` array.
+
+    Returns:
+        Dict with ``relative_path``, ``name``, ``dirname``, ``size_bytes``
+        and ``modification`` keys, or ``None`` when the entry is unusable.
+    """
+    if not isinstance(entry, dict):
+        return None
+    name = str(entry.get("name") or entry.get("filename") or "")
+    if not name:
+        return None
+    dirname = str(entry.get("dirname") or "").strip("/")
+    try:
+        size_bytes = int(entry.get("size") or entry.get("fsize") or 0)
+    except (ValueError, TypeError):
+        size_bytes = 0
+    return {
+        "relative_path": f"{dirname}/{name}" if dirname else name,
+        "name": name,
+        "dirname": dirname,
+        "size_bytes": size_bytes,
+        "modification": str(entry.get("modification") or ""),
+    }
+
+
+def _fetch_file_listing(
     job_id: int,
     base_url: str,
     timeout: int,
-) -> dict[str, int] | None:
-    """Fetch the filebrowser directory listing for a job, returning file sizes.
+) -> list[dict[str, Any]] | None:
+    """Fetch the recursive filebrowser listing for a job.
 
-    Calls ``/filebrowser/?pandaid={job_id}&json`` (no ``filename=`` param) to
-    retrieve a JSON list of files available for the job.  The result is parsed
-    into a mapping of ``{filename: size_in_bytes}`` so callers can skip
-    zero-length files before attempting to download them.
+    Calls ``/filebrowser/?pandaid={job_id}&json`` (no ``filename=`` param).
+    The ``&json`` form is served unauthenticated; the bare form redirects to
+    the CERN SSO login page, so the query string must not be altered.
 
-    The response is cached via :func:`~askpanda_atlas._cache.cached_fetch_jsonish`
-    using the metadata TTL (60 s).  A ``None`` return means the listing could
-    not be fetched; callers must treat this as "assume all files are non-empty"
-    (fail-open) so that an unavailable index does not suppress log downloads.
+    The listing is fully recursive and each entry's path lives in ``dirname``
+    rather than in ``name``, so entries are normalised to a single
+    ``relative_path`` key by :func:`_normalise_listing_entry`.
 
-    BigPanDA's filebrowser JSON listing uses the following structure::
-
-        [{"name": "pilotlog.txt", "size": 123456}, ...]
+    The listing's ``error`` field is advisory whenever the file array is
+    populated.  A large job log makes BigPanDA report a warning such as
+    ``"slow_downloading:The size of job log tarball is quite big (119.36MB)."``
+    alongside a complete and correct listing, so treating a non-empty
+    ``error`` as fatal would reject usable responses.  It is only fatal when
+    no entries came back.
 
     Args:
         job_id: PanDA job ID.
@@ -238,47 +424,112 @@ def _fetch_file_index(
         timeout: HTTP timeout in seconds.
 
     Returns:
-        Dict mapping filename to size in bytes, or ``None`` on failure.
+        List of normalised entry dicts, or ``None`` when the listing could
+        not be fetched or came back empty with an error set.  Callers must
+        treat ``None`` as "unknown", not as "no files".
     """
     from askpanda_atlas._cache import cached_fetch_jsonish  # type: ignore[import]
 
     url = f"{base_url}/filebrowser/?pandaid={job_id}&json"
-    logger.info("Fetching file index: %s", url)
+    logger.info("Fetching file listing: %s", url)
     status, _ctype, _text, payload = cached_fetch_jsonish(url, timeout)
     if status < 200 or status >= 300 or payload is None:
-        logger.warning(
-            "File index fetch failed for job %d: HTTP %d", job_id, status
-        )
+        logger.warning("File listing fetch failed for job %d: HTTP %d", job_id, status)
         return None
 
-    # The response may be a list directly, or a dict wrapping a list.
-    entries: list[Any] = []
-    if isinstance(payload, list):
-        entries = payload
-    elif isinstance(payload, dict):
-        # Some BigPanDA versions wrap the list under a "files" key.
-        for key in ("files", "data", "results"):
-            if isinstance(payload.get(key), list):
-                entries = payload[key]
-                break
+    listing_error = ""
+    if isinstance(payload, dict):
+        listing_error = str(payload.get("error") or "")
 
-    if not entries:
-        logger.debug("File index for job %d is empty or unrecognised format", job_id)
-        return {}
+    entries = _listing_entries(payload)
+    normalised = [
+        record for record in (_normalise_listing_entry(entry) for entry in entries)
+        if record is not None
+    ]
 
-    index: dict[str, int] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name") or entry.get("filename") or ""
-        size = entry.get("size") or entry.get("fsize") or 0
-        if name:
-            try:
-                index[str(name)] = int(size)
-            except (ValueError, TypeError):
-                index[str(name)] = 0
+    if not normalised:
+        if listing_error:
+            logger.warning(
+                "File listing for job %d returned no files and reported: %s",
+                job_id, listing_error,
+            )
+            return None
+        logger.debug("File listing for job %d is empty or unrecognised format", job_id)
+        return []
 
-    return index
+    if listing_error:
+        # Advisory only — the entries are usable.
+        logger.info(
+            "File listing for job %d reported a warning alongside %d entries: %s",
+            job_id, len(normalised), listing_error,
+        )
+    return normalised
+
+
+def _fetch_file_index(
+    job_id: int,
+    base_url: str,
+    timeout: int,
+) -> dict[str, int] | None:
+    """Fetch the filebrowser listing for a job, returning file sizes by path.
+
+    Thin wrapper over :func:`_fetch_file_listing` for callers that only need
+    sizes, so they can skip zero-length files before attempting a download.
+
+    The mapping is keyed on the **full relative path**, not on the basename.
+    Keying on the basename alone silently collapsed distinct files: a single
+    job tarball can contain ``output.root`` five times under five different
+    ``dirname`` values, and ``setup.sh`` both at the job root and under
+    ``workDir/usr/...``, in which case the last entry parsed won.  Top-level
+    files are unaffected because their relative path *is* their basename;
+    use :func:`_top_level_file_index` when a basename lookup is what is
+    wanted.
+
+    A ``None`` return means the listing could not be fetched; callers must
+    treat this as "assume all files are non-empty" (fail-open) so that an
+    unavailable listing does not suppress log downloads.
+
+    BigPanDA's filebrowser JSON listing uses the following structure::
+
+        {"error": "", "files": [
+            {"name": "pilotlog.txt", "size": 123456, "dirname": ""},
+            {"name": "in.txt", "size": 2359, "dirname": "/workDir"},
+        ]}
+
+    Args:
+        job_id: PanDA job ID.
+        base_url: BigPanDA base URL.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        Dict mapping relative path to size in bytes, or ``None`` on failure.
+    """
+    listing = _fetch_file_listing(job_id, base_url, timeout)
+    if listing is None:
+        return None
+    return {record["relative_path"]: int(record["size_bytes"]) for record in listing}
+
+
+def _top_level_file_index(file_index: dict[str, int] | None) -> dict[str, int] | None:
+    """Restrict a path-keyed size index to entries at the job-directory root.
+
+    Exists so that basename lookups stay unambiguous.  Every helper that
+    consults the index asks about a canonical top-level log
+    (``setup.stdout``, ``payload.stdout``, ``payload.stderr``,
+    ``pilotlog.txt``), and a nested file that happens to share one of those
+    names must not be able to answer for it.
+
+    Args:
+        file_index: Path-keyed mapping from :func:`_fetch_file_index`, or
+            ``None`` when the listing is unavailable.
+
+    Returns:
+        Mapping of basename to size for root-level entries only, or ``None``
+        when *file_index* is ``None`` (propagating the fail-open signal).
+    """
+    if file_index is None:
+        return None
+    return {path: size for path, size in file_index.items() if "/" not in path}
 
 
 def _file_is_nonempty(file_index: dict[str, int] | None, filename: str) -> bool:
@@ -289,8 +540,13 @@ def _file_is_nonempty(file_index: dict[str, int] | None, filename: str) -> bool:
     the download proceeds.  This preserves existing behaviour when the
     index endpoint is unavailable.
 
+    The lookup is an exact match on the index key, which is a relative path.
+    Callers passing a bare filename should pass an index restricted by
+    :func:`_top_level_file_index` so a nested namesake cannot answer for a
+    root-level file.
+
     Args:
-        file_index: Mapping of ``{filename: size_bytes}`` from
+        file_index: Mapping of ``{relative_path: size_bytes}`` from
             :func:`_fetch_file_index`, or ``None`` if the index is
             unavailable.
         filename: The log filename to check (e.g. ``"setup.stdout"``).
@@ -454,88 +710,303 @@ def _select_log_filename(job: dict[str, Any]) -> str:
     return "payload.stdout" if code == 1305 else "pilotlog.txt"
 
 
-def extract_log_excerpt(
+# Matches an `ls -l` long-format entry, e.g.
+#   -rw-r--r--. 1 atlasprd000 atlasprd 28218 Aug 17 10:37 remote_open.stderr
+# and the "total 72" header that precedes such a block (with or without a pilot
+# log record prefix in front of it).
+#
+# These lines are stripped from the context around a traceback because they are
+# never diagnostic and are actively harmful: given a directory listing and no
+# real error, an LLM will infer a cause from which files exist and how large
+# they are.  That is exactly how job 7261310898 was misdiagnosed as a "remote
+# file open failure" — the only signal in the excerpt was that
+# remote_open.stderr was 28 kB.
+_LISTING_LINE_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^[-dlbcps][rwxsStT-]{9}[.+]?\s+\d+\s+\S+\s+\S+\s+\d+\s"),
+    re.compile(r"^total \d+\s*$"),
+    re.compile(r"\|\s*(?:list_work_dir|print_executable)\s*\|"),
+    re.compile(r"^\s*$"),
+)
+
+
+def _strip_directory_listing(text: str) -> str:
+    """Remove directory-listing and command-echo lines from log context.
+
+    Applied to the context lines surrounding a traceback, never to the traceback
+    itself.  See :data:`_LISTING_LINE_RES` for why these lines are worse than
+    merely useless.
+
+    Args:
+        text: Block of log context lines.
+
+    Returns:
+        The same block with listing lines, ``total N`` headers, pilot
+        ``list_work_dir``/``print_executable`` records and blank lines removed.
+    """
+    kept = [
+        line for line in text.splitlines()
+        if not any(pattern.search(line) for pattern in _LISTING_LINE_RES)
+    ]
+    return "\n".join(kept)
+
+
+def _trim_partial_first_line(text: str) -> str:
+    """Drop a leading partial line left behind by character-based slicing.
+
+    Slicing a block of log text to a character budget usually cuts through the
+    middle of a line.  A half line of pilot log is noise at best and misleading
+    at worst, so it is removed.
+
+    Args:
+        text: Text whose first line may be a fragment.
+
+    Returns:
+        *text* without its first line, or an empty string when *text* is a
+        single fragment with no newline.
+    """
+    if "\n" not in text:
+        return ""
+    return text.split("\n", 1)[1]
+
+
+def _build_traceback_excerpt(
+    log_text: str,
+    block: TracebackBlock,
+    max_chars: int,
+) -> str:
+    """Assemble an excerpt centred on a traceback, within a character budget.
+
+    Allocation order is deliberate: the traceback first (up to
+    ``_TRACEBACK_RESERVED_CHARS``), then a short trailing window, then as much
+    preceding context as the remaining budget allows.  The preceding context is
+    trimmed from its *start* so the lines nearest the traceback survive.
+
+    Args:
+        log_text: Full log content the traceback was found in.
+        block: The selected traceback block.
+        max_chars: Total character budget for the excerpt.
+
+    Returns:
+        Excerpt string of at most *max_chars* characters, in log order
+        (preceding context, traceback, trailing context).
+    """
+    tb_text = truncate_traceback(block.text, min(_TRACEBACK_RESERVED_CHARS, max_chars))
+    remaining = max_chars - len(tb_text)
+    if remaining <= 0:
+        return tb_text
+
+    lines = log_text.splitlines()
+
+    trailing = _strip_directory_listing(
+        "\n".join(lines[block.end_line:block.end_line + _TRACEBACK_TRAILING_LINES])
+    )
+    trailing = trailing[:min(_TRACEBACK_TRAILING_CHARS, remaining)]
+    remaining -= len(trailing)
+
+    context = ""
+    if remaining > 0:
+        first = max(0, block.start_line - _CONTEXT_LINES)
+        context = _strip_directory_listing("\n".join(lines[first:block.start_line]))
+        if len(context) > remaining:
+            context = _trim_partial_first_line(context[-remaining:])
+
+    parts = [part for part in (context, tb_text, trailing) if part]
+    return "\n".join(parts)
+
+
+@dataclass
+class FailureContext:
+    """Excerpt plus structured exception data extracted from a job's logs.
+
+    Attributes:
+        excerpt: The log excerpt to send to the LLM.
+        exception: Parsed exception when a Python traceback was found in the
+            log, otherwise ``None``.
+        traceback_count: Number of distinct tracebacks found in the log.  A
+            value above 1 means :func:`select_primary_traceback` discarded
+            alternatives, which is worth surfacing in evidence.
+    """
+
+    excerpt: str = ""
+    exception: ExceptionInfo | None = None
+    traceback_count: int = 0
+
+
+def extract_failure_context(
     log_text: str,
     log_filename: str,
     pilot_error_code: int,
     pilot_error_diag: str,
-) -> str:
-    """Extract the most relevant section of a log file for LLM analysis.
+    max_chars: int = _MAX_EXCERPT_CHARS,
+) -> FailureContext:
+    """Extract the most relevant section of a log, plus any parsed exception.
 
-    For pilotlog.txt: searches for a known error keyword anchored to the
-    pilot error code, falling back to the raw ``piloterrordiag`` prefix.
-    For payload logs (piloterrorcode 1305): returns the last
-    ``_PAYLOAD_TAIL_LINES`` lines.
+    Traceback-first: the log is scanned for Python tracebacks and, when one is
+    found, the excerpt is built around it via :func:`_build_traceback_excerpt`
+    and the exception is parsed into structured form.  This path applies to
+    *every* log type — ``pilotlog.txt``, ``payload.stdout``, ``payload.stderr``
+    and ``setup.stdout`` — because the traceback format is identical in all of
+    them and Athena payload failures benefit as much as pilot failures.
+
+    Only when no traceback is present does the previous behaviour apply: for
+    payload logs a character tail, and for ``pilotlog.txt`` the
+    ``_PILOT_CODE_PATTERNS`` anchor, then ``piloterrordiag`` as a literal
+    regex, then the log tail.
 
     Args:
         log_text: Full log content as a string.
         log_filename: Name of the log file (used to detect payload logs).
         pilot_error_code: Numeric pilot error code from job metadata.
         pilot_error_diag: Textual pilot error diagnosis from job metadata.
+        max_chars: Character budget for the excerpt.  Callers that must reserve
+            part of the overall budget for another file (e.g. appending
+            ``payload.stderr``) pass the reduced figure here so truncation
+            stays traceback-aware rather than happening via a later slice.
 
     Returns:
-        Extracted context window, truncated to ``_MAX_EXCERPT_CHARS``
-        characters.  Empty string if no relevant section is found.
+        Populated :class:`FailureContext`.  ``excerpt`` is an empty string when
+        no relevant section could be found.
     """
+    if not log_text:
+        return FailureContext()
+
     is_payload = "payload" in log_filename
 
     if is_payload or pilot_error_code == 1305:
-        # Strip pilot boilerplate (ls listings) before taking the char tail
-        # so the budget is spent on application errors, not directory output.
+        # Strip pilot boilerplate (ls listings) first so neither the traceback
+        # search nor the char tail spends budget on directory output.
+        log_text = _strip_payload_noise(log_text)
+
+    exception, block, count = find_primary_exception(log_text)
+    if exception is not None and block is not None:
+        logger.info(
+            "Traceback-anchored excerpt for %s: %s (%d traceback(s) in log)",
+            log_filename,
+            exception.exc_type or "unparsed exception",
+            count,
+        )
+        return FailureContext(
+            excerpt=_build_traceback_excerpt(log_text, block, max_chars),
+            exception=exception,
+            traceback_count=count,
+        )
+
+    if is_payload or pilot_error_code == 1305:
         # Char-based tail: errors appear at the very end of payload.stdout;
         # a line-count tail on verbose logs would cut them off.
-        log_text = _strip_payload_noise(log_text)
-        excerpt = log_text[-_STDOUT_CHAR_TAIL:]
-    else:
-        search_pattern = _PILOT_CODE_PATTERNS.get(pilot_error_code)
-        if search_pattern is None:
-            # Unknown code: use first 40 chars of piloterrordiag as pattern
-            search_pattern = re.escape(pilot_error_diag[:40]) if pilot_error_diag else ""
+        return FailureContext(excerpt=log_text[-max_chars:])
 
-        if search_pattern:
-            if pilot_error_code in _TRAILING_CONTEXT_CODES:
-                excerpt = _extract_context_window_with_trailing(
-                    log_text, search_pattern, _CONTEXT_LINES, _TRAILING_LINES
-                )
-            else:
-                excerpt = _extract_context_window(log_text, search_pattern, _CONTEXT_LINES)
-        else:
-            excerpt = ""
+    search_pattern = _PILOT_CODE_PATTERNS.get(pilot_error_code)
+    if search_pattern is None:
+        # Unknown code: use first 40 chars of piloterrordiag as pattern.
+        # Unreliable (see module docstring) but retained as a last resort.
+        search_pattern = re.escape(pilot_error_diag[:40]) if pilot_error_diag else ""
 
-        # If no match found, fall back to the tail.
-        # WARNING-level so production logs surface gaps in _PILOT_CODE_PATTERNS.
-        if not excerpt:
-            logger.warning(
-                "Pattern %r not found in log for pilot error code %d; "
-                "falling back to tail extraction. Consider adding this code "
-                "to _PILOT_CODE_PATTERNS.",
-                search_pattern,
-                pilot_error_code,
+    excerpt = ""
+    if search_pattern:
+        if pilot_error_code in _TRAILING_CONTEXT_CODES:
+            excerpt = _extract_context_window_with_trailing(
+                log_text, search_pattern, _CONTEXT_LINES, _TRAILING_LINES
             )
-            excerpt = _extract_tail(log_text, _CONTEXT_LINES)
+        else:
+            excerpt = _extract_context_window(log_text, search_pattern, _CONTEXT_LINES)
 
-    return excerpt[:_MAX_EXCERPT_CHARS] if excerpt else ""
+    # If no match found, fall back to the tail.
+    # WARNING-level so production logs surface gaps in _PILOT_CODE_PATTERNS.
+    if not excerpt:
+        logger.warning(
+            "No traceback found and pattern %r did not match for pilot error "
+            "code %d; falling back to tail extraction. The excerpt may contain "
+            "only stage-out boilerplate. Consider adding this code to "
+            "_PILOT_CODE_PATTERNS.",
+            search_pattern,
+            pilot_error_code,
+        )
+        excerpt = _extract_tail(log_text, _CONTEXT_LINES)
+
+    return FailureContext(excerpt=excerpt[:max_chars] if excerpt else "")
+
+
+def extract_log_excerpt(
+    log_text: str,
+    log_filename: str,
+    pilot_error_code: int,
+    pilot_error_diag: str,
+    max_chars: int = _MAX_EXCERPT_CHARS,
+) -> str:
+    """Extract the most relevant section of a log file for LLM analysis.
+
+    Thin wrapper over :func:`extract_failure_context` that returns only the
+    excerpt, preserving the original signature for existing callers and tests.
+
+    Args:
+        log_text: Full log content as a string.
+        log_filename: Name of the log file (used to detect payload logs).
+        pilot_error_code: Numeric pilot error code from job metadata.
+        pilot_error_diag: Textual pilot error diagnosis from job metadata.
+        max_chars: Character budget for the excerpt.
+
+    Returns:
+        Extracted context window, at most *max_chars* characters.  Empty
+        string if no relevant section is found.
+    """
+    return extract_failure_context(
+        log_text, log_filename, pilot_error_code, pilot_error_diag, max_chars,
+    ).excerpt
 
 
 # ---------------------------------------------------------------------------
 # Failure classification
 # ---------------------------------------------------------------------------
 
-def classify_failure(job: dict[str, Any], log_excerpt: str) -> str:
-    """Classify a job failure from job metadata fields and log excerpt.
+# Exception types that mean "the operation did not complete in time".
+_TIMEOUT_EXC_TYPES: frozenset[str] = frozenset({
+    "TimeoutError", "timeout", "ReadTimeout", "ReadTimeoutError",
+    "ConnectTimeout", "ConnectTimeoutError", "SocketTimeout",
+})
 
-    Builds a single search string from key error fields plus the log
-    excerpt, then checks it against ``_FAILURE_PATTERNS`` in order.
+# Exception types that mean "the network or peer failed", excluding timeouts.
+_NETWORK_EXC_TYPES: frozenset[str] = frozenset({
+    "ConnectionError", "ConnectionResetError", "ConnectionRefusedError",
+    "ConnectionAbortedError", "BrokenPipeError", "URLError", "HTTPError",
+    "SSLError", "SSLEOFError", "CertificateError", "gaierror", "herror",
+})
+
+# Pilot functions that identify the transformation-script download path:
+#   get_payload_command -> get_analysis_trf -> download_transform -> download_file
+# A failure anywhere under get_analysis_trf/download_transform means the payload
+# command could not even be assembled, so the payload never ran.
+_TRANSFORM_DOWNLOAD_FUNCS: frozenset[str] = frozenset({
+    "get_analysis_trf", "download_transform",
+})
+
+# Signals for the pilot CPU-monitoring UID lookup failure (pilot error 1354).
+# Preserved as its own category because bamboo_answer and planner routing
+# reference "pilot_monitoring_error" by name.
+_MONITORING_FUNCS: frozenset[str] = frozenset({
+    "list_processes_and_threads", "get_process_info",
+})
+_MONITORING_MESSAGE_SIGNALS: tuple[str, ...] = ("getpwuid", "uid not found")
+
+
+# Keywords for the metadata-only pre-check in classify_failure.  Kept in sync
+# with the "reassigned_by_jedi" entry of _FAILURE_PATTERNS.
+_REASSIGNED_KEYWORDS: tuple[str, ...] = ("reassigned by jedi", "toreassign")
+
+
+def _build_search_text(job: dict[str, Any], log_excerpt: str) -> str:
+    """Build the lower-cased search string used by substring classification.
 
     Args:
         job: The ``job`` dict from the BigPanDA metadata response.
-        log_excerpt: Extracted context window from the pilot log.
+        log_excerpt: Extracted context window, or an empty string to search
+            job metadata only.
 
     Returns:
-        A short failure category string (e.g. ``"stagein_timeout"``).
-        Falls back to ``"unknown"`` if no pattern matches.
+        Single lower-cased string joining the error diagnosis fields and the
+        excerpt.
     """
-    search = " ".join([
+    return " ".join([
         str(job.get("taskbuffererrordiag") or ""),
         str(job.get("piloterrordiag") or ""),
         str(job.get("exeerrordiag") or ""),
@@ -544,6 +1015,98 @@ def classify_failure(job: dict[str, Any], log_excerpt: str) -> str:
         log_excerpt,
     ]).lower()
 
+
+def _classify_from_exception(exception: ExceptionInfo) -> str | None:
+    """Classify a failure from a parsed exception rather than substring search.
+
+    Preferred over :data:`_FAILURE_PATTERNS` because it reasons about the
+    exception type and the pilot call chain instead of matching substrings
+    anywhere in the excerpt.  Substring matching over a low-quality excerpt
+    produces confident nonsense: job 7261310898 was classified ``"timeout"``
+    because the excerpt happened to contain ``"using timeout=90 s"`` from the
+    pilot's log-archiving ``tar`` command, not because anything timed out.
+
+    Args:
+        exception: Parsed exception from :mod:`askpanda_atlas._traceback_parse`.
+
+    Returns:
+        A failure category string, or ``None`` when the exception is not
+        recognised *and* contains no pilot frames — in which case the caller
+        should fall through to the substring table (payload tracebacks are
+        classified there as ``payload_error``).
+    """
+    exc_type = exception.exc_type
+    message = exception.message.lower()
+    funcs = {frame.func for frame in exception.pilot_frames}
+    paths = {frame.pilot_path for frame in exception.pilot_frames}
+
+    is_timeout = exc_type in _TIMEOUT_EXC_TYPES or "timed out" in message
+    in_transform_download = bool(funcs & _TRANSFORM_DOWNLOAD_FUNCS)
+
+    # Order matters: the transform-download checks are more specific than the
+    # bare timeout/network checks and must win.
+    if in_transform_download:
+        return "transform_download_timeout" if is_timeout else "transform_download_failed"
+
+    if funcs & _MONITORING_FUNCS or any(sig in message for sig in _MONITORING_MESSAGE_SIGNALS):
+        return "pilot_monitoring_error"
+    if any(path.endswith("psutils.py") for path in paths):
+        return "pilot_monitoring_error"
+
+    if exc_type == "MemoryError":
+        return "memory"
+    if "no space left" in message or "disk quota" in message:
+        return "disk_full"
+    if exc_type in ("FileNotFoundError", "IsADirectoryError"):
+        return "input_missing"
+    if is_timeout:
+        return "timeout"
+    if exc_type in _NETWORK_EXC_TYPES:
+        return "network"
+
+    # Unrecognised exception, but it was raised inside pilot code: report it as
+    # a pilot exception rather than letting the substring table label it
+    # "payload_error", which wrongly blames the user's payload.
+    if exception.pilot_frames:
+        return "pilot_exception"
+
+    return None
+
+
+def classify_failure(
+    job: dict[str, Any],
+    log_excerpt: str,
+    exception: ExceptionInfo | None = None,
+) -> str:
+    """Classify a job failure from job metadata, log excerpt and exception.
+
+    When *exception* is supplied, :func:`_classify_from_exception` is consulted
+    first; it is far more reliable than substring matching.  The
+    ``_FAILURE_PATTERNS`` table is used only when no exception was parsed or
+    the exception is unrecognised and originated outside pilot code.
+
+    Args:
+        job: The ``job`` dict from the BigPanDA metadata response.
+        log_excerpt: Extracted context window from the pilot log.
+        exception: Parsed exception from the log, when one was found.
+
+    Returns:
+        A short failure category string (e.g. ``"stagein_timeout"``).
+        Falls back to ``"unknown"`` if nothing matches.
+    """
+    # Metadata-level signals that outrank any log content: a job reassigned by
+    # JEDI never really "failed" in the pilot, so an exception in its log (if
+    # any) is incidental.
+    metadata_search = _build_search_text(job, "")
+    if any(kw in metadata_search for kw in _REASSIGNED_KEYWORDS):
+        return "reassigned_by_jedi"
+
+    if exception is not None:
+        category = _classify_from_exception(exception)
+        if category is not None:
+            return category
+
+    search = _build_search_text(job, log_excerpt)
     for category, keywords in _FAILURE_PATTERNS:
         if any(kw in search for kw in keywords):
             return category
@@ -570,6 +1133,13 @@ class _LogFetchResult:
         setup_log_url: Filebrowser URL of ``setup.stdout``, or ``None``.
         setup_log_excerpt: Full (budget-capped) content of ``setup.stdout``,
             or ``None`` if it was not fetched or contained no error.
+        exception: Parsed exception when a Python traceback was found in any of
+            the fetched logs, otherwise ``None``.
+        traceback_count: Number of distinct tracebacks found in the log the
+            exception came from.
+        pilot_version: Pilot release version parsed from the pilot log (e.g.
+            ``"3.14.0.22"``), or an empty string when unavailable.  Used to pin
+            GitHub source fetches to the tag the job actually ran.
     """
 
     log_excerpt: str = ""
@@ -578,6 +1148,9 @@ class _LogFetchResult:
     stderr_url: str | None = None
     setup_log_url: str | None = None
     setup_log_excerpt: str | None = field(default=None)
+    exception: ExceptionInfo | None = None
+    traceback_count: int = 0
+    pilot_version: str = ""
 
 
 def _fetch_logs_payload(
@@ -623,8 +1196,20 @@ def _fetch_logs_payload(
         if setup_text:
             setup_fetched = True
             if _setup_log_has_error(setup_text):
-                result.setup_log_excerpt = setup_text[:_MAX_EXCERPT_CHARS]
+                setup_ctx = extract_failure_context(
+                    setup_text, "setup.stdout", pilot_error_code,
+                    pilot_error_diag, _MAX_EXCERPT_CHARS,
+                )
+                # Setup errors are usually shell output rather than tracebacks;
+                # when no traceback is present keep the whole (capped) file so
+                # the asetup/release diagnostics are not cropped by an anchor.
+                result.setup_log_excerpt = (
+                    setup_ctx.excerpt if setup_ctx.exception
+                    else setup_text[:_MAX_EXCERPT_CHARS]
+                )
                 result.log_excerpt = result.setup_log_excerpt
+                result.exception = setup_ctx.exception
+                result.traceback_count = setup_ctx.traceback_count
                 result.log_available = True
                 logger.info(
                     "Setup error found in setup.stdout for job %d; "
@@ -657,19 +1242,34 @@ def _fetch_logs_payload(
 
     if log_text or stderr_text:
         result.log_available = True
+        # Pass the reduced budget into extraction rather than slicing the
+        # result afterwards: a post-hoc slice can cut a traceback and discard
+        # the terminal exception line, which is the whole point of the excerpt.
         stdout_budget = _MAX_EXCERPT_CHARS - _STDERR_RESERVED_CHARS
-        stdout_excerpt = extract_log_excerpt(
+        stdout_ctx = extract_failure_context(
             log_text or "", log_filename,
-            pilot_error_code, pilot_error_diag,
-        )[:stdout_budget]
+            pilot_error_code, pilot_error_diag, stdout_budget,
+        )
+        stderr_ctx = FailureContext()
         if stderr_text:
+            stderr_ctx = extract_failure_context(
+                stderr_text, "payload.stderr",
+                pilot_error_code, pilot_error_diag, _STDERR_RESERVED_CHARS,
+            )
             result.log_excerpt = (
-                stdout_excerpt
+                stdout_ctx.excerpt
                 + "\n\n--- payload.stderr ---\n"
-                + stderr_text[:_STDERR_RESERVED_CHARS]
+                + stderr_ctx.excerpt
             )
         else:
-            result.log_excerpt = stdout_excerpt
+            result.log_excerpt = stdout_ctx.excerpt
+
+        # Prefer the stderr traceback: Python tracebacks and segfault reports
+        # are written to stderr, so when both files contain one, stderr holds
+        # the exception that actually terminated the payload.
+        chosen = stderr_ctx if stderr_ctx.exception else stdout_ctx
+        result.exception = chosen.exception
+        result.traceback_count = chosen.traceback_count
     elif setup_fetched:
         # setup.stdout was fetched but contained no recognised error; use it
         # as the excerpt so the LLM still has environment context.
@@ -725,15 +1325,257 @@ def _fetch_logs_pilotlog(
 
     if log_text:
         result.log_available = True
-        result.log_excerpt = extract_log_excerpt(
+        context = extract_failure_context(
             log_text, log_filename, pilot_error_code, pilot_error_diag,
+            _MAX_EXCERPT_CHARS,
         )
+        result.log_excerpt = context.excerpt
+        result.exception = context.exception
+        result.traceback_count = context.traceback_count
+        # Parse the version from the *full* log: the pilot reports it during
+        # start-up, so an excerpt taken from the failure point will not have it.
+        result.pilot_version = parse_pilot_version(log_text)
     else:
         logger.info(
             "Log unavailable for job %d; proceeding with metadata only.", job_id
         )
 
     return result
+
+
+def _build_exception_evidence(
+    exception: ExceptionInfo | None,
+    traceback_count: int,
+) -> dict[str, Any]:
+    """Build the exception-related evidence keys.
+
+    Promoting the exception to first-class evidence keys means the synthesis LLM
+    does not have to locate it inside ``log_excerpt``, and gives the follow-up
+    ``pilot_source_analysis`` route a reliable signal to gate on.
+
+    Args:
+        exception: Parsed exception, or ``None`` when the log had no traceback.
+        traceback_count: Number of tracebacks found in the log.
+
+    Returns:
+        Dict of evidence keys.  All keys are always present (``None``/``False``
+        when there is no exception) so downstream consumers can rely on the
+        shape rather than probing with ``in``.
+    """
+    if exception is None:
+        return {
+            "traceback_available": False,
+            "exception_type": None,
+            "exception_message": None,
+            "exception_frames": None,
+            "deepest_pilot_frame": None,
+            "traceback_count": 0,
+        }
+
+    parsed = exception.as_dict()
+    return {
+        "traceback_available": True,
+        "exception_type": parsed["type"] or None,
+        "exception_message": parsed["message"] or None,
+        "exception_frames": parsed["frames"],
+        "deepest_pilot_frame": parsed["deepest_pilot_frame"],
+        "traceback_count": traceback_count,
+    }
+
+
+def _build_code_analysis_offer(exception: ExceptionInfo | None) -> str:
+    """Build the Markdown follow-up offer for pilot source code analysis.
+
+    Args:
+        exception: Parsed exception, or ``None`` when the log had no traceback.
+
+    Returns:
+        Markdown string naming the pilot frame the traceback originates in and
+        inviting a source-level follow-up, or an empty string when there is no
+        pilot frame to analyse.
+    """
+    if exception is None:
+        return ""
+    deepest = exception.deepest_pilot_frame
+    if deepest is None:
+        return ""
+    return (
+        f"\n\nThe exception was raised in pilot code at "
+        f"`{deepest.pilot_path}:{deepest.lineno}` (`{deepest.func}`). "
+        f"Ask me to show the pilot source for a code-level diagnosis."
+    )
+
+
+def _format_bytes(size_bytes: int) -> str:
+    """Render a byte count in decimal units for human-facing text.
+
+    Decimal (1000-based) units are used deliberately so the figure matches
+    what the job monitor reports for the same file.
+
+    Args:
+        size_bytes: Size in bytes; negative values are treated as zero.
+
+    Returns:
+        A short string such as ``"225 B"``, ``"444 kB"`` or ``"1.1 GB"``.
+    """
+    size = max(0, int(size_bytes))
+    if size < 1000:
+        return f"{size} B"
+    scaled = float(size)
+    for unit in ("kB", "MB", "GB", "TB"):
+        scaled /= 1000.0
+        if scaled < 1000.0 or unit == "TB":
+            return f"{scaled:.1f} {unit}"
+    return f"{scaled:.1f} TB"  # pragma: no cover - unreachable, loop returns
+
+
+def _find_core_dump_candidates(
+    file_listing: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Select the core files from a normalised job-log listing.
+
+    Args:
+        file_listing: Normalised records from :func:`_fetch_file_listing`, or
+            ``None`` when the listing is unavailable.
+
+    Returns:
+        Matching records ordered largest first, each with ``name``,
+        ``dirname``, ``size_bytes`` and ``modification`` keys.  Empty when the
+        listing is unavailable or contains no core file.
+    """
+    if not file_listing:
+        return []
+    candidates = [
+        {
+            "name": record["name"],
+            "dirname": record["dirname"],
+            "size_bytes": int(record["size_bytes"]),
+            "modification": record["modification"],
+        }
+        for record in file_listing
+        if _CORE_FILE_RE.match(str(record.get("name") or ""))
+    ]
+    candidates.sort(key=lambda item: (-item["size_bytes"], item["name"]))
+    return candidates
+
+
+def _classify_core_dump_probe(
+    file_listing: list[dict[str, Any]] | None,
+    candidates: list[dict[str, Any]],
+    pilot_error_code: int,
+) -> str:
+    """Classify what the job log says about core-dump availability.
+
+    The distinction between the negative outcomes matters to the user: a
+    zero-length core means the kernel was still writing it when the process
+    was killed, whereas no core at all after a looping-job kill usually means
+    core creation did not finish in the time the pilot allowed.  Reporting
+    both as "no core dump" would hide a real difference in what went wrong.
+
+    Args:
+        file_listing: Normalised listing records, or ``None`` when the listing
+            was not fetched or could not be fetched.
+        candidates: Core files found by :func:`_find_core_dump_candidates`.
+        pilot_error_code: The job's pilot error code.
+
+    Returns:
+        One of :data:`CORE_DUMP_PRESENT`, :data:`CORE_DUMP_TRUNCATED`,
+        :data:`CORE_DUMP_TIMED_OUT`, :data:`CORE_DUMP_ABSENT` or
+        :data:`CORE_DUMP_NOT_PROBED`.
+    """
+    if file_listing is None:
+        return CORE_DUMP_NOT_PROBED
+    if candidates:
+        if any(item["size_bytes"] > 0 for item in candidates):
+            return CORE_DUMP_PRESENT
+        return CORE_DUMP_TRUNCATED
+    if pilot_error_code == _LOOPING_JOB_PILOT_CODE:
+        return CORE_DUMP_TIMED_OUT
+    return CORE_DUMP_ABSENT
+
+
+def _build_core_dump_offer(
+    probe_state: str,
+    candidates: list[dict[str, Any]],
+    pilot_error_code: int,
+) -> str:
+    """Build the Markdown follow-up offer for core-dump analysis.
+
+    Deliberately narrow: offered only for a looping-job kill with a usable
+    core, following the ``_build_code_analysis_offer`` precedent that a
+    proactive offer must be built deterministically here rather than left to
+    the synthesis LLM.  An explicit request remains available for any failure
+    type, so narrowing the proactive offer costs no capability.
+
+    Args:
+        probe_state: Outcome from :func:`_classify_core_dump_probe`.
+        candidates: Core files found by :func:`_find_core_dump_candidates`.
+        pilot_error_code: The job's pilot error code.
+
+    Returns:
+        Markdown offer string, or an empty string when no offer should be
+        made.
+    """
+    if not _CORE_DUMP_ANALYSIS_AVAILABLE:
+        return ""
+    if probe_state != CORE_DUMP_PRESENT:
+        return ""
+    if pilot_error_code != _LOOPING_JOB_PILOT_CODE:
+        return ""
+    usable = [item for item in candidates if item["size_bytes"] > 0]
+    if not usable:
+        return ""
+    largest = usable[0]
+    extra = ""
+    if len(usable) > 1:
+        others = len(usable) - 1
+        extra = f" ({others} further core file{'s' if others > 1 else ''} present)"
+    return (
+        f"\n\nA core dump is present in the job log: `{largest['name']}` "
+        f"({_format_bytes(largest['size_bytes'])}){extra}. I can fetch it and "
+        f"run gdb inside the matching ATLAS release container — usually under a "
+        f"minute. Analyse it?"
+    )
+
+
+def _build_core_dump_evidence(
+    file_listing: list[dict[str, Any]] | None,
+    pilot_error_code: int,
+) -> dict[str, Any]:
+    """Build the core-dump evidence keys from the job-log listing.
+
+    No network access beyond the listing already fetched for the log
+    downloads, no disk access and no gdb: this is a pure read of the listing's
+    own ``size`` and ``modification`` fields.
+
+    Args:
+        file_listing: Normalised listing records, or ``None`` when the listing
+            was not fetched or could not be fetched.
+        pilot_error_code: The job's pilot error code.
+
+    Returns:
+        Dict of evidence keys.  All keys are always present so downstream
+        consumers can rely on the shape.  ``core_dump_available`` is ``None``
+        rather than ``False`` when nothing was probed, so "not looked at" is
+        never reported as "not there".
+    """
+    candidates = _find_core_dump_candidates(file_listing)
+    probe_state = _classify_core_dump_probe(
+        file_listing, candidates, pilot_error_code
+    )
+    available: bool | None = (
+        None if probe_state == CORE_DUMP_NOT_PROBED
+        else probe_state == CORE_DUMP_PRESENT
+    )
+    return {
+        "core_dump_probe_state": probe_state,
+        "core_dump_available": available,
+        "core_dump_candidates": candidates,
+        "core_dump_total_bytes": sum(item["size_bytes"] for item in candidates),
+        "core_dump_offer_md": _build_core_dump_offer(
+            probe_state, candidates, pilot_error_code
+        ),
+    }
 
 
 def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any]:
@@ -791,20 +1633,35 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     # --- Step 2: Download logs (only for failed/holding/cancelled jobs) ---
     fetch_result = _LogFetchResult()
 
+    file_listing: list[dict[str, Any]] | None = None
+
     if jobstatus in ("failed", "holding", "cancelled"):
-        # Fetch the file-size index once so both helpers can skip zero-length
-        # files.  Returns None on failure; helpers treat None as fail-open.
-        file_index = _fetch_file_index(job_id, base_url, timeout)
+        # Fetch the recursive listing once.  It feeds both the zero-length
+        # skip decisions below and the core-dump probe further down, so no
+        # extra request is made for the probe.  Returns None on failure;
+        # helpers treat None as fail-open.
+        file_listing = _fetch_file_listing(job_id, base_url, timeout)
+        file_index = (
+            None if file_listing is None
+            else {
+                record["relative_path"]: int(record["size_bytes"])
+                for record in file_listing
+            }
+        )
+        # The fetch helpers only ever ask about canonical root-level logs, so
+        # they get the basename-safe view: a nested namesake such as
+        # ``workDir/usr/.../setup.sh`` must not answer for a root-level file.
+        top_level_index = _top_level_file_index(file_index)
 
         if pilot_error_code == 1305:
             fetch_result = _fetch_logs_payload(
                 job_id, pilot_error_code, pilot_error_diag,
-                file_index, base_url, timeout,
+                top_level_index, base_url, timeout,
             )
         else:
             fetch_result = _fetch_logs_pilotlog(
                 job, job_id, pilot_error_code, pilot_error_diag,
-                file_index, base_url, timeout,
+                top_level_index, base_url, timeout,
             )
 
     log_excerpt = fetch_result.log_excerpt
@@ -813,9 +1670,16 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     stderr_url = fetch_result.stderr_url
     setup_log_url = fetch_result.setup_log_url
     setup_log_excerpt = fetch_result.setup_log_excerpt
+    exception = fetch_result.exception
+
+    # Fall back to the pilotid metadata field when the pilot log was not
+    # downloaded (e.g. pilot error 1305 reads payload.stdout instead).
+    pilot_version = fetch_result.pilot_version or parse_pilot_version_from_pilotid(
+        str(job.get("pilotid") or "")
+    )
 
     # --- Step 3: Classify failure ---
-    failure_type = classify_failure(job, log_excerpt)
+    failure_type = classify_failure(job, log_excerpt, exception)
 
     # --- Step 4: Build evidence dict ---
     evidence: dict[str, Any] = {
@@ -847,10 +1711,27 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
         "setup_log_excerpt": setup_log_excerpt,
         "log_available": log_available,
         "log_excerpt": log_excerpt or None,
+        "pilot_version": pilot_version or None,
     }
 
+    evidence.update(_build_exception_evidence(exception, fetch_result.traceback_count))
+    # Core-dump probe.  Reuses the listing already fetched above, so a job in a
+    # non-terminal state (where no listing is fetched) reports "not probed"
+    # rather than paying for an extra request to assert an obvious negative.
+    evidence.update(_build_core_dump_evidence(file_listing, pilot_error_code))
+
     summary = f"Job {job_id} ({jobstatus}): failure type '{failure_type}'."
-    if job.get("taskbuffererrordiag"):
+    if exception is not None and exception.exc_type:
+        # The parsed exception is more trustworthy than piloterrordiag, which is
+        # a summary written elsewhere in the pilot and can contradict the log.
+        summary += f" Exception: {exception.exc_type}: {exception.message[:120]}."
+        deepest = exception.deepest_pilot_frame
+        if deepest is not None:
+            summary += (
+                f" Raised in pilot code at {deepest.pilot_path}:{deepest.lineno}"
+                f" ({deepest.func})."
+            )
+    elif job.get("taskbuffererrordiag"):
         summary += f" Task buffer: {job['taskbuffererrordiag']}."
     elif pilot_error_diag:
         summary += f" Pilot: {pilot_error_diag[:120]}."
@@ -873,6 +1754,12 @@ def fetch_and_analyse(job_id: int, base_url: str, timeout: int) -> dict[str, Any
     if stderr_url:
         link_lines.append(f"- [Payload stderr]({stderr_url})")
     evidence["links_md"] = "\n\nLinks:\n" + "\n".join(link_lines)
+
+    # Deterministic follow-up offer, appended verbatim by bamboo_executor so the
+    # LLM cannot garble the frame reference.  Only offered when the traceback
+    # actually reaches pilot3 code, since pilot_source_analysis has nothing to
+    # fetch for a pure payload traceback.
+    evidence["code_analysis_offer_md"] = _build_code_analysis_offer(exception)
 
     return {"evidence": evidence, "text": summary}
 
@@ -1027,12 +1914,17 @@ class PandaLogAnalysisTool:
 panda_log_analysis_tool = PandaLogAnalysisTool()
 
 __all__ = [
+    "FailureContext",
     "PandaLogAnalysisTool",
     "classify_failure",
+    "extract_failure_context",
     "extract_log_excerpt",
     "fetch_and_analyse",
     "get_definition",
     "panda_log_analysis_tool",
+    "_build_code_analysis_offer",
+    "_build_exception_evidence",
+    "_classify_from_exception",
     "_fetch_file_index",
     "_file_is_nonempty",
     "_setup_log_has_error",

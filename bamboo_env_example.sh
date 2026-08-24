@@ -29,6 +29,48 @@ export CRIC_DUCKDB_PATH="${HOME}/.askpanda/cric.duckdb"
 # export CRIC_QUERY_MAX_ROWS="200"
 
 ########################################
+# PANDA MCP (external PanDA MCP server)
+########################################
+
+# Full URL of the PanDA MCP HTTP endpoint.
+# If unset, PanDA MCP tools return a graceful "server not connected" error.
+export PANDA_MCP_BASE_URL="https://aipanda120.cern.ch:8443/mcp"
+
+# OIDC token cache file written by `get-panda-token` (panda-mcp-client).
+# Bamboo reads the `id_token` field from this file at session startup.
+# Run `uvx --from panda-mcp-client get-panda-token` once to populate it.
+# Token renewal is handled separately (via a Bamboo MCP agent service).
+# Defaults to ~/.panda_id_token when unset.
+# export PANDA_MCP_TOKEN_FILE="${HOME}/.panda_id_token"
+
+# Explicit bearer token override (takes priority over PANDA_MCP_TOKEN_FILE).
+# Leave unset to use the token file instead.
+# export PANDA_MCP_TOKEN=""
+
+# Optional virtual-organisation name sent as Origin: <vo> header.
+# export PANDA_MCP_ORIGIN="atlas"
+
+# TLS certificate verification.
+# httpx and requests both honour the standard SSL_CERT_FILE env var.
+#
+# On lxplus (recommended): point at the system CA bundle — no certifi
+# modifications needed, survives venv recreations and certifi upgrades:
+export SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+#
+# Outside CERN: build a combined bundle (system CAs + CERN CAs) and point
+# SSL_CERT_FILE at it, or append the CERN CAs to your system bundle.
+# Note: files from cafiles.cern.ch are DER-encoded — they need
+# `openssl x509 -inform DER` conversion before use in a PEM bundle.
+# export SSL_CERT_FILE="/path/to/ca-bundle-with-cern-cas.pem"
+#
+# Or point PANDA_MCP_CA_BUNDLE at a combined PEM bundle (Bamboo-specific,
+# used only for the PanDA MCP connection):
+# export PANDA_MCP_CA_BUNDLE="/path/to/ca-bundle.pem"
+#
+# Development/testing only — disables TLS verification entirely:
+# export PANDA_MCP_TLS_VERIFY=0
+
+########################################
 # LLM PROFILE SELECTION
 ########################################
 
@@ -131,7 +173,9 @@ export OPENAI_COMPAT_API_KEY=""
 # Active experiment plugin for the TUI and Streamlit interfaces.
 # Controls which ui_manifest tool is loaded and which banner/accent is shown.
 # Options: atlas | epic | cgsim   (default: atlas)
-# export ASKPANDA_PLUGIN="atlas"
+# Must be explicitly exported (not commented out) so that sourcing this file
+# clears any stale value left in the shell from a previous cgsim/epic session.
+export ASKPANDA_PLUGIN="atlas"
 
 ########################################
 # RAG / CHROMADB (doc_search / doc_bm25 tools)
@@ -140,13 +184,53 @@ export OPENAI_COMPAT_API_KEY=""
 # Path to the ChromaDB persistent directory created by the ingestion script.
 export BAMBOO_CHROMA_PATH="./chroma_db"
 
-# Name of the ChromaDB collection to query.
-# Each plugin has its own default collection name so multiple plugins can
-# coexist in the same ChromaDB directory:
-#   atlas_docs  — ATLAS / PanDA documentation  (askpanda_atlas default)
-#   epic_docs   — ePIC / EIC documentation     (askpanda_epic default)
-#   cgsim_docs  — CGSim / SimGrid documentation (cgsim default)
-# Set this explicitly to override the plugin default.
+# Multi-collection map: JSON object mapping topic keys to logical collection
+# names.  The document-monitor agent in bamboo-mcp-services ingests each
+# source repository into a separate named collection; this map tells Bamboo
+# MCP which collection to query for each topic.
+#
+# Adding a new collection requires only updating this JSON string — no code
+# changes or new environment variables.
+#
+# Built-in topic defaults (used when a topic key is absent from the map):
+#   panda          → panda_docs          atlas    → atlas_docs
+#   bamboo         → bamboo_docs (legacy alias; see note below)
+#   bamboo_mcp     → bamboo_mcp_docs     bamboo_services → bamboo_services_docs
+#   rucio          → rucio_docs          root     → root_docs
+#   epic           → epic_docs           cgsim    → cgsim_docs
+#
+# The "bamboo" key is a legacy alias retained for single-collection
+# deployments.  Deployments that have split Bamboo documentation into two
+# separate collections (bamboo-mcp repo docs vs bamboo-mcp-services repo docs)
+# should add "bamboo_mcp" and "bamboo_services" entries explicitly to avoid
+# install/setup docs from one component polluting answers about the other.
+#
+# Uncomment and adjust to match your bamboo-mcp-services deployment:
+# export BAMBOO_CHROMA_COLLECTION_MAP='{
+#     "panda":           "panda_docs",
+#     "atlas":           "atlas_docs",
+#     "bamboo_mcp":      "bamboo_mcp_docs",
+#     "bamboo_services": "bamboo_services_docs",
+#     "rucio":           "rucio_docs",
+#     "root":            "root_docs",
+#     "epic":            "epic_docs",
+#     "cgsim":           "cgsim_docs"
+# }'
+#
+# Legacy single-collection layout (bamboo-mcp + bamboo-mcp-services docs mixed):
+# export BAMBOO_CHROMA_COLLECTION_MAP='{
+#     "panda":  "panda_docs",
+#     "atlas":  "atlas_docs",
+#     "bamboo": "bamboo_docs",
+#     "rucio":  "rucio_docs",
+#     "root":   "root_docs",
+#     "epic":   "epic_docs",
+#     "cgsim":  "cgsim_docs"
+# }'
+
+# Scalar fallback: used for all topics when BAMBOO_CHROMA_COLLECTION_MAP is
+# absent or has no entry for the requested topic.  Also preserves backward
+# compatibility with single-collection deployments.
 export BAMBOO_CHROMA_COLLECTION="atlas_docs"
 
 ########################################
@@ -162,6 +246,42 @@ export BAMBOO_FAST_PATH="0"
 
 # Uncomment for verbose debug logs if needed
 # export ASKPANDA_DEBUG="1"
+
+########################################
+# SUPERUSER / DEVELOPER MODE
+########################################
+
+# Plain-text password to unlock superuser mode in the Streamlit and TUI
+# interfaces.  When set, a "Developer access" section appears in the
+# Streamlit sidebar and the /superuser <password> command is active in
+# the TUI.  Superuser mode exposes developer tools such as pilot_code_query.
+# Leave unset (or empty) to disable superuser mode entirely.
+# export BAMBOO_SUPERUSER_PASSWORD="changeme"
+
+# Additional tool names to treat as superuser-gated (comma-separated).
+# The defaults (code_query, atlas.code_query) are always included.
+# Example: bamboo_code_query,atlas.bamboo_code_query
+# export BAMBOO_SUPERUSER_TOOLS=""
+
+# Additional routing-signal regex patterns for the pre-dispatch superuser
+# guard (comma-separated, Python re syntax, case-insensitive).
+# Any question matching one of these patterns is blocked until the user
+# authenticates as a superuser.  The defaults cover *.py filenames and
+# code-inspection verb + keyword combinations.
+# Example: bamboo/.*\.py,core/bamboo/.*
+# export BAMBOO_SUPERUSER_PATTERNS=""
+
+########################################
+# CODE QUERY (superuser tool)
+########################################
+
+# GitHub repository to fetch source files from.
+# Format: owner/repo  (default: PanDAWMS/pilot3 — override for any other codebase)
+# export BAMBOO_CODE_QUERY_REPO="PanDAWMS/pilot3"
+
+# Branch or tag to fetch from (default: master).
+# Example: export BAMBOO_CODE_QUERY_REPO="my-org/my-repo"
+# export BAMBOO_CODE_QUERY_BRANCH="master"
 
 ########################################
 # TRACING
@@ -234,6 +354,126 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # Bearer token for authenticating to a Bamboo HTTP server.
 # export MCP_BEARER_TOKEN=""
 
-# Timeout in seconds for MCP tool calls in the Streamlit sync client.
-# Large task status fetches can take 60-90 s for tasks with thousands of jobs.
-# export BAMBOO_MCP_CLIENT_TIMEOUT="120"
+# Timeouts in seconds for MCP tool calls.  These are two INDEPENDENT ceilings
+# on the same call and the lower one silently wins, so raising one alone has no
+# effect.  Both default to 300 s.
+#
+#   BAMBOO_MCP_CLIENT_TIMEOUT  client-side deadline on the call's future
+#   BAMBOO_MCP_HTTP_TIMEOUT    per-tool-call deadline on the HTTP transport
+#                              (not a connection timeout)
+#
+# Long-running tools need headroom under BOTH: large task status fetches take
+# 60-90 s for tasks with thousands of jobs, and a tool that fetches and analyses
+# a job's files takes longer still.  Pinning either below the default will cut
+# such a call short while the work continues server-side.
+# export BAMBOO_MCP_CLIENT_TIMEOUT="300"
+# export BAMBOO_MCP_HTTP_TIMEOUT="300"
+
+########################################
+# CORE-DUMP ANALYSIS (atlas.core_dump_analysis)
+########################################
+
+# Root directory for analysis workspaces.  Each job gets one directory here,
+# holding the reconstructed job tree, the core file, the gdb evidence and the
+# worker log.  /tmp is adequate on aipanda033.
+#
+# NOTHING IS DELETED, EVER — not partial downloads, not failed runs, not
+# superseded evidence.  Reaping belongs to a separate service script, so the
+# quota below is what stops this directory growing without bound.
+# export BAMBOO_CORE_ANALYSIS_ROOT="/tmp/bamboo/core-analysis"
+
+# How long a 'start' call waits inline before handing back a request ID.  An
+# analysis takes about a minute, so most calls return the full result in the
+# same turn and the caller never sees a handle.  Must stay comfortably below
+# BAMBOO_MCP_CLIENT_TIMEOUT above, which is the real ceiling.
+# export BAMBOO_CORE_ANALYSIS_INLINE_WAIT="120"
+
+# Age at which a run that is still not finished is declared failed.  This is
+# the backstop for a worker that is alive but wedged; a worker that has *died*
+# is detected at once from its pid and does not wait for this.
+# export BAMBOO_CORE_ANALYSIS_HARD_TIMEOUT="900"
+
+# Whole-container deadline passed to the analyzer as --container-timeout.  Well
+# below the analyzer's own 1800 s default, which assumes a patient CLI user
+# rather than an interactive session.
+# export BAMBOO_CORE_ANALYSIS_CONTAINER_TIMEOUT="600"
+
+# Byte ceiling for everything under BAMBOO_CORE_ANALYSIS_ROOT.  At or above it,
+# a new analysis is refused and reports what is being held.
+# export BAMBOO_CORE_ANALYSIS_MAX_BYTES="53687091200"
+
+# The analysis needs CVMFS on the host: it reconstructs the job's own ATLAS
+# release container rather than using the host's gdb.  There is no option to
+# fall back to a local gdb, because a mismatched release resolves the payload's
+# symbols against the wrong binaries and produces a confident, wrong answer.
+# Set ATLAS_LOCAL_ROOT_BASE if CVMFS is mounted somewhere unusual.
+# export ATLAS_LOCAL_ROOT_BASE="/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase"
+
+# A container runtime is needed too, but not necessarily one installed on the
+# host: the preflight looks for apptainer or singularity on this process's
+# PATH, then on a *login* shell's PATH (which is what atlasLocalSetup.sh runs
+# under, and is usually wider than a daemon's), then for ALRB's own apptainer
+# under the CVMFS repository.  Set this only when the runtime lives somewhere
+# none of those three find it.
+# export BAMBOO_CORE_DUMP_APPTAINER="/opt/apptainer/bin/apptainer"
+
+# Escape hatch: skip the runtime check entirely and let the analyzer report a
+# missing runtime itself, a few seconds later.  The three CVMFS checks still
+# run.  Use this if detection ever refuses an analysis that would have worked.
+# export BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK="1"
+
+# Character budget for the evidence handed to the synthesis model.  The
+# analyzer's own CLI default is 50000, sized for a small model; that is far too
+# tight here, because the last stage of the reduction cascade is the primary
+# thread's backtrace — so a job with many shared libraries and several distinct
+# thread stacks spends its budget on cheaper evidence and then truncates the one
+# field worth reading.  Nothing is lost from disk either way: evidence.json and
+# gdb_raw.txt in the workspace are never budgeted.
+# export BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS="120000"
+
+# CPython gdb helper(s), enabling py-bt inside the release container.  Normally
+# unnecessary — the analyzer searches next to every libpython object loaded from
+# the core — but ATLAS/LCG releases do not always ship one, and gdb's auto-load
+# then has no candidate to find.
+#
+# The helper reads CPython's own struct layouts, which change between MINOR
+# versions, so it must match the interpreter in the core: a 3.12 helper cannot
+# read a 3.11 process.  Point this at a DIRECTORY of per-version helpers rather
+# than a single file, laid out as <version>/python-gdb.py; the analyzer detects
+# the version from the core and picks the matching one, and declines rather than
+# loading a mismatched helper.  A single file still works when every job you
+# analyse uses the same interpreter.
+#
+#   /data/bamboo/tools/cpython-gdb/3.11/python-gdb.py
+#   /data/bamboo/tools/cpython-gdb/3.12.13/python-gdb.py
+#
+# The path is read on the HOST and the helper is copied into the job directory,
+# which the container sees at /srv.  It is not passed as an environment
+# variable: ALRB launches apptainer with --cleanenv and binds only /cvmfs, the
+# user's home, the job directory and a scratch path, so a helper anywhere else
+# does not exist as far as the container is concerned.
+# export BAMBOO_CORE_DUMP_PYTHON_GDB="/data/bamboo/tools/cpython-gdb"
+
+# Directory of separate .debug files, for when a release ships libpython and
+# the analysis libraries stripped of DWARF — which is what stops py-bt even
+# when the correct helper loads, and what leaves optimised XrdCl frames without
+# argument or local-variable data.
+#
+# LEAVE THIS UNSET unless your site actually publishes debug trees. ATLAS
+# releases under /cvmfs/atlas.cern.ch/repo/sw/software do not ship them in any
+# location known to this tool, so for a stock deployment there is nothing to
+# point at and no Python-level backtrace is obtainable.
+#
+# If your site does publish them, write a TEMPLATE, not a path: that directory
+# holds a hundred-odd releases and each job names its own, so a fixed path is
+# wrong for every job but one. {project}, {release}, {platform} and {base} are
+# filled from the payload log's setup banner —
+#
+#   Using AnalysisBase/25.2.103 [cmake] with platform x86_64-el9-gcc15-opt
+#           at /cvmfs/atlas.cern.ch/repo/sw/software/25.2
+#
+# giving AnalysisBase, 25.2.103, x86_64-el9-gcc15-opt and the base path. The
+# expanded directory must exist and be visible inside the container; it is
+# dropped with a warning when it is not, because gdb accepts a missing path
+# silently and loads nothing.
+# export BAMBOO_CORE_DUMP_DEBUG_DIR="{base}/{project}/{release}/InstallArea/{platform}/.debug"

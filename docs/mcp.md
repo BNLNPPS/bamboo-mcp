@@ -368,3 +368,9 @@ sufficient excerpt for follow-up resolution without bloating the prompt.
 ## Sequence diagram
 
 <img src="images/mcp_sequence_diagram.png" alt="Diagram" width="100%" />
+
+---
+
+## See also
+
+- [`docs/architecture.md`](architecture.md) — process boundary, MCP wire, and `bamboo_answer` routing flow with diagrams

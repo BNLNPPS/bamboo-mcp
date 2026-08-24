@@ -137,6 +137,48 @@ If neither `BAMBOO_MCP_TOKENS_FILE` nor `BAMBOO_MCP_TOKENS` is set:
 
 ---
 
+## Superuser / Developer Mode
+
+Bamboo supports an optional in-session developer tier that gates developer tools
+(currently `pilot_code_query`) behind a password prompt in the UI. This is
+separate from the Bearer token system — it does not affect what tools are
+callable on the MCP server, only what the UI exposes.
+
+### Enabling
+
+Set `BAMBOO_SUPERUSER_PASSWORD` in `bamboo_env.sh`:
+
+```bash
+export BAMBOO_SUPERUSER_PASSWORD="yourpassword"
+```
+
+When this is set:
+- **Streamlit:** a "Developer access" section appears in the sidebar with a password
+  input and Unlock/Lock button.
+- **TUI:** the `/superuser <password>` command becomes active.
+
+When unset or empty, both UI features are hidden entirely.
+
+### Password comparison
+
+The password is compared using `hmac.compare_digest` (constant-time) to resist
+timing attacks. The value is never logged, never sent to the MCP server, and
+never transmitted over the network.
+
+### Security scope
+
+Superuser mode is a **UI-level gate only**. It controls which evidence panels are
+shown in the Streamlit interface for developer tools — it does not restrict which
+tools are callable by any MCP client, including Claude Desktop or the MCP
+Inspector. For network-level access control, use Bearer token authentication
+(described above).
+
+This design is intentional: Bamboo targets internal scientific teams where tool
+discoverability is more important than tool lockdown, but where visual clutter
+for casual users should be minimised.
+
+---
+
 ## Future Enhancements (Optional)
 
 Possible future upgrades:
@@ -159,4 +201,3 @@ Bamboo now supports:
 - Dev-friendly defaults with secure production behavior
 
 This keeps Bamboo lightweight while providing strong internal security.
-

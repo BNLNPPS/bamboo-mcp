@@ -1,6 +1,6 @@
 """PanDA server health tool.
 
-Calls the ``is_alive`` tool on the external PanDA MCP server and returns
+Calls the ``system_is_alive`` tool on the external PanDA MCP server and returns
 structured evidence suitable for LLM summarisation.  This is the first
 Bamboo tool that delegates to the PanDA MCP server; it answers questions
 such as:
@@ -9,7 +9,7 @@ such as:
 - "Is PanDA OK?"
 - "Is the PanDA server running?"
 
-The upstream ``is_alive`` tool takes no arguments and returns a short
+The upstream ``system_is_alive`` tool takes no arguments and returns a short
 status string from the PanDA server.
 
 Session setup
@@ -29,7 +29,7 @@ from typing import Any
 _logger = logging.getLogger(__name__)
 
 _SERVER: str = "panda"
-_TOOL: str = "is_alive"
+_TOOL: str = "system_is_alive"
 
 
 def get_definition() -> dict[str, Any]:
@@ -63,20 +63,32 @@ def get_definition() -> dict[str, Any]:
 def _parse_alive(raw: str) -> bool:
     """Determine whether the server reports itself alive from raw response text.
 
-    The ``is_alive`` tool typically returns a short string such as
+    The ``system_is_alive`` tool typically returns a short string such as
     ``"True"`` or a JSON object ``{"alive": true}``.  This function
     handles both formats conservatively: only an explicit falsy value
     causes it to return ``False``; any non-empty response that cannot
     be parsed as JSON is treated as alive.
 
+    Strings that begin with ``"Error"`` or contain exception keywords
+    (e.g. ``SSLError``, ``ConnectionError``) are treated as not-alive,
+    since the PanDA server may return a plain-text error message when its
+    own internal calls fail.
+
     Args:
-        raw: Raw text returned by the upstream MCP ``is_alive`` tool.
+        raw: Raw text returned by the upstream MCP ``system_is_alive`` tool.
 
     Returns:
         ``True`` if the server appears to be alive, ``False`` otherwise.
     """
     stripped = raw.strip()
     if not stripped:
+        return False
+
+    # Error strings returned by the PanDA MCP server when its own internal
+    # calls fail (e.g. SSL issues reaching pandaserver.cern.ch).
+    _error_signals = ("Error ", "Error:", "SSLError", "ConnectionError",
+                      "Timeout", "Max retries exceeded", "Exception")
+    if any(stripped.startswith(sig) or sig in stripped for sig in _error_signals):
         return False
 
     # Try JSON first.
@@ -99,6 +111,73 @@ def _parse_alive(raw: str) -> bool:
     return stripped.lower() not in {"false", "0", "no", "down", "dead"}
 
 
+def _diagnose_error(raw: str) -> str | None:
+    """Return a human-readable diagnosis for a known PanDA MCP error string.
+
+    The PanDA MCP server sometimes returns plain-text error messages when
+    its own internal calls fail.  This function maps known error patterns
+    to actionable explanations so the LLM can report them clearly without
+    needing domain knowledge about CERN infrastructure.
+
+    Args:
+        raw: Raw error text returned by the upstream MCP tool.
+
+    Returns:
+        A human-readable explanation string, or ``None`` if the error is
+        not recognised.
+    """
+    r = raw.lower()
+
+    # SSL error on port 25443 — the PanDA MCP server cannot reach
+    # pandaserver.cern.ch:25443 due to a certificate issue on its side.
+    if ("ssl" in r or "pem lib" in r) and "25443" in raw:
+        return (
+            "The PanDA MCP server at aipanda120.cern.ch was reached "
+            "successfully, but it encountered an SSL certificate error "
+            "when calling the backend PanDA server at "
+            "pandaserver.cern.ch:25443. This is a server-side issue — "
+            "the PanDA MCP server's own TLS configuration or certificate "
+            "is misconfigured. Contact the PanDA MCP server administrators."
+        )
+
+    # Generic SSL error not on port 25443 — could be Bamboo-side CA issue.
+    if "ssl" in r or "certificate verify failed" in r or "pem lib" in r:
+        return (
+            "An SSL/TLS certificate error occurred. If this is a new "
+            "Bamboo deployment, ensure the CERN Grid CA and CERN Root CA 2 "
+            "are appended to the certifi bundle in the virtualenv, or set "
+            "SSL_CERT_FILE to a CA bundle that includes the CERN CAs. "
+            "See the Bamboo question cheatsheet for setup instructions."
+        )
+
+    # Connection refused or timeout — MCP server unreachable.
+    if "connectionrefused" in r.replace(" ", "") or "max retries exceeded" in r:
+        return (
+            "The PanDA MCP server could not be reached. "
+            "Check that PANDA_MCP_BASE_URL is correct and that the server "
+            "at aipanda120.cern.ch:8443 is running. "
+            "You must be on the CERN network or connected via VPN (e.g. eduVPN)."
+        )
+
+    # Timeout.
+    if "timeout" in r or "timed out" in r:
+        return (
+            "The connection to the PanDA MCP server timed out. "
+            "Check your network connectivity to aipanda120.cern.ch and "
+            "that you are on the CERN network or connected via VPN."
+        )
+
+    # Authentication / token error.
+    if "401" in raw or "unauthorized" in r or "token" in r and "invalid" in r:
+        return (
+            "Authentication failed. The OIDC token may be expired or invalid. "
+            "Re-run `uvx --from panda-mcp-client get-panda-token` to obtain "
+            "a fresh token, which will be saved to ~/.panda_id_token."
+        )
+
+    return None
+
+
 class PandaServerHealthTool:
     """MCP tool for checking PanDA server liveness via the PanDA MCP server."""
 
@@ -117,7 +196,7 @@ class PandaServerHealthTool:
     async def call(self, arguments: dict[str, Any]) -> list[Any]:
         """Check PanDA server liveness and return structured evidence.
 
-        Calls the ``is_alive`` tool on the ``"panda"`` MCP server registered
+        Calls the ``system_is_alive`` tool on the ``"panda"`` MCP server registered
         with the process-wide ``MCPCaller``.  The result is a one-element
         ``list[MCPContent]`` whose ``text`` field contains a JSON-serialised
         evidence dict conforming to the Bamboo narrow-waist contract.
@@ -128,8 +207,9 @@ class PandaServerHealthTool:
 
         Returns:
             One-element MCP content list containing the JSON-serialised
-            evidence dict with keys ``is_alive``, ``raw_response``, and
-            optionally ``error``.
+            evidence dict with keys ``is_alive``, ``raw_response``,
+            ``error_explanation`` (human-readable diagnosis when not alive),
+            and optionally ``error``.
         """
         # Deferred imports — bamboo-core must not be imported at module level.
         from bamboo.tools._mcp_caller import get_mcp_caller  # type: ignore[import-untyped]
@@ -157,16 +237,28 @@ class PandaServerHealthTool:
 
         raw: str = result["text"] or ""
         is_alive = _parse_alive(raw)
+        error_explanation: str | None = None if is_alive else _diagnose_error(raw)
+
         evidence = {
             "is_alive": is_alive,
             "raw_response": raw[:500],
             "error": None,
+            "error_explanation": error_explanation,
         }
 
         if is_alive:
             summary = "The PanDA server is alive and responding."
         else:
-            summary = f"The PanDA server does not appear to be alive. Response: {raw[:200]}"
+            base = (
+                f"The PanDA MCP server was reached but reported an error: {raw[:200]}"
+                if raw and len(raw) > 10
+                else f"The PanDA server does not appear to be alive. Response: {raw[:200]}"
+            )
+            summary = (
+                f"{base}\n\n{error_explanation}"
+                if error_explanation
+                else base
+            )
 
         return text_content(json.dumps({"evidence": evidence, "text": summary}))
 

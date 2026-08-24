@@ -1,19 +1,30 @@
-# Bamboo
+# Bamboo MCP
 
-**Bamboo** is a lightweight MCP-based runtime with a plugin architecture for
+**Bamboo MCP** is a lightweight MCP-based runtime with a plugin architecture for
 AI-assisted scientific tools, targeting PanDA/ATLAS workflows, ePIC/EIC
 experiment operations, and CGSim distributed computing simulation.
 
 LLMs are used for *summarisation and explanation*, not as sources of truth.
 Structured evidence is always returned alongside natural-language answers.
 
-> **Status (May 2026):** core infrastructure is stable. The ATLAS plugin
-> includes `cric_query` for natural-language queries against the CRIC Computing
-> Resource Information Catalogue. The AskCGSim plugin provides documentation
-> search (RAG + BM25) and `cgsim.sim_query` for natural-language queries
-> against the CGSim simulation output SQLite database. The current focus is
-> multi-experiment support and orchestration using tool families and planning
-> for complex multi-step prompts.
+> **Status (August 2026):** core infrastructure is stable; latest release
+> **v1.0.8**. The newest addition is `atlas.core_dump_analysis`, which runs gdb
+> against a failed ATLAS job's core dump inside the matching release container
+> and reports what the payload was actually doing when it was killed — the
+> question log analysis structurally cannot answer, since a looping-job kill
+> happens precisely because the payload stopped producing output.
+>
+> Earlier additions include a multi-step AI Agent (`scripts/bamboo_agent.py`)
+> for complex multi-hop queries,
+> full OpenSearch self-observability — Bamboo logs every prompt/response turn and
+> can query its own logs for FAQ analysis, session replay, tool-usage analytics,
+> and per-model token cost breakdowns. Users can rate responses (1–5 stars) from
+> both the TUI (`/rate N`) and Streamlit (star buttons). LaTeX formulas render
+> natively in Streamlit. Slash commands (`/faq`, `/rates`, `/script`, `/rate`)
+> are available in both interfaces. The `code_query` developer tool fetches and
+> analyses source files from any GitHub repository (`BAMBOO_CODE_QUERY_REPO`);
+> the `cric_query` tool answers natural-language questions about ATLAS queue and
+> site configuration; `cgsim.sim_query` queries CGSim simulation output.
 
 ---
 
@@ -161,6 +172,18 @@ python interfaces/textual/chat.py --transport http
 See [`docs/http-server.md`](docs/http-server.md) for auth, firewall, and
 persistent-mode configuration.
 
+**AI Agent (multi-step reasoning, requires HTTP server):**
+
+```bash
+python scripts/bamboo_agent.py \
+    --transport http \
+    --http-url http://localhost:8000/mcp \
+    --question "Which sites had the highest pilot failure rate today?" \
+    --verbose
+```
+
+See [`docs/agent.md`](docs/agent.md) for options, tuning, and testing instructions.
+
 **Running in AskCGSim mode:**
 
 ```bash
@@ -183,6 +206,10 @@ Type any question and press Enter.
 | `/help` | Show all commands |
 | `/task <id>` | Shorthand for "summarise task \<id\>" |
 | `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
+| `/faq [today\|week\|month]` | Most frequently asked questions from prompt logs (default: all time) |
+| `/rates [today\|week\|month]` | Rated responses as a markdown table (default: all time) |
+| `/rate <1-5>` | Rate the last response (1 = poor 🔴, 5 = excellent 💚) |
+| `/script [filename]` | Write code block(s) from the last response to a local file |
 | `/tracing` | Show timing and trace spans for the last request |
 | `/costs` | Show estimated LLM token cost for the last request |
 | `/json` | Show raw BigPanDA JSON for the last query |
@@ -192,6 +219,7 @@ Type any question and press Enter.
 | `/debug on\|off` | Toggle verbose tool call output |
 | `/tools` | List tools registered on the server |
 | `/links [N]` | List links from the last response; `/links N` opens link N in browser |
+| `/superuser <pw>` | Unlock developer mode (requires `BAMBOO_SUPERUSER_PASSWORD`) |
 | `/clear` | Clear transcript, context memory, and HTTP cache |
 | `/exit` | Quit |
 
@@ -202,6 +230,50 @@ See [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) for ready-to-pa
 
 ---
 
+## Streamlit slash commands
+
+All slash commands are available in the Streamlit chat input box too:
+
+| Command | What it does |
+|---|---|
+| `/help` or `/?` | Show available commands inline |
+| `/faq [today\|week\|month]` | Most frequently asked questions from prompt logs |
+| `/rates [today\|week\|month]` | Rated responses as a markdown table |
+| `/rate <1-5>` | Rate the last response |
+| `/script` | Show instructions for downloading code blocks |
+| `/task <id>` | Shorthand for "summarise task \<id\>" |
+| `/job <id>` | Shorthand for "analyse failure of job \<id\>" |
+
+The Streamlit interface also shows **⬇ Download** button(s) automatically below
+any response that contains a fenced code block, and **star rating buttons**
+(🔴 1 – 💚 5) after every response. No slash command is needed for either.
+
+---
+
+## Self-observability
+
+Bamboo logs every prompt/response turn to an OpenSearch index
+(`bamboomcp-promptlog-YYYY.MM.DD`). The following questions are answered
+directly from the prompt log without touching PanDA or documentation tools:
+
+- "How many turns have I had today?"
+- "What are the most frequently asked questions?" → `/faq`
+- "Show all rated responses this week" → `/rates week`
+- "Which tools were used most often today?"
+- "Show me the full response for doc id `<id>`"
+- "What is the average rating per model?"
+
+Ratings (1–5 stars) are stored on each logged document and queryable via
+`opensearch_promptlog_query`. See [`docs/opensearch.md`](docs/opensearch.md)
+for the full schema, DSL query examples, and architecture diagram.
+
+The `raw_question` field stores the user's original question as typed — use
+`raw_question.keyword` for accurate frequency aggregations (FAQ analysis).
+The `user_prompt` field stores the full synthesis prompt (question + evidence
+context) and is unsuitable for frequency analysis.
+
+---
+
 ## Key ideas
 
 - **Tool-first** — tools are authoritative; LLMs only summarise their output
@@ -209,6 +281,7 @@ See [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) for ready-to-pa
 - **Narrow waist** — every tool returns `list[MCPContent]`; the MCP wire format is JSON-RPC 2.0
 - **Context memory** — multi-turn chat history is maintained in the client and threaded into every LLM call
 - **Configurable routing** — `bamboo_answer` uses deterministic fast-path routing by default; set `BAMBOO_FAST_PATH=0` to route all questions through the LLM planner (recommended for CGSim)
+- **Superuser / developer mode** — set `BAMBOO_SUPERUSER_PASSWORD` to enable a password-protected developer tier in both UIs; unlocks `code_query` and future developer tools
 
 ---
 
@@ -243,6 +316,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/developer.md`](docs/developer.md) | Full setup, editable installs, testing, linting |
 | [`docs/http-server.md`](docs/http-server.md) | Running the HTTP server for shared/testbed deployments |
 | [`docs/mcp.md`](docs/mcp.md) | MCP protocol, tool contracts, LLM roles, orchestration |
+| [`docs/architecture.md`](docs/architecture.md) | Process boundary, MCP wire, `bamboo_answer` routing flow |
 | [`docs/interfaces.md`](docs/interfaces.md) | TUI, Streamlit UI, HTTP transport, context memory |
 | [`docs/plugins.md`](docs/plugins.md) | Writing and registering plugins |
 | [`docs/jobs-database.md`](docs/jobs-database.md) | Live PanDA jobs DB queries — schema, examples, guard rules, routing |
@@ -251,10 +325,14 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 | [`docs/harvester-workers.md`](docs/harvester-workers.md) | Harvester pilot/worker counts — API, evidence structure, routing, time windows |
 | [`docs/rag.md`](docs/rag.md) | RAG pipeline (ChromaDB + BM25) |
 | [`docs/tracing.md`](docs/tracing.md) | Structured tracing and OpenTelemetry |
-| [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — harvester timeseries, prompt logging, GDPR pseudonymisation |
+| [`docs/opensearch.md`](docs/opensearch.md) | OpenSearch integration — prompt logging, read queries, self-observability, rating, GDPR pseudonymisation |
 | [`docs/security.md`](docs/security.md) | Authentication and token management |
-| [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions for every tool and routing path |
+| [`docs/agent.md`](docs/agent.md) | AI Agent — multi-step reasoning loop, CLI options, testing, tuning |
+| [`docs/question-cheatsheet.md`](docs/question-cheatsheet.md) | Ready-to-paste test questions, including code review question patterns and `code_query` examples |
 | [`docs/tools/README-mcp_tools.md`](docs/tools/README-mcp_tools.md) | MCP tools reference — one document per tool, with inputs, outputs, routing, and design notes |
+| [`docs/tools/code_query.md`](docs/tools/code_query.md) | `code_query` tool reference — evidence pipeline, routing, LLM quality guidance, example sessions |
+| [`docs/tools/core_dump_analysis.md`](docs/tools/core_dump_analysis.md) | `atlas.core_dump_analysis` tool reference — execution model, synthesis boundary, routing rules 1c/1d |
+| [`scripts/README-core_dump_analysis.md`](scripts/README-core_dump_analysis.md) | `analyze_core_dump.py` CLI — gdb invocation, executable resolution, LLM backends |
 
 ---
 
@@ -273,6 +351,7 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 |---|---|---|
 | `atlas.task_status` | `panda_task_status` | Task metadata and job-level detail |
 | `atlas.log_analysis` | `panda_log_analysis` | Pilot/payload log download and failure classification |
+| `atlas.core_dump_analysis` | `atlas.core_dump_analysis` | gdb analysis of a failed job's core dump, in the matching ATLAS release container |
 | `atlas.doc_search` | `panda_doc_search` | Vector similarity search over ATLAS documentation |
 | `atlas.doc_bm25` | `panda_doc_bm25` | BM25 keyword search over ATLAS documentation |
 | `atlas.jobs_query` | `panda_jobs_query` | Natural language → SQL against the ingestion DuckDB |
@@ -284,6 +363,12 @@ npx @modelcontextprotocol/inspector --url http://localhost:8000/mcp
 
 Set `BAMBOO_CHROMA_COLLECTION=atlas_docs` when running the ATLAS deployment to
 point the doc tools at the ATLAS vector store.
+
+### Built-in developer tools (all experiments)
+
+| Tool name | Description |
+|---|---|
+| `code_query` | **Superuser.** Fetches any source file from a configurable GitHub repository for code review, algorithm explanation, and Mermaid diagram generation. Default repo: `PanDAWMS/pilot3`. Configured via `BAMBOO_CODE_QUERY_REPO` and `BAMBOO_CODE_QUERY_BRANCH`. |
 
 ### ePIC plugin tools
 

@@ -1,34 +1,30 @@
 """ePIC vector-similarity documentation search tool.
 
 Thin subclass of :class:`bamboo.tools.doc_rag.PandaDocSearchTool` that
-overrides the tool description (so the planner routes ePIC documentation
-questions correctly) and the ChromaDB collection name default.
+overrides the tool description so the planner routes ePIC documentation
+questions correctly, and sets :attr:`_default_topic` to ``"epic"`` so
+queries go to the ePIC collection by default.
 
-All query logic, result formatting, and caching behaviour are inherited
-unchanged from the core tool.
+All query logic, result formatting, blue/green slot resolution, and caching
+behaviour are inherited unchanged from the core tool.
 
 Configuration
 -------------
 ``BAMBOO_CHROMA_PATH``
     Path to the ChromaDB persistent directory.  Default: ``./chroma_db``
 
-``BAMBOO_CHROMA_COLLECTION``
-    ChromaDB collection name to query.  Default: ``epic_docs``
+``BAMBOO_CHROMA_COLLECTION_MAP``
+    JSON object mapping topic keys to logical collection names.  The key
+    ``"epic"`` maps to ``epic_docs`` by default.
 
-    Override this env var to use a different collection name.  The default
-    is intentionally different from the core tool (``bamboo_docs``) so that
-    ATLAS and ePIC collections can coexist in the same ChromaDB directory.
+``BAMBOO_CHROMA_COLLECTION``
+    Scalar fallback used when the map is absent or has no ``"epic"`` entry.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from bamboo.tools.doc_rag import PandaDocSearchTool  # type: ignore[import-untyped]
-from bamboo.tools._sqlite_compat import ensure_sqlite_compat  # type: ignore[import-untyped]
-
-_DEFAULT_CHROMA_PATH = "./chroma_db"
-_EPIC_DEFAULT_COLLECTION = "epic_docs"
 
 
 class EpicDocSearchTool(PandaDocSearchTool):
@@ -36,8 +32,10 @@ class EpicDocSearchTool(PandaDocSearchTool):
 
     Inherits all query, caching, and formatting logic from
     :class:`~bamboo.tools.doc_rag.PandaDocSearchTool`.  Only the MCP tool
-    description and the default ChromaDB collection name differ.
+    description and the default topic differ.
     """
+
+    _default_topic: str = "epic"
 
     @staticmethod
     def get_definition() -> dict[str, Any]:
@@ -68,60 +66,22 @@ class EpicDocSearchTool(PandaDocSearchTool):
                         "description": "Number of results to return (default: 5).",
                         "default": 5,
                     },
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "Documentation collection to search.  One of: "
+                            '"panda", "atlas", "bamboo", '
+                            '"rucio", "root", "epic" (default), "cgsim".  '
+                            "Controls which ChromaDB collection is queried via "
+                            "BAMBOO_CHROMA_COLLECTION_MAP."
+                        ),
+                        "default": "epic",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
             },
         }
-
-    def _ensure_collection(self) -> str | None:
-        """Initialise the ChromaDB client against the ePIC collection.
-
-        Reads ``BAMBOO_CHROMA_PATH`` and ``BAMBOO_CHROMA_COLLECTION`` from the
-        environment, defaulting the collection name to ``epic_docs`` rather
-        than the core tool's ``bamboo_docs``.
-
-        Returns:
-            ``None`` on success, or a human-readable error string on failure.
-        """
-        if self._collection is not None:
-            return None
-
-        if not ensure_sqlite_compat():
-            return (
-                "System SQLite is too old for ChromaDB (need >= 3.35.0) and "
-                "pysqlite3-binary is not installed.  "
-                "Run: pip install pysqlite3-binary"
-            )
-        try:
-            import chromadb  # type: ignore[import-untyped]
-        except ImportError:
-            return (
-                "ChromaDB is not installed. "
-                "Install it with: pip install -r requirements-rag.txt"
-            )
-
-        chroma_path: str = os.getenv("BAMBOO_CHROMA_PATH", _DEFAULT_CHROMA_PATH)
-        collection_name: str = os.getenv(
-            "BAMBOO_CHROMA_COLLECTION", _EPIC_DEFAULT_COLLECTION
-        )
-
-        if not os.path.exists(chroma_path):
-            return (
-                f"ChromaDB path not found: '{chroma_path}'. "
-                "Set BAMBOO_CHROMA_PATH to the directory created by the "
-                "ingestion script, or run the ingestion script first."
-            )
-
-        try:
-            self._client = chromadb.PersistentClient(path=chroma_path)
-            self._collection = self._client.get_collection(name=collection_name)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            self._client = None
-            self._collection = None
-            return f"Failed to connect to ChromaDB collection '{collection_name}': {exc}"
-
-        return None
 
 
 epic_doc_search_tool = EpicDocSearchTool()

@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from bamboo.llm.runtime import get_llm_manager, get_llm_selector
 from bamboo.llm.types import GenerateParams, Message
 from bamboo.tools.base import MCPContent, text_content
-from bamboo.tools.loader import list_tool_entry_points, find_tool_by_name
+from bamboo.tools._tool_names import wire_tool_definitions
 from bamboo.tracing import EVENT_LLM_CALL, span
 
 
@@ -194,29 +194,74 @@ def _build_atlas_planner_prompt(schema_compact: str) -> str:
         "(hints.job_id present + failure keywords): "
         "use panda_log_analysis. route=FAST_PATH.\n"
         "- If panda_log_analysis has already been called and returned "
-        "failure_type='pilot_monitoring_error', AND the user wants to understand "
-        "the pilot code or why the exception was raised (e.g. 'why did the pilot "
-        "code fail', 'show me the source', 'what is wrong with the pilot', "
-        "'can this be fixed'): use pilot_source_analysis, passing job_id and "
-        "the log_excerpt from the prior evidence. route=PLAN.\n"
+        "traceback_available=true with a non-null deepest_pilot_frame, AND the "
+        "user wants to understand the pilot code or why the exception was raised "
+        "(e.g. 'why did the pilot code fail', 'show me the source', 'what is "
+        "wrong with the pilot', 'can this be fixed'): use atlas.pilot_source_analysis, "
+        "passing job_id, the log_excerpt and the pilot_version from the prior "
+        "evidence. route=PLAN.\n"
+        "- If the question asks what a job was actually doing when it was "
+        "killed or stalled, or explicitly asks for a core dump, gdb, or a "
+        "backtrace (e.g. 'analyse the core dump of job 123', 'what was job 123 "
+        "stuck on', 'why did job 123 hang'), and a job ID is present: "
+        "use atlas.core_dump_analysis with action='start'. Pass mode='hang' "
+        "when the job was killed as a looping job (pilot error code 1150), "
+        "mode='crash' for a segfault or abort, and mode='auto' when unsure. "
+        "This tool is ATLAS-only and takes about a minute; never propose it "
+        "for ePIC or any other plugin. route=FAST_PATH.\n"
         "- If the question asks about a job (hints.job_id present, no failure keywords): "
         "use panda_job_status. route=FAST_PATH.\n"
         "- If the question asks about BOTH pilot counts/status AND job counts/failures "
-        "at a site (e.g. 'pilot and job failure rates', 'pilots and jobs at BNL', "
-        "'site health'): use panda_harvester_workers AND panda_jobs_query together. "
+        "at a site (e.g. 'pilots and jobs at BNL', 'site health'): "
+        "use panda_harvester_workers AND panda_jobs_query together. "
         "Pass site= to panda_harvester_workers and queue= to panda_jobs_query. "
         "route=FAST_PATH.\n"
-        "- If the question asks about live pilot counts, pilot status, or Harvester "
-        "worker activity at a site (e.g. 'how many pilots', 'pilot failure rate', "
-        "'pilots running at X'): use panda_harvester_workers. route=FAST_PATH.\n"
+        "- If the question asks about pilot failure rates, failure percentages, or "
+        "which sites had high failure rates over a time window "
+        "(e.g. 'which sites had pilot failures above 20% today', "
+        "'pilot failure rate at BNL this week', 'sites with most failed pilots'): "
+        "use atlas.harvester_timeseries with status='failed'. "
+        "Pass site= if a single site is mentioned; omit site= for cross-site queries. "
+        "Always express from_dt/to_dt as absolute ISO-8601 strings "
+        "(e.g. '2026-06-12T00:00:00'), never as relative expressions like 'now-6h'. "
+        "route=FAST_PATH.\n"
+        "- If the question asks about live pilot counts or Harvester worker status "
+        "right now (e.g. 'how many pilots are running', 'how many pilots submitted', "
+        "'pilot counts at X', 'pilots running at X'): "
+        "use panda_harvester_workers. "
+        "Always express from_dt/to_dt as absolute ISO-8601 strings "
+        "(e.g. '2026-06-12T00:00:00'), never as relative expressions like 'now-6h'. "
+        "route=FAST_PATH.\n"
         "- If the question asks about live job counts, job failures, job status, "
         "or error rates at a site (e.g. 'how many jobs failed', 'job failure rate', "
         "'top errors at X'): use panda_jobs_query. route=FAST_PATH.\n"
+        "- If the question asks about job performance metrics from the "
+        "historical OpenSearch index — stage-in time, stage-out time, wall-clock "
+        "time, queue wait time, payload execution time, pilot setup time, "
+        "memory usage (RSS/PSS/vmem/swap), memory-leak rate/diagnostics, "
+        "CPU efficiency, HS06 accounting, I/O throughput or data volume, "
+        "pilot/execution/DDM error codes, task campaign context, carbon "
+        "footprint, software environment (ATLAS release, cmtconfig, "
+        "lsetup time, OS version, Python version), or "
+        "any pilottiming sub-field "
+        "(e.g. 'average stage-in time at BNL', 'maximum queue time for failed jobs', "
+        "'total wall-clock time at CERN today', 'average RSS memory at BNL', "
+        "'CPU efficiency at IN2P3', 'total HS06-seconds at TRIUMF', "
+        "'average write throughput at CERN', 'CO2 footprint per job', "
+        "'average memory leak rate at CERN', 'which Python versions are used', "
+        "'show me all Python versions used by jobs this week', "
+        "'OS version breakdown at BNL', 'average lsetup time at CERN'): "
+        "use atlas.job_stats. Pass site= if a site is mentioned. route=FAST_PATH.\n"
         "- If the question asks about a site's queue configuration: "
         "use panda_queue_info. route=FAST_PATH.\n"
         "- If the question asks whether the PanDA server is alive, OK, running, or "
         "healthy (e.g. 'is PanDA alive?', 'is the PanDA server OK?', 'is PanDA up?', "
         "'PanDA server status'): use panda_server_health. route=FAST_PATH.\n"
+        "- code_query requires an EXPLICIT source file path in the question "
+        "(e.g. 'pilot/util/processes.py', 'src/foo.py'). "
+        "NEVER use code_query for conceptual questions like 'how does X work', "
+        "'what is X', 'explain X', or 'tell me about X'. "
+        "Those must use panda_doc_search instead.\n"
         "- For ALL other questions (general knowledge, concepts, how-to, 'what is'): "
         "use panda_doc_search AND panda_doc_bm25 together. route=RETRIEVE. "
         "Never answer general questions from the LLM alone — always retrieve first.\n\n"
@@ -251,6 +296,8 @@ def _build_cgsim_planner_prompt(schema_compact: str) -> str:
         "simulation database — use cgsim.sim_query. route=FAST_PATH. "
         "This includes generic questions like 'show me all jobs', 'list all job IDs', "
         "'what happened during the simulation', 'which site was busiest'.\n"
+        "  IMPORTANT: pass the user's question to cgsim.sim_query VERBATIM — do not "
+        "expand, rephrase, or add detail. The tool handles its own SQL generation.\n"
         "- If the question asks about how CGSim or SimGrid works, plugin APIs, "
         "configuration options, or concepts (e.g. 'what is a netzone?', "
         "'how do I write a plugin?', 'what does assignJob do?'): "
@@ -373,31 +420,74 @@ def _collect_tool_catalog(namespaces: list[str] | None = None) -> list[dict[str,
         "bamboo_health",
     })
 
-    # 1) Statically-registered core tools — always included, except internals.
+    # Core tools that belong to the PanDA/ATLAS domain.  When a non-PanDA
+    # namespace is active (e.g. "cgsim") these are excluded from the catalog
+    # so the LLM planner cannot accidentally pick them.
+    _PANDA_CORE_TOOLS: frozenset[str] = frozenset({
+        "panda_task_status",
+        "panda_job_status",
+        "panda_log_analysis",
+        "panda_jobs_query",
+        "panda_harvester_workers",
+        "panda_server_health",
+        "panda_doc_search",
+        "panda_doc_bm25",
+        "panda_queue_info",
+        "cric_query",
+    })
+    # pilot_source_analysis is deliberately absent: this set filters the
+    # built-in TOOLS dict, and pilot source analysis is a plugin entry point
+    # (wire name atlas.pilot_source_analysis), so the namespace filter below
+    # already excludes it for non-PanDA plugins.  Listing it here matched
+    # nothing.
+
+    # Determine whether to exclude PanDA core tools.
+    # "atlas" and "epic" are PanDA-family plugins; all others are not.
+    _PANDA_PLUGIN_NAMESPACES: frozenset[str] = frozenset({"atlas", "epic", ""})
+    _exclude_panda = bool(namespaces) and not any(
+        ns in _PANDA_PLUGIN_NAMESPACES for ns in namespaces
+    )
+
+    # 1) Statically-registered core tools — always included, except internals
+    # and PanDA tools when a non-PanDA namespace is active.
     try:
         from bamboo.core import TOOLS  # pylint: disable=import-outside-toplevel
         for tool_name, tool_obj in TOOLS.items():
-            if tool_name not in _INTERNAL_TOOLS:
-                _add(tool_obj, fallback_name=tool_name)
+            if tool_name in _INTERNAL_TOOLS:
+                continue
+            if _exclude_panda and tool_name in _PANDA_CORE_TOOLS:
+                continue
+            _add(tool_obj, fallback_name=tool_name)
     except Exception:  # pylint: disable=broad-exception-caught
         pass
 
-    # 2) Plugin tools discovered via entry points.
-    for ep in list_tool_entry_points():
-        name = ep.get("name", "")
+    # 2) Plugin tools discovered via entry points, named as clients see them.
+    #
+    # wire_tool_definitions() applies bamboo.core's own registration rules, so
+    # a name in this catalog is a name the planner can actually propose.  The
+    # previous loop passed the entry-point key only as a *fallback* and let
+    # get_definition()["name"] win, which advertised internal names the server
+    # does not expose: the catalog said "core_dump_analysis" while the routing
+    # guidance above says "atlas.core_dump_analysis" and the hard rule says to
+    # propose only catalogued tools.  Faced with that contradiction the planner
+    # dropped the guidance and fell back to panda_log_analysis, so an explicit
+    # request to analyse a core dump was answered with a log analysis.
+    for defn in wire_tool_definitions():
+        name = str(defn.get("name") or "")
         if not name:
             continue
         if namespaces:
             ns = name.split(".", 1)[0] if "." in name else ""
             if ns not in namespaces:
                 continue
-        if "." in name:
-            ns, _, tool_name = name.partition(".")
-            resolved = find_tool_by_name(tool_name, namespace=ns)
-        else:
-            resolved = find_tool_by_name(name)
-        if resolved:
-            _add(resolved.obj, fallback_name=name)
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "description": str(defn.get("description", "")),
+            "inputSchema": defn.get("inputSchema", {}),
+        })
 
     return out
 
@@ -563,7 +653,7 @@ class BambooPlannerTool:
         chat_messages = coerce_messages(messages_raw) if messages_raw else []
         history = _extract_history(chat_messages, question) if chat_messages else []
 
-        return await execute_plan(plan, question, history)
+        return await execute_plan(plan, question, history, plugin_id=plugin_id or "atlas")
 
 
 async def _call_default_llm(messages: list[Message], temperature: float, max_tokens: int) -> str:

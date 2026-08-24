@@ -21,6 +21,7 @@ import pytest
 import bamboo.tools.bamboo_executor as ex_mod
 from bamboo.tools.bamboo_executor import (
     _SYSTEM_GENERIC,
+    _SYSTEM_HARVESTER_TIMESERIES,
     _SYSTEM_JOB,
     _SYSTEM_LOG_ANALYSIS,
     _SYSTEM_RAG,
@@ -170,6 +171,17 @@ class TestPickSynthesisPrompt:
     def test_empty_list_generic(self) -> None:
         """Empty tool list falls back to the generic prompt."""
         assert _pick_synthesis_prompt([]) == _SYSTEM_GENERIC
+
+    def test_harvester_timeseries_prompt(self) -> None:
+        """atlas.harvester_timeseries selects the timeseries synthesis prompt."""
+        assert _pick_synthesis_prompt(["atlas.harvester_timeseries"]) == _SYSTEM_HARVESTER_TIMESERIES
+
+    def test_harvester_timeseries_not_overridden_by_workers(self) -> None:
+        """atlas.harvester_timeseries alone uses timeseries prompt, not workers prompt."""
+        from bamboo.tools.bamboo_executor import _SYSTEM_HARVESTER_WORKERS
+        result = _pick_synthesis_prompt(["atlas.harvester_timeseries"])
+        assert result == _SYSTEM_HARVESTER_TIMESERIES
+        assert result != _SYSTEM_HARVESTER_WORKERS
 
 
 # ---------------------------------------------------------------------------
@@ -384,3 +396,131 @@ async def test_rag_route_uses_documentation_context_prompt():
     system_arg = llm_mock.call_args[0][0]
     assert "documentation" in system_arg.lower() or "retrieved" in system_arg.lower()
     assert result[0]["type"] == "text"
+
+
+# ---------------------------------------------------------------------------
+# execute_plan — automatic topic injection for doc-search tool calls
+# ---------------------------------------------------------------------------
+#
+# The LLM planner's own routing prompt does not know about topic-to-ChromaDB-
+# collection mapping and never supplies a "topic" argument on doc_search /
+# doc_bm25 tool calls it proposes. Previously this didn't matter because
+# _build_deterministic_plan computed and injected topic itself before ever
+# constructing a RETRIEVE plan. Now that unmatched questions defer to the
+# planner (see bamboo_answer.py's _build_deterministic_plan and
+# tests/test_bamboo_answer_rag.py), execute_plan must inject topic itself so
+# planner-issued doc-search calls don't silently fall back to the default
+# ChromaDB collection.
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_injects_missing_topic():
+    """A doc_search call with no topic argument gets one injected."""
+    rag_mock = AsyncMock(return_value=[{"type": "text", "text": "result"}])
+    llm_mock = AsyncMock(return_value="answer")
+    plan = Plan(
+        route=PlanRoute.RETRIEVE,
+        confidence=0.9,
+        tool_calls=[ToolCall(tool="panda_doc_search", arguments={"query": "How does rucio work?"})],
+        reuse_policy=ReusePolicy(),
+        explain="planner-issued rag plan, no topic",
+    )
+    with (
+        patch.dict("bamboo.core.TOOLS",
+                   {"panda_doc_search": _mock_tool("panda_doc_search", rag_mock)}),
+        patch.object(ex_mod, "call_llm", llm_mock),
+    ):
+        await execute_plan(plan, "How does rucio work?", [], plugin_id="atlas")
+    called_args = rag_mock.call_args[0][0]
+    assert called_args.get("topic") == "rucio"
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_preserves_explicit_topic():
+    """A doc_search call that already specifies topic is left untouched."""
+    rag_mock = AsyncMock(return_value=[{"type": "text", "text": "result"}])
+    llm_mock = AsyncMock(return_value="answer")
+    plan = Plan(
+        route=PlanRoute.RETRIEVE,
+        confidence=0.9,
+        tool_calls=[ToolCall(
+            tool="panda_doc_search",
+            arguments={"query": "How does rucio work?", "topic": "bamboo_mcp"},
+        )],
+        reuse_policy=ReusePolicy(),
+        explain="rag plan with explicit topic",
+    )
+    with (
+        patch.dict("bamboo.core.TOOLS",
+                   {"panda_doc_search": _mock_tool("panda_doc_search", rag_mock)}),
+        patch.object(ex_mod, "call_llm", llm_mock),
+    ):
+        await execute_plan(plan, "How does rucio work?", [], plugin_id="atlas")
+    called_args = rag_mock.call_args[0][0]
+    assert called_args.get("topic") == "bamboo_mcp"
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_injects_topic_for_both_rag_tools():
+    """Both doc_search and doc_bm25 in a two-tool plan get the same topic."""
+    search_mock = AsyncMock(return_value=[{"type": "text", "text": "vector result"}])
+    bm25_mock = AsyncMock(return_value=[{"type": "text", "text": "bm25 result"}])
+    llm_mock = AsyncMock(return_value="answer")
+    plan = Plan(
+        route=PlanRoute.RETRIEVE,
+        confidence=0.9,
+        tool_calls=[
+            ToolCall(tool="panda_doc_search", arguments={"query": "What is TFile in ROOT?"}),
+            ToolCall(tool="panda_doc_bm25", arguments={"query": "What is TFile in ROOT?"}),
+        ],
+        reuse_policy=ReusePolicy(),
+        explain="two-tool rag plan, no topic",
+    )
+    with (
+        patch.dict("bamboo.core.TOOLS", {
+            "panda_doc_search": _mock_tool("panda_doc_search", search_mock),
+            "panda_doc_bm25": _mock_tool("panda_doc_bm25", bm25_mock),
+        }),
+        patch.object(ex_mod, "call_llm", llm_mock),
+    ):
+        await execute_plan(plan, "What is TFile in ROOT?", [], plugin_id="atlas")
+    assert search_mock.call_args[0][0].get("topic") == "root"
+    assert bm25_mock.call_args[0][0].get("topic") == "root"
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_does_not_inject_topic_for_non_doc_tools():
+    """A non-doc-search tool call is not touched by topic injection."""
+    task_mock = AsyncMock(return_value=_evidence_result({"status": "done"}))
+    llm_mock = AsyncMock(return_value="answer")
+    plan = _make_plan("panda_task_status", {"task_id": 555, "query": "q"})
+    with (
+        patch.dict("bamboo.core.TOOLS",
+                   {"panda_task_status": _mock_tool("panda_task_status", task_mock)}),
+        patch.object(ex_mod, "call_llm", llm_mock),
+    ):
+        await execute_plan(plan, "What is task 555 status?", [])
+    called_args = task_mock.call_args[0][0]
+    assert "topic" not in called_args
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_injects_cgsim_topic_for_cgsim_plugin():
+    """cgsim.doc_search calls get topic='cgsim' regardless of question content."""
+    rag_mock = AsyncMock(return_value=[{"type": "text", "text": "result"}])
+    llm_mock = AsyncMock(return_value="answer")
+    plan = Plan(
+        route=PlanRoute.RETRIEVE,
+        confidence=0.9,
+        tool_calls=[ToolCall(tool="cgsim.doc_search", arguments={"query": "what is a netzone?"})],
+        reuse_policy=ReusePolicy(),
+        explain="cgsim rag plan, no topic",
+    )
+    with (
+        patch.dict("bamboo.core.TOOLS",
+                   {"cgsim.doc_search": _mock_tool("cgsim.doc_search", rag_mock)}),
+        patch.object(ex_mod, "call_llm", llm_mock),
+    ):
+        await execute_plan(plan, "what is a netzone?", [], plugin_id="cgsim")
+    called_args = rag_mock.call_args[0][0]
+    assert called_args.get("topic") == "cgsim"

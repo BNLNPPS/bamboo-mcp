@@ -23,6 +23,7 @@ from bamboo.tools.bamboo_answer import (
     _is_contextual_followup,
     _is_implicit_contextual_followup,
     _is_conceptual_question,
+    _is_job_stats_question,
     _is_log_analysis_request,
 )
 from bamboo.tools.bamboo_executor import (
@@ -157,6 +158,151 @@ class TestIsLogAnalysisRequest:
     def test_empty(self) -> None:
         """Empty input returns False."""
         assert _is_log_analysis_request("") is False
+
+
+class TestIsJobStatsQuestion:
+    """Fast-path routing signal detection for ``atlas.job_stats``.
+
+    Covers the memory-leak diagnostics fields (``leak_slope``,
+    ``leak_intersect``, ``leak_chi2``) and the software-environment fields
+    (``lsetup_time``, ``os_version``, ``python_version``) added alongside
+    ``task_container_name`` when Sasha exposed the parsed ``jobmetrics``
+    sub-fields as flat top-level fields.
+    """
+
+    def test_memory_leak_phrase(self) -> None:
+        """The natural phrase 'memory leak' is a signal."""
+        assert _is_job_stats_question("What is the average memory leak rate at CERN today?") is True
+
+    def test_leak_rate_phrase(self) -> None:
+        """The natural phrase 'leak rate' is a signal."""
+        assert _is_job_stats_question("Which site has the highest leak rate today?") is True
+
+    def test_leak_slope_token(self) -> None:
+        """The literal field token 'leak_slope' is a signal."""
+        assert _is_job_stats_question("What is the average leak_slope at BNL?") is True
+
+    def test_leak_intersect_token(self) -> None:
+        """The literal field token 'leak_intersect' is a signal."""
+        assert _is_job_stats_question("Show me leak_intersect for job stats at CERN") is True
+
+    def test_leak_chi2_token(self) -> None:
+        """The literal field token 'leak_chi2' is a signal."""
+        assert _is_job_stats_question("What is the average leak_chi2 today?") is True
+
+    def test_lsetup_time_token(self) -> None:
+        """The literal field token 'lsetup_time' is a signal."""
+        assert _is_job_stats_question("What is the average lsetup_time at IN2P3?") is True
+
+    def test_os_version_token(self) -> None:
+        """The literal field token 'os_version' is a signal."""
+        assert _is_job_stats_question("Break down jobs by os_version at CERN") is True
+
+    def test_python_version_token(self) -> None:
+        """The literal field token 'python_version' is a signal."""
+        assert _is_job_stats_question("Break down jobs by python_version at CERN") is True
+
+    def test_natural_os_version_phrase_not_a_signal(self) -> None:
+        """The natural phrase 'os version' (not the field token) is NOT a
+        signal — deliberately excluded as too ambiguous with generic
+        questions unrelated to job stats, same treatment as atlasrelease."""
+        assert _is_job_stats_question("What OS version does ATLAS require?") is False
+
+    def test_natural_python_version_phrase_not_a_signal(self) -> None:
+        """The natural phrase 'python version' (not the field token) is NOT
+        a signal, for the same ambiguity reason as os_version."""
+        assert _is_job_stats_question("What python version does this tool use?") is False
+
+    def test_unrelated_question_not_a_signal(self) -> None:
+        """A question with no job-stats signal phrase returns False."""
+        assert _is_job_stats_question("What is the weather today?") is False
+
+    def test_python_37_site_question(self) -> None:
+        """'sites ... using python 3.7' is a signal via the version regex.
+
+        Regression test: this phrasing has no "version" word and no
+        "python_version" token, so it matched _is_jobs_db_question (via
+        "sites") before _is_job_stats_question ever had a chance — routing
+        to the jobs/CRIC database-disambiguation prompt, or worse, to
+        panda_jobs_query (which has no python_version column), instead of
+        atlas.job_stats. Reported live as: "Which sites are still using
+        python 3.7?" and "Which sites are still running jobs using python
+        3.7?".
+        """
+        assert _is_job_stats_question("Which sites are still using python 3.7?") is True
+
+    def test_python_37_running_jobs_phrase(self) -> None:
+        """The 'running jobs using python 3.7' variant is also a signal."""
+        assert _is_job_stats_question(
+            "Which sites are still running jobs using python 3.7?"
+        ) is True
+
+    def test_python_no_space_version(self) -> None:
+        """'python3.7' with no space is also a signal."""
+        assert _is_job_stats_question("How many jobs used python3.7 at CERN?") is True
+
+    def test_python_bare_major_version(self) -> None:
+        """A bare major version ('python 2', 'python 3') is a signal."""
+        assert _is_job_stats_question("Are any sites still on python 2?") is True
+
+    def test_python_mention_without_version_number_not_a_signal(self) -> None:
+        """A generic Python mention with no version number is NOT a signal
+        via the regex (deliberately left to the LLM planner, same as the
+        plural 'python versions' phrasing)."""
+        assert _is_job_stats_question("How do I write a python script for bamboo?") is False
+
+    def test_el7_shorthand_site_question(self) -> None:
+        """'sites ... on EL7' is a signal via the OS version extraction.
+
+        Regression test: this was broken the same way as the Python
+        version case above — "Which sites are still on EL7?" matched
+        _is_jobs_db_question (via "sites") before this function recognised
+        "EL7" as an OS version mention, routing to panda_jobs_query
+        (no os_version column) instead of atlas.job_stats.
+        """
+        assert _is_job_stats_question("Which sites are still on EL7?") is True
+
+    def test_el9_shorthand_is_a_signal(self) -> None:
+        """'EL9' shorthand is a signal."""
+        assert _is_job_stats_question(
+            "What is the average CPU efficiency for jobs on EL9 at CERN today?"
+        ) is True
+
+    def test_os_version_word_phrase_is_a_signal(self) -> None:
+        """'os version 9.7' (explicit number) is a signal."""
+        assert _is_job_stats_question(
+            "Break down jobs by site for os version 9.7 today."
+        ) is True
+
+    def test_os_mention_without_version_number_not_a_signal(self) -> None:
+        """A generic 'os' mention with no version number is NOT a signal."""
+        assert _is_job_stats_question("What OS does the pilot run on?") is False
+
+    def test_queue_time_phrase(self) -> None:
+        """'queue time' is a signal (pre-existing)."""
+        assert _is_job_stats_question("What is the average queue time at CERN?") is True
+
+    def test_queuing_time_phrase(self) -> None:
+        """'queuing time' (-ing form) is a signal.
+
+        Regression test: this phrasing does not contain the substring
+        'queue time' or 'queuetime', so it previously fell through every
+        fast-path signal set to the deterministic RAG-retrieval fallback in
+        _build_deterministic_plan, which never returns None to defer to the
+        LLM planner. Reported live as: "What was the average queuing time
+        at CERN yesterday?" answered with an RAG "excerpts do not contain
+        this information" response instead of routing to atlas.job_stats.
+        """
+        assert _is_job_stats_question("What was the average queuing time at CERN yesterday?") is True
+
+    def test_queueing_time_phrase(self) -> None:
+        """'queueing time' (British -eing spelling) is a signal."""
+        assert _is_job_stats_question("What is the average queueing time at BNL?") is True
+
+    def test_queue_wait_time_phrase(self) -> None:
+        """'queue wait time' (the exact phrase used in planner.py's own
+        routing examples) is a signal."""
+        assert _is_job_stats_question("What is the maximum queue wait time for failed jobs?") is True
 
 
 class TestCompactJson:
@@ -520,7 +666,14 @@ class TestContextualFollowupRouting:
 
     @pytest.mark.asyncio
     async def test_genuine_doc_question_still_routes_to_rag(self) -> None:
-        """A question with no back-reference and no ID still goes to RAG."""
+        """A question with no back-reference and no ID defers to the LLM
+        planner, which is itself capable of choosing RAG tools.
+
+        Since the "always build a deterministic RAG plan" fallback in
+        _build_deterministic_plan was removed (see test_bamboo_answer_rag.py
+        for the rationale), this now asserts that _route() defers to
+        bamboo_plan_tool rather than calling execute_plan directly.
+        """
         import bamboo.tools.bamboo_answer as ba_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
@@ -528,19 +681,19 @@ class TestContextualFollowupRouting:
         guard_mock = AsyncMock(return_value=GuardResult(
             allowed=True, reason="keyword_allow", llm_used=False
         ))
-        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA info."}])
+        plan_mock = AsyncMock(return_value=[{"type": "text", "text": "PanDA info."}])
         tool = BambooAnswerTool()
 
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
-            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "bamboo_plan_tool") as mock_plan_tool,
         ):
+            mock_plan_tool.call = plan_mock
             await tool.call({"question": "How does brokerage work?"})
 
-        execute_mock.assert_awaited_once()
-        plan = execute_mock.call_args[0][0]
-        tool_names = [tc.tool for tc in plan.tool_calls]
-        assert "panda_doc_search" in tool_names or "panda_doc_bm25" in tool_names
+        plan_mock.assert_awaited_once()
+        plan_args = plan_mock.call_args[0][0]
+        assert plan_args["question"] == "How does brokerage work?"
 
 
 # ---------------------------------------------------------------------------
@@ -587,11 +740,18 @@ class TestIsPilotSourceRequest:
 
 
 class TestPilotSourceAnalysisFastPath:
-    """Integration tests: pilot_source_analysis fast-path routing."""
+    """Integration tests: pilot_source_analysis fast-path routing.
+
+    The gate is get_last_traceback_evidence, which fires for any pilot traceback
+    rather than only for failure_type == 'pilot_monitoring_error'.  The fake
+    evidence below keeps the legacy monitoring-error shape because that shape is
+    still accepted (evidence from a deployment predating traceback_available);
+    the modern shape is covered by test_routes_to_pilot_source_for_any_traceback.
+    """
 
     @pytest.mark.asyncio
-    async def test_routes_to_pilot_source_when_prior_monitoring_error(self) -> None:
-        """After pilot_monitoring_error, a source-question routes to pilot_source_analysis.
+    async def test_routes_to_pilot_source_when_prior_traceback(self) -> None:
+        """After a pilot traceback, a source-question routes to pilot_source_analysis.
 
         The question intentionally contains 'why' + job ID so it would normally
         match _is_log_analysis_request (rule 1).  Rule 1b must win because
@@ -617,7 +777,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=fake_evidence),
         ):
             await tool.call({
@@ -627,14 +787,85 @@ class TestPilotSourceAnalysisFastPath:
 
         execute_mock.assert_awaited_once()
         plan = execute_mock.call_args[0][0]
-        assert plan.tool_calls[0].tool == "pilot_source_analysis"
+        assert plan.tool_calls[0].tool == "atlas.pilot_source_analysis"
         args = plan.tool_calls[0].arguments
         assert args["job_id"] == 7099503721
         assert "getpwuid" in args["log_excerpt"]
 
     @pytest.mark.asyncio
+    async def test_routes_to_pilot_source_for_any_traceback(self) -> None:
+        """Any pilot traceback routes to source analysis, not just monitoring errors.
+
+        The gate used to require failure_type == 'pilot_monitoring_error', which
+        made source-level analysis unreachable for every other kind of pilot
+        exception — including the transform-download timeouts that motivated the
+        traceback-first extractor. This evidence carries the modern shape
+        (traceback_available + deepest_pilot_frame) and an unrelated
+        failure_type, so it would not have routed under the old gate.
+        """
+        import bamboo.tools.bamboo_answer as ba_mod
+        from bamboo.tools.bamboo_answer import BambooAnswerTool
+        from bamboo.tools.topic_guard import GuardResult
+
+        fake_evidence = {
+            "failure_type": "transform_download_timeout",
+            "traceback_available": True,
+            "exception_type": "TimeoutError",
+            "deepest_pilot_frame": {
+                "pilot_path": "pilot/util/https.py",
+                "lineno": 2301,
+                "func": "download_file",
+                "is_pilot": True,
+            },
+            "log_excerpt": 'File "/tmp/x/pilot3/pilot/util/https.py", line 2301, '
+                           "in download_file\nTimeoutError: timed out",
+            "piloterrordiag": "Exception caught during payload execution",
+            "pilot_version": "3.14.1.27",
+        }
+
+        guard_mock = AsyncMock(return_value=GuardResult(
+            allowed=True, reason="keyword_allow", llm_used=False
+        ))
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "done"}])
+        tool = BambooAnswerTool()
+
+        with (
+            patch.object(ba_mod, "check_topic", guard_mock),
+            patch.object(ba_mod, "execute_plan", execute_mock),
+            patch.object(ba_mod, "get_last_traceback_evidence",
+                         return_value=fake_evidence),
+        ):
+            await tool.call({
+                "question": "Show me the pilot source for a code-level "
+                            "diagnosis. job 7261310898",
+            })
+
+        execute_mock.assert_awaited_once()
+        args = execute_mock.call_args[0][0].tool_calls[0].arguments
+        assert execute_mock.call_args[0][0].tool_calls[0].tool == "atlas.pilot_source_analysis"
+        # pilot_version must be threaded through so the GitHub fetch can be
+        # pinned to the release the job actually ran (or, for an unreleased
+        # version like this one, to the development branch).
+        assert args["pilot_version"] == "3.14.1.27"
+
+    @pytest.mark.asyncio
+    async def test_offer_wording_routes_to_pilot_source(self) -> None:
+        """Accepting the appended offer by echoing its wording must route correctly.
+
+        panda_log_analysis appends "Ask me to show the pilot source for a
+        code-level diagnosis"; _PILOT_SOURCE_SIGNALS has to cover that phrasing
+        or the offer is a dead end.
+        """
+        from bamboo.tools.bamboo_answer import _is_pilot_source_request
+
+        assert _is_pilot_source_request(
+            "show me the pilot source for a code-level diagnosis"
+        )
+        assert _is_pilot_source_request("can you do a code analysis of that?")
+
+    @pytest.mark.asyncio
     async def test_does_not_route_to_pilot_source_without_prior_evidence(self) -> None:
-        """Without prior pilot_monitoring_error evidence, falls through to panda_job_status."""
+        """Without prior pilot traceback evidence, falls through to panda_job_status."""
         import bamboo.tools.bamboo_answer as ba_mod
         from bamboo.tools.bamboo_answer import BambooAnswerTool
         from bamboo.tools.topic_guard import GuardResult
@@ -648,7 +879,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=None),
         ):
             await tool.call({
@@ -658,7 +889,7 @@ class TestPilotSourceAnalysisFastPath:
         execute_mock.assert_awaited_once()
         plan = execute_mock.call_args[0][0]
         # Should fall through to panda_job_status, not pilot_source_analysis
-        assert plan.tool_calls[0].tool != "pilot_source_analysis"
+        assert plan.tool_calls[0].tool != "atlas.pilot_source_analysis"
 
     @pytest.mark.asyncio
     async def test_log_analysis_question_still_routes_to_log_analysis(self) -> None:
@@ -684,7 +915,7 @@ class TestPilotSourceAnalysisFastPath:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=fake_evidence),
         ):
             await tool.call({
@@ -796,27 +1027,31 @@ class TestConceptualQuestionRouting:
         guard_mock = AsyncMock(return_value=GuardResult(
             allowed=True, reason="keyword_allow", llm_used=False
         ))
-        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "explanation"}])
+        execute_mock = AsyncMock(return_value=[{"type": "text", "text": "should not be called"}])
+        plan_mock = AsyncMock(return_value=[{"type": "text", "text": "explanation"}])
         tool = BambooAnswerTool()
 
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "bamboo_plan_tool") as mock_plan_tool,
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=None),
         ):
+            mock_plan_tool.call = plan_mock
             await tool.call({
                 "question": (
                     "what does it mean that job 7103770630 is looping?"
                 ),
             })
 
-        execute_mock.assert_awaited_once()
-        plan = execute_mock.call_args[0][0]
-        assert plan.tool_calls[0].tool != "panda_job_status", (
-            "A conceptual follow-up must not route to panda_job_status. "
-            f"Got tool={plan.tool_calls[0].tool!r}"
-        )
+        # The deterministic fast-path must never call execute_plan directly
+        # for this question — that would mean panda_job_status (or some
+        # other FAST_PATH tool) ran with the stale job_id as evidence.
+        execute_mock.assert_not_called()
+        plan_mock.assert_awaited_once()
+        plan_args = plan_mock.call_args[0][0]
+        assert plan_args["question"] == "what does it mean that job 7103770630 is looping?"
 
     @pytest.mark.asyncio
     async def test_operational_job_id_question_still_routes_to_job_status(self) -> None:
@@ -838,7 +1073,7 @@ class TestConceptualQuestionRouting:
         with (
             patch.object(ba_mod, "check_topic", guard_mock),
             patch.object(ba_mod, "execute_plan", execute_mock),
-            patch.object(ba_mod, "get_last_pilot_monitoring_evidence",
+            patch.object(ba_mod, "get_last_traceback_evidence",
                          return_value=None),
         ):
             await tool.call({
