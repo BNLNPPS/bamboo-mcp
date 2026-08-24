@@ -52,6 +52,60 @@ All notable changes to Bamboo are documented here.
   `--cleanenv`, so no host environment variable reaches the container.
 
 ### Fixed
+- **Interpreter detection missed everything but a versioned basename**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). The
+  bootstrap matched loaded objects on basename alone, against `libpython*` or a
+  `python3*` prefix. An interpreter packaged as a plain `python` executable
+  matched nothing, so no version was detected, no per-version directory was
+  tried, and the search came back empty on a release that is plainly 3.13.
+
+  Detection now also matches a version carried in the object *path*
+  (`.../lib/python3.13/lib-dynload/...`), and falls back to
+  `_python_version_hint`, which reads the version out of the job directory —
+  the payload's own stdout carries `PYTHONPATH`, and an ATLAS release names
+  `lib/python3.13/site-packages` in it. The hint is a fallback only; what the
+  core says wins.
+
+  `libpython.py` is now accepted alongside `python-gdb.py`, both when searching
+  and when staging: that is the name CPython's source tree uses and therefore
+  the name most helpers are fetched under. The interpreter objects that were
+  recognised are recorded in `gdb_metadata.python_helper.python_objects`, so
+  "nowhere to look" and "found nothing to try for 3.13" are distinguishable in
+  the reason text.
+
+- **The CPython gdb helper override could never be found**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`).
+  `BAMBOO_CORE_DUMP_PYTHON_GDB` was threaded through to the bootstrap as the
+  *host* path it was set to. The bootstrap runs inside the release container,
+  which ALRB launches with `--cleanenv` and `--contain`, binding only `/cvmfs`,
+  the user's home, the job directory at `/srv` and a scratch path. A helper at
+  `/data/bamboo/tools/cpython-gdb/...` does not exist there, so `os.path.isfile`
+  returned False and the search fell through silently — the same class of
+  mistake as assuming the working directory survives `bash -lc`.
+
+  The helper is now staged into the job directory, which the container already
+  sees, and the `/srv` form is passed onward. Staged copies join the worker and
+  runner scripts in the existing cleanup: removed on success, kept on failure.
+
+- **A single helper path was the wrong shape** (same module). The helper reads
+  CPython's own struct layouts, which change between *minor* versions — 3.12's
+  frame representation is not 3.11's — so one fixed file cannot serve a
+  deployment that analyses jobs from several releases.
+  `BAMBOO_CORE_DUMP_PYTHON_GDB` now also accepts a directory of per-version
+  helpers laid out as `<version>/python-gdb.py`. The bootstrap detects the
+  version from the core's own `libpython` object, takes the matching
+  subdirectory (exact `X.Y`, then any `X.Y.*`), and declines rather than loading
+  a mismatched helper: no helper is better than the wrong helper. The detected
+  version is recorded in `gdb_metadata.python_helper` and named in the reason
+  text, so a reader who needs to supply a helper knows which one to fetch.
+
+- **"Not a Python process" was reported for Python processes** (same module).
+  When the helper loaded but `py-bt` produced no frames, `_summarise_python`
+  fell through to its non-Python branch — plainly wrong for an Athena payload.
+  That case now names the loaded helper and the two usual causes: a
+  minor-version mismatch, or a `libpython` with no DWARF for the helper to read
+  interpreter structures from.
+
 - **Synthesis invented operational mechanisms in `next_steps`**
   (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). The job
   7272161793 report advised harvesting output files after a looping-job kill

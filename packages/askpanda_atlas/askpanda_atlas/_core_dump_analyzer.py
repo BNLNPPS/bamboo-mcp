@@ -2398,7 +2398,10 @@ def _build_phase_plan(args: argparse.Namespace) -> list[tuple[str, list[tuple[st
         ("all_threads", [("all_threads", f"thread apply all bt {args.max_frames}")]),
         ("python", [
             ("py_helper", _python_helper_bootstrap_command(
-                getattr(args, "python_gdb_helper", "") or ""
+                getattr(args, "python_gdb_helper", "") or "",
+                _python_version_hint(
+                    Path(args.job_dir) if getattr(args, "job_dir", None) else None
+                ),
             )),
             ("py_bt", "py-bt"),
             ("py_list", "py-list"),
@@ -2791,10 +2794,15 @@ _ERROR_LINE_RE = re.compile(
 PY_HELPER_LOADED_MARKER = "@@BAMBOO_PYHELPER_LOADED@@"
 PY_HELPER_TRIED_MARKER = "@@BAMBOO_PYHELPER_TRIED@@"
 PY_HELPER_VERSION_MARKER = "@@BAMBOO_PYHELPER_VERSION@@"
+PY_HELPER_OBJECTS_MARKER = "@@BAMBOO_PYHELPER_OBJECTS@@"
 
-#: Filename the CPython helper is expected to carry, both as an override target
-#: and inside a directory of per-version helpers.
-PY_HELPER_NAME = "python-gdb.py"
+#: Filenames the CPython helper is shipped under.  ``python-gdb.py`` is the
+#: installed name; ``libpython.py`` is what it is called in the CPython source
+#: tree, which is where most people fetch it from.
+PY_HELPER_NAMES: tuple[str, ...] = ("python-gdb.py", "libpython.py")
+
+#: Preferred name, used when staging a single file.
+PY_HELPER_NAME = PY_HELPER_NAMES[0]
 
 #: Subdirectory of --job-dir into which an override is staged for the container.
 PY_HELPER_STAGE_DIR = ".core_dump_analyzer_pygdb"
@@ -2820,32 +2828,48 @@ import re
 import gdb
 
 override = OVERRIDE
+hint = HINT
+names = NAMES
 
 version = ""
 python_objects = []
 for objfile in gdb.objfiles():
     name = getattr(objfile, "filename", "") or ""
+    if not name:
+        continue
     base = os.path.basename(name)
-    if "libpython" not in base and not base.startswith("python3"):
+    # Match the interpreter however it is packaged: libpython3.13.so.1.0, a
+    # python3.13 binary, or a plain `python` whose path carries the version.
+    if not re.search(r"(?:lib)?python\\d", base) and not re.search(r"/python\\d+\\.\\d+/", name):
         continue
     python_objects.append(name)
     if not version:
-        found = re.search(r"python(\\d+)\\.(\\d+)", base)
+        found = re.search(r"python(\\d+)\\.(\\d+)", base) or re.search(r"python(\\d+)\\.(\\d+)", name)
         if found:
             version = found.group(1) + "." + found.group(2)
+
+if not version:
+    version = hint
 
 candidates = []
 if override:
     if os.path.isdir(override):
         # A directory of per-version helpers.  The helper reads CPython's own
         # struct layouts, which change between minor versions, so the version
-        # detected from the core selects the subdirectory.
+        # decides which one applies.
         if version:
-            candidates.append(os.path.join(override, version, "python-gdb.py"))
-            for entry in sorted(os.listdir(override)):
-                if entry.startswith(version + "."):
-                    candidates.append(os.path.join(override, entry, "python-gdb.py"))
-        candidates.append(os.path.join(override, "python-gdb.py"))
+            entries = []
+            try:
+                entries = sorted(os.listdir(override))
+            except OSError:
+                entries = []
+            exact = [e for e in entries if e == version]
+            patch = [e for e in entries if e.startswith(version + ".")]
+            for entry in exact + sorted(patch, reverse=True):
+                for leaf in names:
+                    candidates.append(os.path.join(override, entry, leaf))
+        for leaf in names:
+            candidates.append(os.path.join(override, leaf))
     else:
         candidates.append(override)
 
@@ -2873,10 +2897,11 @@ for candidate in candidates:
 print("LOADED_MARKER " + loaded)
 print("TRIED_MARKER " + "|".join(tried))
 print("VERSION_MARKER " + version)
+print("OBJECTS_MARKER " + "|".join(python_objects[:8]))
 """
 
 
-def _python_helper_bootstrap_command(override: str = "") -> str:
+def _python_helper_bootstrap_command(override: str = "", hint: str = "") -> str:
     """Build the single gdb command that loads the CPython helper.
 
     Rendered as ``python exec('…')`` so it stays one ``-ex`` argument: the
@@ -2884,7 +2909,9 @@ def _python_helper_bootstrap_command(override: str = "") -> str:
     multi-line ``python … end`` block.
 
     Args:
-        override: Explicit helper path, or ``""`` to search only.
+        override: Explicit helper path or directory, or ``""`` to search only.
+        hint: CPython minor version to fall back on when the core's object
+            names do not carry one — see :func:`_python_version_hint`.
 
     Returns:
         A gdb command string.
@@ -2892,11 +2919,61 @@ def _python_helper_bootstrap_command(override: str = "") -> str:
     source = (
         _PY_HELPER_BOOTSTRAP_SRC
         .replace("OVERRIDE", repr(override))
+        .replace("HINT", repr(hint))
+        .replace("NAMES", repr(list(PY_HELPER_NAMES)))
         .replace("LOADED_MARKER", PY_HELPER_LOADED_MARKER)
         .replace("TRIED_MARKER", PY_HELPER_TRIED_MARKER)
         .replace("VERSION_MARKER", PY_HELPER_VERSION_MARKER)
+        .replace("OBJECTS_MARKER", PY_HELPER_OBJECTS_MARKER)
     )
     return "python exec(" + repr(source) + ")"
+
+
+#: Files in the job directory likely to name the interpreter version.  The
+#: payload's own stdout carries ``PYTHONPATH``, which on an ATLAS release
+#: contains ``.../lib/python3.13/site-packages``.
+PY_VERSION_HINT_FILES: tuple[str, ...] = ("payload.stdout", "payload.stderr", "my_release_setup.sh")
+
+#: Bytes read from each hint file.  The version appears in setup output near
+#: the start; reading a 244 KB stdout in full to find it would be wasteful.
+PY_VERSION_HINT_BYTES = 512 * 1024
+
+_PY_VERSION_RE = re.compile(r"python(\d+)\.(\d+)")
+
+
+def _python_version_hint(job_dir: Path | None) -> str:
+    """Guess the payload's CPython minor version from the job directory.
+
+    A fallback for cores whose object names do not carry a version — a plain
+    ``python`` executable, or an interpreter statically linked into something
+    else. The job directory usually gives it away regardless: an ATLAS
+    release's ``PYTHONPATH`` names ``lib/python3.13/site-packages`` and that
+    lands in the payload's own stdout.
+
+    A hint, not an authority: the bootstrap prefers what it reads from the core
+    and only falls back to this.
+
+    Args:
+        job_dir: Reconstructed job directory, or ``None``.
+
+    Returns:
+        A ``"X.Y"`` string, or ``""`` when nothing suggested one.
+    """
+    if job_dir is None or not job_dir.is_dir():
+        return ""
+    for name in PY_VERSION_HINT_FILES:
+        candidate = job_dir / name
+        if not candidate.is_file():
+            continue
+        try:
+            with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(PY_VERSION_HINT_BYTES)
+        except OSError:
+            continue
+        found = _PY_VERSION_RE.search(text)
+        if found:
+            return f"{found.group(1)}.{found.group(2)}"
+    return ""
 
 
 def _parse_python_helper(text: str) -> dict[str, Any]:
@@ -2913,6 +2990,7 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
     """
     loaded = ""
     version = ""
+    objects: list[str] = []
     searched: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -2923,7 +3001,15 @@ def _parse_python_helper(text: str) -> dict[str, Any]:
             searched = [item for item in payload.split("|") if item]
         elif stripped.startswith(PY_HELPER_VERSION_MARKER):
             version = stripped[len(PY_HELPER_VERSION_MARKER):].strip()
-    return {"loaded": loaded, "searched": searched, "python_version": version}
+        elif stripped.startswith(PY_HELPER_OBJECTS_MARKER):
+            payload = stripped[len(PY_HELPER_OBJECTS_MARKER):].strip()
+            objects = [item for item in payload.split("|") if item]
+    return {
+        "loaded": loaded,
+        "searched": searched,
+        "python_version": version,
+        "python_objects": objects,
+    }
 
 
 def _last_error_line(text: str) -> str:
@@ -2999,9 +3085,13 @@ def _stage_python_helper(override: str, job_dir: Path) -> tuple[str, list[Path]]
         )
         return "", []
 
+    matches: list[Path] = []
+    for leaf in PY_HELPER_NAMES:
+        matches.extend(source.rglob(leaf))
+
     copied = 0
     total = 0
-    for candidate in sorted(source.rglob(PY_HELPER_NAME)):
+    for candidate in sorted(set(matches)):
         if copied >= PY_HELPER_MAX_FILES:
             break
         try:
@@ -3019,8 +3109,9 @@ def _stage_python_helper(override: str, job_dir: Path) -> tuple[str, list[Path]]
         total += size
 
     if not copied:
+        wanted = " or ".join(PY_HELPER_NAMES)
         print(
-            f"[!] No {PY_HELPER_NAME} found under {source}; ignoring "
+            f"[!] No {wanted} found under {source}; ignoring "
             "BAMBOO_CORE_DUMP_PYTHON_GDB.",
             file=sys.stderr,
         )
@@ -3328,10 +3419,21 @@ def _summarise_python(
                 )
             )
         elif helper is not None:
-            reason += (
-                " No libpython object was loaded from the core, so there was "
-                "nowhere to look for the helper."
-            )
+            version = (helper or {}).get("python_version") or ""
+            objects = (helper or {}).get("python_objects") or []
+            if not objects and not version:
+                reason += (
+                    " No interpreter object was recognised among the core's loaded "
+                    "objects and the job directory suggested no version, so there was "
+                    "nowhere to look. Pass --python-gdb-helper with a path to a "
+                    "specific helper file to bypass the search."
+                )
+            else:
+                reason += (
+                    f" Nothing was found to try for CPython {version or 'an unknown version'}"
+                    + (f" (interpreter objects: {', '.join(objects[:3])})" if objects else "")
+                    + "."
+                )
         return {"available": False, "reason": reason}
     has_frames = bool(
         re.search(r"Traceback \(most recent call first\)", text)

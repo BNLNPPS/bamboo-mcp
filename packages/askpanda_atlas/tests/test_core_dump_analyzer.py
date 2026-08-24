@@ -2246,6 +2246,7 @@ def test_last_error_line_selection(text: str, expected: str) -> None:
 
 def _run_bootstrap(
     monkeypatch: pytest.MonkeyPatch, objfiles: list[str], override: str = "",
+    hint: str = "",
 ) -> tuple[str, list[str]]:
     """Execute the bootstrap against a stubbed ``gdb`` module.
 
@@ -2258,6 +2259,7 @@ def _run_bootstrap(
         monkeypatch: Pytest monkeypatch fixture.
         objfiles: Object filenames the stubbed gdb should report.
         override: Explicit helper path handed to the bootstrap.
+        hint: CPython version hint from the job directory.
 
     Returns:
         Tuple of ``(printed output, commands the stub was asked to execute)``.
@@ -2271,7 +2273,7 @@ def _run_bootstrap(
     gdb_stub.execute = lambda cmd, to_string=False: executed.append(cmd)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "gdb", gdb_stub)
 
-    command = acd._python_helper_bootstrap_command(override)
+    command = acd._python_helper_bootstrap_command(override, hint)
     source = eval(command[len("python exec("):-1])  # noqa: S307 - our own literal
     buffer: list[str] = []
     monkeypatch.setattr(builtins, "print", lambda *a, **k: buffer.append(" ".join(map(str, a))))
@@ -2534,3 +2536,112 @@ def test_the_missing_helper_reason_names_the_required_version() -> None:
         {"loaded": "", "searched": ["/cvmfs/a/libpython3.12.so-gdb.py"], "python_version": "3.12"},
     )
     assert "CPython 3.12" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# CPython helper: detecting the interpreter when the obvious route misses
+# ---------------------------------------------------------------------------
+
+
+def test_version_is_read_from_a_libpython_shared_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary case for an AnalysisBase payload: libpython3.13.so.1.0."""
+    root = _helper_tree(tmp_path, ("3.12.13", "3.13"))
+    _output, executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/libpython3.13.so.1.0"], override=str(root),
+    )
+    assert executed == [f"source {root / '3.13' / acd.PY_HELPER_NAME}"]
+
+
+def test_version_is_read_from_a_path_when_the_basename_lacks_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extension module under lib/python3.13/ names the version too.
+
+    Matching only on basenames missed interpreters packaged as a plain
+    `python` executable, which is how the search came back empty despite the
+    release plainly being 3.13.
+    """
+    root = _helper_tree(tmp_path, ("3.13",))
+    _output, executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/python3.13/lib-dynload/_socket.so"], override=str(root),
+    )
+    assert executed == [f"source {root / '3.13' / acd.PY_HELPER_NAME}"]
+
+
+def test_the_job_directory_hint_rescues_an_unversioned_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the core names no version, the payload's own PYTHONPATH does."""
+    root = _helper_tree(tmp_path, ("3.13",))
+    _output, executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/bin/python"], override=str(root), hint="3.13",
+    )
+    assert executed == [f"source {root / '3.13' / acd.PY_HELPER_NAME}"]
+
+
+def test_version_hint_is_read_from_payload_stdout(tmp_path: Path) -> None:
+    """An ATLAS PYTHONPATH carries lib/python3.13/site-packages."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "payload.stdout").write_text(
+        "PYTHONPATH=/cvmfs/atlas.cern.ch/repo/sw/software/25.2/AnalysisBaseExternals/"
+        "25.2.103/InstallArea/x86_64-el9-gcc15-opt/lib/python3.13/site-packages\n",
+        encoding="utf-8",
+    )
+    assert acd._python_version_hint(job_dir) == "3.13"
+
+
+def test_version_hint_is_empty_when_nothing_suggests_one(tmp_path: Path) -> None:
+    """A guess is worse than none: the wrong helper resolves frames wrongly."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "payload.stdout").write_text("nothing relevant\n", encoding="utf-8")
+    assert acd._python_version_hint(job_dir) == ""
+
+
+def test_version_hint_tolerates_a_missing_job_directory() -> None:
+    """Local execution has no job directory and must not raise."""
+    assert acd._python_version_hint(None) == ""
+
+
+def test_a_helper_named_libpython_py_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPython's source tree calls it libpython.py; that is where people get it."""
+    root = tmp_path / "cpython-gdb"
+    target = root / "3.13" / "libpython.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# helper\n")
+
+    _output, executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/libpython3.13.so.1.0"], override=str(root),
+    )
+    assert executed == [f"source {target}"]
+
+
+def test_staging_copies_libpython_py_too(tmp_path: Path) -> None:
+    """Staging must not filter out the name the search will look for."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    root = tmp_path / "cpython-gdb"
+    target = root / "3.13" / "libpython.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# helper\n")
+
+    container_path, _created = acd._stage_python_helper(str(root), job_dir)
+    assert container_path == f"/srv/{acd.PY_HELPER_STAGE_DIR}"
+    assert (job_dir / acd.PY_HELPER_STAGE_DIR / "3.13" / "libpython.py").is_file()
+
+
+def test_interpreter_objects_are_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """"Nowhere to look" and "found nothing to try" are different diagnoses."""
+    root = _helper_tree(tmp_path, ("3.9.20",))
+    output, _executed = _run_bootstrap(
+        monkeypatch, ["/cvmfs/rel/lib/libpython3.13.so.1.0"], override=str(root),
+    )
+    parsed = acd._parse_python_helper(output)
+    assert parsed["python_objects"] == ["/cvmfs/rel/lib/libpython3.13.so.1.0"]
+    assert parsed["python_version"] == "3.13"
+    assert parsed["loaded"] == ""

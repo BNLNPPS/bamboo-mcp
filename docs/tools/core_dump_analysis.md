@@ -169,7 +169,7 @@ of per-version helpers:
 /data/bamboo/tools/cpython-gdb/3.12.13/python-gdb.py
 ```
 
-The bootstrap detects the version from the core's own `libpython` object, takes
+The bootstrap detects the version from the core's own interpreter object, takes
 the matching subdirectory (exact `X.Y`, then any `X.Y.*`), and declines rather
 than loading a mismatched helper. A single file is still accepted for a
 deployment where every job uses the same interpreter.
@@ -181,6 +181,14 @@ binding only `/cvmfs`, the user's home, the job directory and a scratch path, so
 a helper at, say, `/data/bamboo/tools` does not exist as far as the bootstrap is
 concerned. Staged copies join the worker and runner scripts in the same
 cleanup — removed on success, kept on failure.
+
+Version detection tries three routes in order: a version in the loaded object's
+basename (`libpython3.13.so.1.0`), a version in its path
+(`lib/python3.13/lib-dynload/...`), and finally a hint read from the job
+directory — the payload's own stdout carries `PYTHONPATH`, which on an ATLAS
+release names `lib/python3.13/site-packages`. The third exists because an
+interpreter packaged as a plain `python` executable carries no version at all.
+Both `python-gdb.py` and `libpython.py` are accepted as filenames.
 
 A helper that loads but yields no frames is reported as such, naming the
 detected version, rather than as "this is likely not a Python process". The two
