@@ -2740,3 +2740,69 @@ def test_debug_file_directory_is_applied_before_the_core_loads(
     setting_at = argv.index("set debug-file-directory /cvmfs/dbg")
     assert argv[setting_at - 1] == "-iex"
     assert setting_at < argv.index("-c")
+
+
+# ---------------------------------------------------------------------------
+# Prompt rules for lock-ownership claims
+# ---------------------------------------------------------------------------
+
+
+class TestLockOwnershipRules:
+    """Constraints on how a deadlock may be described.
+
+    Job 7272161793's second analysis asserted a three-way cycle in which the
+    timer thread both held StreamMutex and was blocked acquiring it — a
+    contradiction — while its own limitations section correctly said lock
+    ownership could not be read from the optimised frames. The frames supported
+    a simpler reading: the poller thread held the stream lock and then waited
+    inside its own shutdown path for an acknowledgement only it could send.
+    """
+
+    def test_the_contradiction_is_named(self) -> None:
+        """The exact error must be called out, not merely discouraged in general."""
+        prompt = acd.build_system_prompt("hang")
+        assert "both holds a mutex and waits for it" in prompt
+
+    def test_ownership_must_be_evidenced(self) -> None:
+        """A cited holder needs a frame; blocked-in-acquire is not ownership."""
+        prompt = acd.build_system_prompt("hang")
+        assert "name the thread you believe holds it" in prompt
+        assert "does not" in prompt
+
+    def test_an_unidentified_holder_is_permitted(self) -> None:
+        """Otherwise the model invents one to fill the slot."""
+        prompt = acd.build_system_prompt("hang")
+        assert "holder is unidentified" in prompt
+
+    def test_the_smallest_cycle_is_preferred(self) -> None:
+        """A self-deadlock is simpler and commoner than a three-way cycle."""
+        prompt = acd.build_system_prompt("hang")
+        assert "smallest cycle" in prompt
+        assert "self-deadlock" in prompt
+
+    def test_lock_rules_are_hang_specific(self) -> None:
+        """A crash analysis has no cycle to describe; the rules would be noise."""
+        assert "smallest cycle" not in acd.build_system_prompt("crash")
+
+
+class TestNextStepRules:
+    """Constraints on what may be offered as an action."""
+
+    def test_verification_must_name_the_artifact(self) -> None:
+        """Re-running the job produces a different artifact and verifies nothing.
+
+        The report advised re-running to check output.root was written — but a
+        re-run writes a new output.root and says nothing about the old one.
+        """
+        prompt = acd.build_system_prompt("hang")
+        assert "different artifact" in prompt
+
+    def test_settings_must_be_justified(self) -> None:
+        """XRD_RUNFORKHANDLER governs fork safety, not shutdown ordering."""
+        prompt = acd.build_system_prompt("hang")
+        assert "what it does and how that bears on this failure" in prompt
+
+    def test_next_step_rules_apply_to_both_modes(self) -> None:
+        """A crash analysis can invent a bogus setting just as easily."""
+        for mode in ("hang", "crash"):
+            assert "different artifact" in acd.build_system_prompt(mode)

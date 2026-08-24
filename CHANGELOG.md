@@ -52,6 +52,36 @@ All notable changes to Bamboo are documented here.
   `--cleanenv`, so no host environment variable reaches the container.
 
 ### Fixed
+- **Synthesis asserted lock ownership it had just said it could not read**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). Job
+  7272161793's analysis described a three-way cycle in which the XRootD timer
+  thread both held `StreamMutex` and was blocked acquiring it — a
+  contradiction, not a deadlock — while its own limitations section correctly
+  said the lock-ownership graph could not be read from the optimised frames.
+  A confident body over an honest limitation is the worst combination: the
+  reader acts on the body.
+
+  The frames supported a simpler reading. `Stream::OnReadTimeout` takes the
+  stream lock on entry, so thread 3 held it and then called
+  `PollerBuiltIn::ShutdownEvents`, waiting for an acknowledgement that only
+  thread 3 — the poller — could send. A self-deadlock, with threads 1 and 2 as
+  consequences rather than participants. The first analysis of the same job had
+  it right before richer evidence encouraged a more elaborate story.
+
+  `SYSTEM_PROMPT_HANG` now forbids writing a cycle in which one thread both
+  holds and waits for a mutex, requires a named holder *and* the frame showing
+  it holds the lock (entering a function documented to take it counts; being
+  blocked in the acquire path does not), permits "holder unidentified" as an
+  answer, and directs the model to the smallest cycle the frames support.
+
+- **`next_steps` offered a check that could not check anything** (same module).
+  The report advised re-running the job to verify `output.root` had been
+  written — but a re-run produces a different `output.root` and says nothing
+  about the original. It also cited `XRD_RUNFORKHANDLER`, which governs fork
+  safety rather than shutdown ordering. Verification steps must now name the
+  artifact and how to inspect it, and a configuration setting may not be cited
+  unless the model can say what it does and how it bears on this failure.
+
 - **"py-bt produced nothing" guessed between two causes instead of testing**
   (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). When the
   helper loaded but produced no frames, the reason text offered a

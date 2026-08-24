@@ -3739,6 +3739,12 @@ changes to how the PanDA pilot, the workload management system or site operation
 at one core file and have no evidence about those systems. In particular: a pilot that killed a looping job \
 does not stage out the payload's outputs afterwards, and there is no user-facing error quota to exempt a job \
 from. Inventing a plausible-sounding operational mechanism is a failure mode, not a helpful suggestion.
+- A step that verifies an existing artifact must name that artifact and how to inspect it. Re-running the \
+job produces a different artifact and verifies nothing about the one you are analysing; do not offer it as \
+a check.
+- Do not cite a configuration setting unless you can say what it does and how that bears on this failure. A \
+setting that sounds related but governs something else sends the reader down a dead end with your \
+authority behind it.
 """
 
 SYSTEM_PROMPT_CRASH = """
@@ -3765,6 +3771,22 @@ They do NOT prove that the payload process exited or that the PanDA job complete
 event processing may have finished, but the payload/job did not complete normally. Never describe such a job \
 as having run completely or successfully.
 - Treat evidence.diagnosis.job_completion and evidence.diagnosis.summary as authoritative constraints on this distinction.
+
+Rules for claims about locks, and they are strict, because a lock cycle is the easiest thing in a core \
+dump to describe confidently and wrongly:
+- A thread blocked acquiring a lock does NOT hold that lock. Never write a cycle in which the same thread \
+both holds a mutex and waits for it -- that is not a deadlock, it is a contradiction, and it tells the \
+reader nothing.
+- When you say a thread waits on a lock, name the thread you believe holds it AND the frame that shows it \
+holding it. A frame entering a function documented to take the lock counts; a frame merely blocked inside \
+the acquire path does not.
+- If no frame establishes ownership, say the holder is unidentified. That is an honest and useful answer. \
+Assigning ownership you cannot support contradicts your own limitations section and is worse than saying \
+nothing.
+- Prefer the smallest cycle the frames support. One thread that blocks waiting for an acknowledgement only \
+it could send -- a poller thread waiting inside its own shutdown path, say -- is a self-deadlock, and is \
+both simpler and more common than a three-way cycle. Other threads blocked behind it are consequences, not \
+participants. Reach for a multi-thread cycle only when the frames force it.
 """
 
 RESPONSE_SCHEMA = """
