@@ -2237,3 +2237,155 @@ def test_container_failure_leads_with_the_error_not_the_motd(
 def test_last_error_line_selection(text: str, expected: str) -> None:
     """The last match wins: a nested failure reports its outermost cause last."""
     assert acd._last_error_line(text) == expected
+
+
+# ---------------------------------------------------------------------------
+# CPython gdb helper bootstrap
+# ---------------------------------------------------------------------------
+
+
+def _run_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, objfiles: list[str], override: str = "",
+) -> tuple[str, list[str]]:
+    """Execute the bootstrap against a stubbed ``gdb`` module.
+
+    The bootstrap runs inside gdb's embedded interpreter, which no test can
+    provide — so the module it imports is stubbed and the generated source is
+    executed directly. That still exercises the real source: a syntax error or
+    a bad marker would fail here exactly as it would in gdb.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        objfiles: Object filenames the stubbed gdb should report.
+        override: Explicit helper path handed to the bootstrap.
+
+    Returns:
+        Tuple of ``(printed output, commands the stub was asked to execute)``.
+    """
+    executed: list[str] = []
+    gdb_stub = types.ModuleType("gdb")
+    gdb_stub.error = type("GdbError", (Exception,), {})  # type: ignore[attr-defined]
+    gdb_stub.objfiles = lambda: [  # type: ignore[attr-defined]
+        types.SimpleNamespace(filename=name) for name in objfiles
+    ]
+    gdb_stub.execute = lambda cmd, to_string=False: executed.append(cmd)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gdb", gdb_stub)
+
+    command = acd._python_helper_bootstrap_command(override)
+    source = eval(command[len("python exec("):-1])  # noqa: S307 - our own literal
+    buffer: list[str] = []
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: buffer.append(" ".join(map(str, a))))
+    exec(source, {"__name__": "__main__"})  # noqa: S102 - the code under test
+    return "\n".join(buffer), executed
+
+
+def test_bootstrap_is_a_single_gdb_command() -> None:
+    """The phase runner pairs one -ex per command; a newline would split it."""
+    command = acd._python_helper_bootstrap_command("/opt/python-gdb.py")
+    assert "\n" not in command
+    assert command.startswith("python exec(")
+
+
+def test_bootstrap_sources_a_helper_beside_libpython(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary auto-load location, checked explicitly."""
+    lib = tmp_path / "lib" / "libpython3.11.so.1.0"
+    lib.parent.mkdir(parents=True)
+    lib.write_text("")
+    (tmp_path / "lib" / "libpython3.11.so.1.0-gdb.py").write_text("# helper\n")
+
+    output, executed = _run_bootstrap(monkeypatch, [str(lib), "/usr/lib/libstdc++.so.6"])
+    assert executed == [f"source {lib}-gdb.py"]
+    assert f"{acd.PY_HELPER_LOADED_MARKER} {lib}-gdb.py" in output
+
+
+def test_bootstrap_reports_what_it_searched_when_nothing_is_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"Not found" must be distinguishable from "not looked for".
+
+    Job 7272161793's `info auto-load python-scripts` listed only libstdc++'s
+    helper, so auto-load was healthy and simply had no libpython candidate.
+    """
+    lib = tmp_path / "libpython3.11.so.1.0"
+    lib.write_text("")
+    output, executed = _run_bootstrap(monkeypatch, [str(lib)])
+    assert executed == []
+    assert f"{acd.PY_HELPER_LOADED_MARKER} \n" in output + "\n"
+    assert str(lib) in output
+
+
+def test_bootstrap_ignores_objects_that_are_not_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """libstdc++ has its own helper and must not be mistaken for CPython's."""
+    output, executed = _run_bootstrap(monkeypatch, ["/usr/lib/libstdc++.so.6"])
+    assert executed == []
+    assert f"{acd.PY_HELPER_TRIED_MARKER} " in output
+    assert "libstdc++" not in output
+
+
+def test_bootstrap_prefers_an_explicit_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-supplied path outranks discovery."""
+    override = tmp_path / "custom-gdb.py"
+    override.write_text("# helper\n")
+    lib = tmp_path / "libpython3.11.so.1.0"
+    lib.write_text("")
+    (tmp_path / "libpython3.11.so.1.0-gdb.py").write_text("# other\n")
+
+    _output, executed = _run_bootstrap(monkeypatch, [str(lib)], override=str(override))
+    assert executed == [f"source {override}"]
+
+
+def test_a_helper_that_fails_to_source_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken helper must not abort the phase before py-bt runs."""
+    lib = tmp_path / "libpython3.11.so.1.0"
+    lib.write_text("")
+    (tmp_path / "libpython3.11.so.1.0-gdb.py").write_text("# helper\n")
+
+    gdb_stub = types.ModuleType("gdb")
+    error = type("GdbError", (Exception,), {})
+    gdb_stub.error = error  # type: ignore[attr-defined]
+    gdb_stub.objfiles = lambda: [types.SimpleNamespace(filename=str(lib))]  # type: ignore[attr-defined]
+
+    def _boom(cmd: str, to_string: bool = False) -> None:
+        raise error("cannot source")
+
+    gdb_stub.execute = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gdb", gdb_stub)
+    buffer: list[str] = []
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: buffer.append(" ".join(map(str, a))))
+    source = eval(acd._python_helper_bootstrap_command("")[len("python exec("):-1])
+    exec(source, {"__name__": "__main__"})  # noqa: S102
+    assert f"{acd.PY_HELPER_LOADED_MARKER} " in "\n".join(buffer) + " "
+
+
+def test_unavailable_python_names_the_searched_paths() -> None:
+    """The user should learn where the helper was looked for, not just that it is absent."""
+    result = acd._summarise_python(
+        "", "", "Undefined command: \"py-bt\".", False,
+        {"loaded": "", "searched": ["/cvmfs/a/libpython3.11.so-gdb.py"]},
+    )
+    assert result["available"] is False
+    assert "/cvmfs/a/libpython3.11.so-gdb.py" in result["reason"]
+    assert "--python-gdb-helper" in result["reason"]
+
+
+def test_unavailable_python_without_any_python_object() -> None:
+    """No libpython loaded is a different fact from a missing helper."""
+    result = acd._summarise_python(
+        "", "", "Undefined command: \"py-bt\".", False, {"loaded": "", "searched": []},
+    )
+    assert "nowhere to look" in result["reason"]
+
+
+def test_next_steps_rule_is_in_the_system_prompt() -> None:
+    """Two invented mechanisms reached a user; the prompt now names both."""
+    prompt = acd.build_system_prompt("hang")
+    assert "does not stage out" in prompt
+    assert "error quota" in prompt

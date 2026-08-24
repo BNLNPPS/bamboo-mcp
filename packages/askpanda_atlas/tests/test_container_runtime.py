@@ -259,3 +259,55 @@ class TestPreflightRuntimeIntegration:
         )
         assert "BAMBOO_CORE_DUMP_APPTAINER" in message
         assert "BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK" in message
+
+
+class TestEvidenceBudget:
+    """The character budget applied to the evidence handed to synthesis."""
+
+    def test_the_default_is_wider_than_the_analyzer_cli_default(self) -> None:
+        """50 000 chars truncated the one field that mattered on job 7272161793.
+
+        `primary_thread.backtrace` is the last stage of `enforce_global_budget`,
+        so a job with many libraries and several thread stacks spends the budget
+        on cheaper evidence and then cuts the most valuable field.
+        """
+        impl_default = impl.DEFAULT_EVIDENCE_CHARS
+        assert impl_default >= 100_000
+
+    def test_the_budget_is_configurable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deployment on a smaller model must be able to pull it back down."""
+        monkeypatch.setenv("BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS", "40000")
+        assert impl.evidence_chars() == 40_000
+
+    @pytest.mark.parametrize("value", ["junk", "0", "-5", ""])
+    def test_an_unusable_setting_falls_back_to_the_default(
+        self, value: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A typo must not silently shrink the evidence to nothing."""
+        monkeypatch.setenv("BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS", value)
+        assert impl.evidence_chars() == impl.DEFAULT_EVIDENCE_CHARS
+
+
+class TestPythonHelperPassthrough:
+    """The CPython gdb helper override reaching the analyzer."""
+
+    def test_the_override_is_passed_when_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ALRB uses --cleanenv, so this cannot travel as an environment variable."""
+        monkeypatch.setenv("BAMBOO_CORE_DUMP_PYTHON_GDB", "/opt/python-gdb.py")
+        argv = impl.build_analyzer_argv(
+            tmp_path / "core.1", tmp_path / "job", tmp_path, "hang",
+        )
+        assert "--python-gdb-helper" in argv
+        assert argv[argv.index("--python-gdb-helper") + 1] == "/opt/python-gdb.py"
+
+    def test_no_option_is_added_when_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The analyzer searches on its own; an empty option would be noise."""
+        monkeypatch.delenv("BAMBOO_CORE_DUMP_PYTHON_GDB", raising=False)
+        argv = impl.build_analyzer_argv(
+            tmp_path / "core.1", tmp_path / "job", tmp_path, "hang",
+        )
+        assert "--python-gdb-helper" not in argv

@@ -65,7 +65,6 @@ from typing import Any, Iterator
 
 from askpanda_atlas._core_dump_analyzer import (  # type: ignore[import]
     DEFAULT_ATLAS_LOCAL_ROOT_BASE,
-    DEFAULT_MAX_EVIDENCE_CHARS,
     core_evidence_from_dict,
     enforce_global_budget,
 )
@@ -110,6 +109,20 @@ DEFAULT_CONTAINER_TIMEOUT_S: int = 600
 #: Ceiling on the bytes held under the analysis root.  Nothing reaps, so this
 #: is what stops an unattended deployment filling ``/tmp``.
 DEFAULT_QUOTA_BYTES: int = 50 * 1024 * 1024 * 1024
+
+#: Character budget for the evidence handed to synthesis.
+#:
+#: The analyzer's own default is 50 000, chosen for a CLI that may be talking
+#: to a small model.  That is far too tight here: 50 000 characters is roughly
+#: 12 500 tokens against a 200 000-token context, and the last stage of
+#: ``enforce_global_budget`` is ``primary_thread.backtrace`` — so a job with
+#: many shared libraries and several distinct thread stacks spends its budget
+#: on cheaper evidence and then truncates the single most valuable field.
+#:
+#: Job 7272161793 did exactly that: the XRootD shutdown chain from ``Py_Exit``
+#: down to ``PollerBuiltIn::Stop`` was cut out of the model's copy while
+#: sitting complete in ``evidence.json`` and ``gdb_raw.txt`` on disk.
+DEFAULT_EVIDENCE_CHARS: int = 120_000
 
 POLL_INTERVAL_S: float = 2.0
 
@@ -158,6 +171,23 @@ def _truthy(value: str | None) -> bool:
         True when *value* spells an affirmative.
     """
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer from the environment.
+
+    Args:
+        name: Variable name.
+        default: Value to use when unset, unparsable or non-positive.
+
+    Returns:
+        The resolved value.
+    """
+    try:
+        value = int(os.getenv(name) or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 def _env_float(name: str, default: float) -> float:
@@ -937,7 +967,7 @@ def build_analyzer_argv(
         The argument vector.
     """
     timeout = container_timeout if container_timeout is not None else container_timeout_s()
-    return [
+    argv = [
         sys.executable, "-m", ANALYZER_MODULE, str(core_path),
         "--execution", "atlas-container",
         "--job-dir", str(job_dir),
@@ -948,6 +978,10 @@ def build_analyzer_argv(
         "--raw-gdb", str(workspace / GDB_RAW_NAME),
         "--container-timeout", str(int(timeout)),
     ]
+    helper = (os.getenv("BAMBOO_CORE_DUMP_PYTHON_GDB") or "").strip()
+    if helper:
+        argv += ["--python-gdb-helper", helper]
+    return argv
 
 
 def build_worker_argv(workspace: Path) -> list[str]:
@@ -996,21 +1030,38 @@ def spawn_worker(workspace: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def load_core_evidence(workspace: Path, limit: int = DEFAULT_MAX_EVIDENCE_CHARS) -> dict[str, Any] | None:
+def evidence_chars() -> int:
+    """Return the character budget for the evidence handed to synthesis.
+
+    Returns:
+        Characters, from ``$BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS``.
+    """
+    return _env_int("BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS", DEFAULT_EVIDENCE_CHARS)
+
+
+def load_core_evidence(workspace: Path, limit: int | None = None) -> dict[str, Any] | None:
     """Load the analyzer's evidence, shrunk to the prompt budget.
 
     The budget is applied here rather than downstream so the MCP payload is
     bounded at the same size the synthesis step already assumes, and step 5
     never has to shrink it a second time.
 
+    This is the *only* place the budget is applied on this path: with
+    ``--no-llm`` the analyzer never calls ``enforce_global_budget`` at all, so
+    ``evidence.json`` on disk carries the full per-section evidence and
+    ``gdb_raw.txt`` is not budgeted at any point.  Whatever this trims is
+    trimmed from the model's copy alone and remains recoverable from the
+    workspace.
+
     Args:
         workspace: Workspace directory.
-        limit: Character budget for the serialised evidence.
+        limit: Character budget, or ``None`` for :func:`evidence_chars`.
 
     Returns:
         ``{"core_evidence", "core_evidence_schema_version", "analyzer_version"}``,
         or ``None`` when the artifact is absent or unparsable.
     """
+    budget = limit if limit is not None else evidence_chars()
     path = workspace / EVIDENCE_NAME
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1020,7 +1071,7 @@ def load_core_evidence(workspace: Path, limit: int = DEFAULT_MAX_EVIDENCE_CHARS)
     if not isinstance(payload, dict) or not isinstance(payload.get("evidence"), dict):
         logger.warning("Evidence at %s has no evidence object", path)
         return None
-    evidence = enforce_global_budget(core_evidence_from_dict(payload["evidence"]), limit)
+    evidence = enforce_global_budget(core_evidence_from_dict(payload["evidence"]), budget)
     return {
         "core_evidence": evidence.to_dict(),
         "core_evidence_schema_version": payload.get("schema_version"),
@@ -1534,6 +1585,7 @@ __all__ = [
     "elapsed_s",
     "get_definition",
     "load_core_evidence",
+    "evidence_chars",
     "mark_failed",
     "new_manifest",
     "preflight_atlas_environment",

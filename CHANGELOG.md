@@ -6,7 +6,63 @@ All notable changes to Bamboo are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **The evidence budget was truncating the one field worth reading**
+  (`packages/askpanda_atlas/askpanda_atlas/core_dump_analysis_impl.py`).
+  `load_core_evidence` used the analyzer's CLI default of 50 000 characters —
+  roughly 12 500 tokens against a 200 000-token context — and the last stage of
+  `enforce_global_budget` is `primary_thread.backtrace`. A job with many shared
+  libraries and several distinct thread stacks spends the budget on cheaper
+  evidence and then cuts the most valuable field.
+
+  Job 7272161793 did exactly that: the XRootD shutdown chain from `Py_Exit`
+  through `DefaultEnv::Finalize` to `PollerBuiltIn::Stop` was cut out of the
+  model's copy, and the report said so under Limitations. Nothing was lost from
+  disk — with `--no-llm` the analyzer never calls `enforce_global_budget` at
+  all, so `evidence.json` carried the full per-section evidence and
+  `gdb_raw.txt` is not budgeted at any point.
+
+  The default is now 120 000 characters, overridable with
+  `BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS` for a deployment on a smaller
+  model. An unparsable or non-positive value falls back to the default rather
+  than shrinking the evidence to nothing.
+
+### Added
+- **Explicit search for the CPython gdb helper, enabling `py-bt`**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). `py-bt`
+  needs CPython's `python-gdb.py`, which gdb auto-loads as `<objfile>-gdb.py`
+  next to each loaded object. ATLAS/LCG releases do not reliably ship one: for
+  job 7272161793 gdb's `info auto-load python-scripts` listed exactly one
+  script, libstdc++'s, so auto-load was healthy and had no libpython candidate
+  to find — the report's "python-gdb.py was not loaded" was accurate but gave
+  the reader nothing to act on.
+
+  A bootstrap now runs before `py-bt` and searches: an explicit
+  `--python-gdb-helper` first, then `<objfile>-gdb.py` and
+  `share/gdb/auto-load/` for every loaded `libpython*` or `python3*` object.
+  It is rendered as a single `python exec(…)` command because the phase runner
+  pairs one `-ex` per command and cannot carry a multi-line `python … end`
+  block. A helper that fails to source is skipped rather than aborting the
+  phase.
+
+  What was searched is recorded in `gdb_metadata.python_helper` and named in
+  the `python.reason` text, so "not found here" is distinguishable from "not
+  looked for". `BAMBOO_CORE_DUMP_PYTHON_GDB` threads an override through
+  `build_analyzer_argv` as an *argument* — ALRB launches apptainer with
+  `--cleanenv`, so no host environment variable reaches the container.
+
 ### Fixed
+- **Synthesis invented operational mechanisms in `next_steps`**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). The job
+  7272161793 report advised harvesting output files after a looping-job kill
+  (the pilot does not stage out after a 1150 kill) and flagging the job so it
+  would not count against "the user's error quota" (no such mechanism exists).
+  Both are the model reaching past a single core file into systems it has no
+  evidence about, and both read as authoritative to someone who does not know
+  better. `SYSTEM_PROMPT_BASE` now confines `next_steps` to further diagnosis,
+  a change in the culprit component, or a check the reader can perform, and
+  names those two inventions specifically.
+
 - **The core-dump container mounted the wrong directory at `/srv`**
   (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`).
   `atlasLocalSetup.sh` binds `$PWD` at `/srv`, and `_container_path` maps every

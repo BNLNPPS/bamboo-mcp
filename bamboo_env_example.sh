@@ -421,3 +421,20 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # missing runtime itself, a few seconds later.  The three CVMFS checks still
 # run.  Use this if detection ever refuses an analysis that would have worked.
 # export BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK="1"
+
+# Character budget for the evidence handed to the synthesis model.  The
+# analyzer's own CLI default is 50000, sized for a small model; that is far too
+# tight here, because the last stage of the reduction cascade is the primary
+# thread's backtrace — so a job with many shared libraries and several distinct
+# thread stacks spends its budget on cheaper evidence and then truncates the one
+# field worth reading.  Nothing is lost from disk either way: evidence.json and
+# gdb_raw.txt in the workspace are never budgeted.
+# export BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS="120000"
+
+# Path to a CPython gdb helper (python-gdb.py), enabling py-bt inside the
+# release container.  Normally unnecessary — the analyzer searches next to every
+# libpython object loaded from the core — but ATLAS/LCG releases do not always
+# ship one, and gdb's auto-load then has no candidate to find.  Passed to the
+# analyzer as an argument, not inherited: ALRB launches apptainer with
+# --cleanenv, so no host environment variable survives into the container.
+# export BAMBOO_CORE_DUMP_PYTHON_GDB="/path/to/python-gdb.py"

@@ -2396,7 +2396,13 @@ def _build_phase_plan(args: argparse.Namespace) -> list[tuple[str, list[tuple[st
         ]),
         ("primary_thread", primary),
         ("all_threads", [("all_threads", f"thread apply all bt {args.max_frames}")]),
-        ("python", [("py_bt", "py-bt"), ("py_list", "py-list")]),
+        ("python", [
+            ("py_helper", _python_helper_bootstrap_command(
+                getattr(args, "python_gdb_helper", "") or ""
+            )),
+            ("py_bt", "py-bt"),
+            ("py_list", "py-list"),
+        ]),
         ("libraries", [("libraries", "info sharedlibrary")]),
     ]
 
@@ -2682,11 +2688,14 @@ def _collect_evidence_local(
         sections.get("backtrace", "") + "\n" + sections.get("all_threads", "")
     ):
         evidence.warnings.append("Some backtrace frames have no symbol information.")
+    py_helper = _parse_python_helper(sections.get("py_helper", ""))
     evidence.python = _summarise_python(
-        sections.get("py_bt", ""), sections.get("py_list", ""), errors.get("python", ""), not args.no_redact
+        sections.get("py_bt", ""), sections.get("py_list", ""), errors.get("python", ""),
+        not args.no_redact, py_helper,
     )
     _attach_library_evidence(evidence, sections, not args.no_redact)
     evidence.gdb_metadata = _gdb_metadata(sections, combined, not args.no_redact)
+    evidence.gdb_metadata["python_helper"] = py_helper
     return evidence, combined
 
 
@@ -2757,6 +2766,12 @@ def _container_worker_args(args: argparse.Namespace, core_in_container: str,
         argv += ["--exe", exe_arg]
     if args.gdb:
         argv += ["--gdb", args.gdb]
+    helper = getattr(args, "python_gdb_helper", "") or ""
+    if helper:
+        # Passed as an argument rather than inherited: ALRB launches apptainer
+        # with --cleanenv, so nothing from the host environment survives into
+        # the container.
+        argv += ["--python-gdb-helper", helper]
     return argv
 
 
@@ -2770,6 +2785,100 @@ CONTAINER_DIAGNOSTIC_CHARS = 2000
 _ERROR_LINE_RE = re.compile(
     r"^\s*(?:Error|ERROR|error|Fatal|FATAL|fatal)\b.*$|^\s*\S*(?:Error|Exception):\s.*$"
 )
+
+
+#: Markers the bootstrap prints so its outcome can be parsed out of the phase.
+PY_HELPER_LOADED_MARKER = "@@BAMBOO_PYHELPER_LOADED@@"
+PY_HELPER_TRIED_MARKER = "@@BAMBOO_PYHELPER_TRIED@@"
+
+#: Run inside gdb before ``py-bt``, to load the CPython helper that defines it.
+#:
+#: gdb auto-loads ``<objfile>-gdb.py`` next to each loaded object, which is how
+#: the libstdc++ pretty-printers arrive.  CPython's helper is not packaged that
+#: way in the ATLAS/LCG releases: for job 7272161793 gdb's own
+#: ``info auto-load python-scripts`` listed exactly one script, libstdc++'s, so
+#: auto-load was working and simply had no libpython candidate to find.  Hence
+#: searching explicitly rather than relying on auto-load, and recording what was
+#: searched so "not available" can be told apart from "not looked for".
+_PY_HELPER_BOOTSTRAP_SRC = """
+import os
+import gdb
+
+candidates = []
+override = OVERRIDE
+if override:
+    candidates.append(override)
+for objfile in gdb.objfiles():
+    name = getattr(objfile, "filename", "") or ""
+    base = os.path.basename(name)
+    if "libpython" not in base and not base.startswith("python3"):
+        continue
+    candidates.append(name + "-gdb.py")
+    root = os.path.dirname(os.path.dirname(name))
+    candidates.append(os.path.join(root, "share", "gdb", "auto-load", base + "-gdb.py"))
+
+loaded = ""
+tried = []
+for candidate in candidates:
+    if candidate in tried:
+        continue
+    tried.append(candidate)
+    if not os.path.isfile(candidate):
+        continue
+    try:
+        gdb.execute("source " + candidate, to_string=True)
+    except gdb.error:
+        continue
+    loaded = candidate
+    break
+
+print("LOADED_MARKER " + loaded)
+print("TRIED_MARKER " + "|".join(tried))
+"""
+
+
+def _python_helper_bootstrap_command(override: str = "") -> str:
+    """Build the single gdb command that loads the CPython helper.
+
+    Rendered as ``python exec('…')`` so it stays one ``-ex`` argument: the
+    phase runner pairs every command with a section marker and cannot carry a
+    multi-line ``python … end`` block.
+
+    Args:
+        override: Explicit helper path, or ``""`` to search only.
+
+    Returns:
+        A gdb command string.
+    """
+    source = (
+        _PY_HELPER_BOOTSTRAP_SRC
+        .replace("OVERRIDE", repr(override))
+        .replace("LOADED_MARKER", PY_HELPER_LOADED_MARKER)
+        .replace("TRIED_MARKER", PY_HELPER_TRIED_MARKER)
+    )
+    return "python exec(" + repr(source) + ")"
+
+
+def _parse_python_helper(text: str) -> dict[str, Any]:
+    """Interpret the bootstrap's markers.
+
+    Args:
+        text: Output of the bootstrap section.
+
+    Returns:
+        ``{"loaded": str, "searched": list[str]}``.  ``loaded`` is ``""`` when
+        no helper was found, which is a different fact from not having looked.
+    """
+    loaded = ""
+    searched: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(PY_HELPER_LOADED_MARKER):
+            loaded = stripped[len(PY_HELPER_LOADED_MARKER):].strip()
+        elif stripped.startswith(PY_HELPER_TRIED_MARKER):
+            payload = stripped[len(PY_HELPER_TRIED_MARKER):].strip()
+            searched = [item for item in payload.split("|") if item]
+    return {"loaded": loaded, "searched": searched}
 
 
 def _last_error_line(text: str) -> str:
@@ -3029,7 +3138,10 @@ def collect_evidence(
     return evidence, raw
 
 
-def _summarise_python(text: str, source: str, stderr: str, redact_enabled: bool) -> dict[str, Any]:
+def _summarise_python(
+    text: str, source: str, stderr: str, redact_enabled: bool,
+    helper: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Interpret the output of the ``py-bt`` / ``py-list`` phase.
 
     Detection is positive rather than negative: real ``py-bt`` output always
@@ -3041,17 +3153,35 @@ def _summarise_python(text: str, source: str, stderr: str, redact_enabled: bool)
         source: Output of ``py-list``.
         stderr: Standard error of the Python phase.
         redact_enabled: Whether to scrub secrets.
+        helper: Result of :func:`_parse_python_helper`, used to say *where* the
+            CPython helper was looked for.  ``None`` when the bootstrap did not
+            run, which is reported as such rather than as absence.
 
     Returns:
         A dictionary describing whether Python frames were available and, if so,
         the Python-level backtrace and surrounding source.
     """
     if "Undefined command" in stderr or "Undefined command" in text:
-        return {
-            "available": False,
-            "reason": ("py-bt is not available because the libpython/CPython GDB helper (python-gdb.py) is not loaded. "
-                       "This is separate from native Python symbol availability or full DWARF debug information."),
-        }
+        reason = (
+            "py-bt is not available because the libpython/CPython GDB helper "
+            "(python-gdb.py) is not loaded. This is separate from native Python "
+            "symbol availability or full DWARF debug information."
+        )
+        searched = list((helper or {}).get("searched") or [])
+        if searched:
+            shown = ", ".join(searched[:4])
+            more = f" (+{len(searched) - 4} more)" if len(searched) > 4 else ""
+            reason += (
+                f" It was searched for and not found at: {shown}{more}. The release "
+                "does not ship it next to its Python objects; pass "
+                "--python-gdb-helper to point at one."
+            )
+        elif helper is not None:
+            reason += (
+                " No libpython object was loaded from the core, so there was "
+                "nowhere to look for the helper."
+            )
+        return {"available": False, "reason": reason}
     has_frames = bool(
         re.search(r"Traceback \(most recent call first\)", text)
         or re.search(r'^\s*File "[^"]+", line \d+, in ', text, re.M)
@@ -3259,6 +3389,12 @@ frame is almost always the deepest one belonging to application code.
 - A top frame in pthread_cond_wait, futex or epoll does not by itself make a thread irrelevant. Inspect deeper \
 frames: a thread blocked while stopping a subsystem, acquiring a lock, handling a timeout, or finalizing can be \
 central to a hang. Treat only genuinely parked worker-loop stacks as idle.
+- "next_steps" must stay inside what this evidence supports: further diagnosis, a software or \
+configuration change in the culprit component, or a check the reader can actually perform. Do NOT propose \
+changes to how the PanDA pilot, the workload management system or site operations behave -- you are looking \
+at one core file and have no evidence about those systems. In particular: a pilot that killed a looping job \
+does not stage out the payload's outputs afterwards, and there is no user-facing error quota to exempt a job \
+from. Inventing a plausible-sounding operational mechanism is a failure mode, not a helpful suggestion.
 """
 
 SYSTEM_PROMPT_CRASH = """
@@ -4091,6 +4227,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--release-setup", default=None,
                         help="Release setup script for atlas-container mode "
                              "(default: <job-dir>/my_release_setup.sh).")
+    parser.add_argument("--python-gdb-helper", default="",
+                        help="Path to a CPython gdb helper (python-gdb.py) to source before py-bt. "
+                             "Only needed when the release does not ship one next to its Python "
+                             "objects; the helper is searched for automatically otherwise.")
     parser.add_argument("--atlas-platform", default=DEFAULT_ATLAS_PLATFORM,
                         help=f"ATLAS container platform (default: {DEFAULT_ATLAS_PLATFORM}).")
     parser.add_argument("--atlas-local-root-base", default=DEFAULT_ATLAS_LOCAL_ROOT_BASE,

@@ -90,6 +90,8 @@ server restart mid-run loses nothing: `status` still answers from disk.
 | Disk quota | 50 GiB | `BAMBOO_CORE_ANALYSIS_QUOTA_BYTES` |
 | Container runtime override | *(discovered)* | `BAMBOO_CORE_DUMP_APPTAINER` |
 | Skip the runtime check | off | `BAMBOO_CORE_DUMP_SKIP_RUNTIME_CHECK` |
+| Evidence budget | 120 000 chars | `BAMBOO_CORE_ANALYSIS_MAX_EVIDENCE_CHARS` |
+| CPython gdb helper | *(searched)* | `BAMBOO_CORE_DUMP_PYTHON_GDB` |
 
 The 120 s inline wait assumes the 300 s `BAMBOO_MCP_CLIENT_TIMEOUT` default. If
 a deployment pins that lower, lower the inline wait to match or `start` will
@@ -122,6 +124,38 @@ gains a runtime needs the server restarted.
 
 None of this weakens the no-fallback rule: detection decides whether the
 *container* can start, never whether to run gdb without one.
+
+### Evidence budget
+
+`load_core_evidence` is the **only** place the character budget is applied on
+this path. The analyzer runs with `--no-llm`, so it never calls
+`enforce_global_budget` itself: `evidence.json` on disk carries the full
+per-section evidence and `gdb_raw.txt` is not budgeted at any point. Whatever
+the budget trims is trimmed from the model's copy alone and stays recoverable
+from the workspace.
+
+The reduction cascade spends the budget cheapest-evidence-first and ends at
+`primary_thread.backtrace`. That last stage is reached only when the seven
+before it have hit their floors — which a job with many shared libraries and
+several distinct thread stacks will do. Job 7272161793 did: at the analyzer's
+50 000-character CLI default, the XRootD shutdown chain from `Py_Exit` down to
+`PollerBuiltIn::Stop` was cut out of the model's copy. The default here is
+120 000, and `truncated_sections` reaches the model either way, so a trimmed
+analysis always says so.
+
+### Python-level backtraces
+
+`py-bt` needs CPython's gdb helper, which gdb normally auto-loads as
+`<objfile>-gdb.py` next to each loaded object. ATLAS/LCG releases do not
+reliably ship one: for job 7272161793 gdb's own `info auto-load python-scripts`
+listed exactly one script, libstdc++'s, so auto-load was healthy and simply had
+no libpython candidate.
+
+The analyzer therefore searches explicitly, in a bootstrap that runs before
+`py-bt`: an explicit `--python-gdb-helper` first, then `<objfile>-gdb.py` and
+`share/gdb/auto-load/` for every loaded `libpython*` or `python3*` object. What
+it searched is recorded in `gdb_metadata.python_helper` and named in the
+`python.reason` text, so "not found" is distinguishable from "not looked for".
 
 Only **one** analysis runs at a time, guarded by a lock file whose *content*
 records the holder. A second request while one is in flight is refused with a
