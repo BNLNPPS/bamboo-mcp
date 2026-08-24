@@ -97,6 +97,17 @@ The 120 s inline wait assumes the 300 s `BAMBOO_MCP_CLIENT_TIMEOUT` default. If
 a deployment pins that lower, lower the inline wait to match or `start` will
 time out on the wire before it can hand back a handle.
 
+### Replay of a completed analysis
+
+`start` returns the stored evidence when a manifest is `complete`, rather than
+refetching the core. The payload carries `replayed: true` and the text says so,
+naming when the run finished — because gdb did not run, so nothing in the
+evidence reflects the present host, container or analyzer version.
+
+Rule 1c sets `restart` when the question asks for a fresh run ("re-run",
+"again", "redo", "from scratch"). It is never inferred: a restart spends a
+gigabyte transfer and holds the single analysis slot.
+
 ### Container runtime detection
 
 The preflight refuses before the lock and before any download, so a host that

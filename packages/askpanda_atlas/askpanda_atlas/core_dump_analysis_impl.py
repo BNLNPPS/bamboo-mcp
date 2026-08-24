@@ -1196,6 +1196,7 @@ def build_response(
     manifest: dict[str, Any],
     workspace: Path,
     include_evidence: bool,
+    replayed: bool = False,
 ) -> dict[str, Any]:
     """Build the tool's ``{"evidence", "text"}`` return payload.
 
@@ -1204,6 +1205,12 @@ def build_response(
         workspace: Workspace directory.
         include_evidence: Whether to embed the analyzer's evidence when the
             run is complete.
+        replayed: True when this is a stored result rather than a run that just
+            happened.  Marked because the two are otherwise indistinguishable
+            to the reader: gdb did not run, so nothing about the host, the
+            release container or the analyzer's own version reflects the
+            present, and evidence collected before a fix will keep reporting
+            the behaviour that fix addressed.
 
     Returns:
         The payload, ready to be JSON-serialised into MCP content.
@@ -1241,7 +1248,16 @@ def build_response(
             evidence["state"] = STATE_FAILED
             return {"evidence": evidence, "text": evidence["error"]}
         evidence.update(loaded)
-    return {"evidence": evidence, "text": _complete_text(manifest, seconds)}
+    evidence["replayed"] = replayed
+    text = _complete_text(manifest, seconds)
+    if replayed:
+        finished = str(manifest.get("finished_utc") or manifest.get("updated_utc") or "")
+        when = f" from {finished}" if finished else ""
+        text = (
+            f"Stored result{when} — gdb did not run again. "
+            f"Pass restart=true to re-analyse the core in place.\n\n{text}"
+        )
+    return {"evidence": evidence, "text": text}
 
 
 def _refusal(job_id: int, message: str) -> dict[str, Any]:
@@ -1348,7 +1364,7 @@ async def start_analysis(
         existing = reconcile_state(workspace, existing, root)
         state = str(existing.get("state"))
         if state == STATE_COMPLETE:
-            return build_response(existing, workspace, include_evidence=True)
+            return build_response(existing, workspace, include_evidence=True, replayed=True)
         if state != STATE_FAILED:
             return await _wait_inline(workspace, root, budget)
 

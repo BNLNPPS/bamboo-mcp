@@ -22,6 +22,7 @@ from bamboo.tools.bamboo_answer import (
     _build_deterministic_plan,
     _is_core_dump_affirmative,
     _is_core_dump_request,
+    _wants_core_dump_restart,
     bamboo_answer_tool,
 )
 
@@ -353,3 +354,59 @@ async def test_an_unarmed_affirmative_is_untouched_with_the_fast_path_off() -> N
     """
     _, mock_exec = await _route_question("yes please", bypass_fast_path=True)
     assert mock_exec.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Rule 1c — asking for a fresh run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_restart_phrasing_reaches_the_tool() -> None:
+    """A completed analysis is replayed forever unless restart can be set.
+
+    `start_analysis` returns the stored evidence when a manifest is complete —
+    correct by default, since refetching a gigabyte core to answer the same
+    question twice is wasteful. But no phrasing could reach the `restart`
+    argument, so a job analysed before a fix kept reporting the behaviour the
+    fix addressed, and nothing in the answer said the result was stored.
+    """
+    _, mock_exec = await _route_question(
+        "please re-run the core dump analysis of job 7263525363",
+    )
+    assert mock_exec.await_count == 1
+    call = mock_exec.await_args.args[0].tool_calls[0]
+    assert call.tool == _CORE_DUMP_TOOL
+    assert call.arguments.get("restart") is True
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_request_does_not_restart() -> None:
+    """restart spends a gigabyte transfer and the analysis slot; never infer it."""
+    _, mock_exec = await _route_question(
+        "please analyse the core dump in job 7263525363",
+    )
+    assert mock_exec.await_count == 1
+    assert "restart" not in mock_exec.await_args.args[0].tool_calls[0].arguments
+
+
+@pytest.mark.parametrize("question", [
+    "re-run the core dump analysis for job 7263525363",
+    "analyse the core dump of job 7263525363 again",
+    "redo the core dump analysis of job 7263525363",
+    "analyse the core dump in job 7263525363 from scratch",
+    "force a rerun of the core dump analysis of job 7263525363",
+])
+def test_restart_phrasings(question: str) -> None:
+    """The wordings a user actually reaches for when a fix has just landed."""
+    assert _wants_core_dump_restart(question) is True
+
+
+@pytest.mark.parametrize("question", [
+    "please analyse the core dump in job 7263525363",
+    "what did the core dump show for job 7263525363",
+    "analyse the core dump and explain the hang",
+])
+def test_non_restart_phrasings(question: str) -> None:
+    """Ordinary requests must keep the cheap replay."""
+    assert _wants_core_dump_restart(question) is False

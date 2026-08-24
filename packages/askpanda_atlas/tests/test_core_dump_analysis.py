@@ -1166,3 +1166,53 @@ class TestWorkerFailureMessage:
         from askpanda_atlas import _core_dump_worker as worker
 
         assert worker._error_headline(tmp_path / "absent") == ""
+
+
+class TestReplayIsVisible:
+    """A stored result must not be mistaken for a run that just happened."""
+
+    def _complete(self, workspace: Path) -> dict[str, Any]:
+        """Write a completed manifest and a minimal evidence file.
+
+        Args:
+            workspace: Workspace directory.
+
+        Returns:
+            The manifest dict.
+        """
+        manifest = {
+            "manifest_version": 1,
+            "job_id": 7272161793,
+            "request_id": "abcd1234",
+            "state": impl.STATE_COMPLETE,
+            "created_utc": "2026-08-24T13:00:00Z",
+            "updated_utc": "2026-08-24T13:01:00Z",
+            "finished_utc": "2026-08-24T13:01:00Z",
+            "failure_mode": "hang",
+        }
+        (workspace / impl.EVIDENCE_NAME).write_text(
+            json.dumps({"evidence": {"core_file": {}, "environment": {}}, "analysis": None}),
+            encoding="utf-8",
+        )
+        return manifest
+
+    def test_a_replayed_result_says_so(self, tmp_path: Path) -> None:
+        """gdb did not run, so nothing in the evidence reflects the present.
+
+        Three rounds of debugging went into a stored analysis of job 7272161793
+        that predated the fixes under test, because the answer was worded
+        identically to a fresh run.
+        """
+        manifest = self._complete(tmp_path)
+        payload = impl.build_response(manifest, tmp_path, include_evidence=True, replayed=True)
+        assert payload["evidence"]["replayed"] is True
+        assert "Stored result" in payload["text"]
+        assert "2026-08-24T13:01:00Z" in payload["text"]
+        assert "restart" in payload["text"]
+
+    def test_a_fresh_result_is_not_marked(self, tmp_path: Path) -> None:
+        """The note must not appear on a run that did just happen."""
+        manifest = self._complete(tmp_path)
+        payload = impl.build_response(manifest, tmp_path, include_evidence=True)
+        assert payload["evidence"]["replayed"] is False
+        assert "Stored result" not in payload["text"]

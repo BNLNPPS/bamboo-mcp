@@ -52,6 +52,27 @@ All notable changes to Bamboo are documented here.
   `--cleanenv`, so no host environment variable reaches the container.
 
 ### Fixed
+- **A completed analysis was replayed indefinitely and said nothing about it**
+  (`packages/askpanda_atlas/askpanda_atlas/core_dump_analysis_impl.py`,
+  `core/bamboo/tools/bamboo_answer.py`). `start_analysis` returns the stored
+  evidence when a manifest is `complete` — correct by default, since refetching
+  a gigabyte core to answer the same question twice is wasteful — but two
+  things made it a trap. The payload was worded identically to a fresh run, and
+  no phrasing could reach the `restart` argument, so a job analysed before a fix
+  kept reporting the behaviour that fix addressed with no indication that gdb
+  had not run.
+
+  Job 7272161793 spent several rounds of debugging in exactly that state: its
+  `evidence.json` had no `python_helper` key at all, because the analyzer had
+  not run since that key was introduced, while each new question produced
+  freshly-worded prose from the same stale evidence.
+
+  `build_response` now takes `replayed` and marks it in both the evidence and
+  the text, naming the timestamp and how to force a fresh run. Rule 1c reads
+  restart phrasing — "re-run", "again", "redo", "from scratch" — and sets
+  `restart` only from explicit wording, never inferred, because it spends a
+  gigabyte transfer and the single analysis slot.
+
 - **Interpreter detection missed everything but a versioned basename**
   (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`). The
   bootstrap matched loaded objects on basename alone, against `libpython*` or a

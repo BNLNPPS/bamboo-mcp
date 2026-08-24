@@ -256,17 +256,60 @@ def _is_core_dump_affirmative(question: str) -> bool:
     return bool(_CORE_DUMP_AFFIRMATIVE_RE.match((question or "").strip()))
 
 
-def _build_core_dump_plan(job_id: int, mode: str, explain: str) -> "Plan":
+# Matches a request to run the analysis *again* rather than read the stored
+# result.  Without this the tool replays a completed run forever: a core is
+# expensive to fetch, so `start` returns the existing evidence unless
+# `restart` is set, and no phrasing could reach that argument.
+_CORE_DUMP_RESTART_RE: re.Pattern[str] = re.compile(
+    r"(?i)\b(?:"
+    r"re-?(?:run|analys[ei]|analyze|do|try)"
+    # A bare "again" is safe here: this is only consulted once rule 1c has
+    # already matched a core-dump request carrying a job ID, and in that
+    # context "again" does not mean anything else.
+    r"|again"
+    r"|(?:from\s+scratch|afresh|a\s+fresh\s+(?:run|analysis)|force\s+a?\s*(?:re-?run|restart))"
+    r"|fresh\s+analysis|start\s+over"
+    r")\b"
+)
+
+
+def _wants_core_dump_restart(question: str) -> bool:
+    """Return True if the question asks for a *new* run, not the stored one.
+
+    A completed analysis is replayed by default because refetching a gigabyte
+    core to answer the same question twice is wasteful.  That default is right
+    until the reason for asking again is that something changed — the analyzer,
+    the host, the release — at which point the stored evidence is precisely
+    what the reader does not want.
+
+    Args:
+        question: User question text.
+
+    Returns:
+        True when the phrasing asks for the analysis to be run again.
+    """
+    return bool(_CORE_DUMP_RESTART_RE.search(question or ""))
+
+
+def _build_core_dump_plan(
+    job_id: int, mode: str, explain: str, restart: bool = False,
+) -> "Plan":
     """Build a FAST_PATH plan calling the ATLAS core-dump tool.
 
     Args:
         job_id: PanDA job ID whose core dump to analyse.
         mode: ``"auto"``, ``"hang"`` or ``"crash"``.
         explain: Human-readable routing rationale for the plan record.
+        restart: Re-run even when a completed analysis already exists.  Only
+            ever set from explicit phrasing — never inferred — because it
+            spends a gigabyte transfer and the single analysis slot.
 
     Returns:
         A :class:`Plan` routing to ``atlas.core_dump_analysis``.
     """
+    arguments: dict[str, Any] = {"job_id": job_id, "action": "start", "mode": mode}
+    if restart:
+        arguments["restart"] = True
     return Plan(
         route=PlanRoute.FAST_PATH,
         confidence=1.0,
@@ -275,7 +318,7 @@ def _build_core_dump_plan(job_id: int, mode: str, explain: str) -> "Plan":
             # internal name with its entry-point key, so "core_dump_analysis"
             # alone does not resolve.
             tool="atlas.core_dump_analysis",
-            arguments={"job_id": job_id, "action": "start", "mode": mode},
+            arguments=arguments,
         )],
         reuse_policy=ReusePolicy(),
         explain=explain,
@@ -1917,6 +1960,7 @@ def _build_deterministic_plan(  # noqa: C901
         # not registered; the executor would report it unknown rather than
         # falling back usefully.
         if job_id and plugin_id == "atlas" and _is_core_dump_request(question):
+            restart = _wants_core_dump_restart(question)
             return _build_core_dump_plan(
                 job_id,
                 # "auto" rather than a pinned mode: an explicit request may
@@ -1924,8 +1968,10 @@ def _build_deterministic_plan(  # noqa: C901
                 # pilot error code.
                 mode="auto",
                 explain=(
-                    "Deterministic: job ID + core-dump keywords → core dump analysis."
+                    "Deterministic: job ID + core-dump keywords → core dump analysis"
+                    + (" (restart requested)." if restart else ".")
                 ),
+                restart=restart,
             )
 
         # Rule 1: job ID + analysis keywords → log analysis.
@@ -3183,6 +3229,7 @@ __all__ = [
     "_is_core_dump_request",
     "_is_core_dump_affirmative",
     "_build_core_dump_plan",
+    "_wants_core_dump_restart",
     "_run_core_dump_offer_intercept",
     "_run_early_intercepts",
     "_CORE_DUMP_SIGNALS",
