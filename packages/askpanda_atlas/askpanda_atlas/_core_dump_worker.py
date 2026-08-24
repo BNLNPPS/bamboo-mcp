@@ -95,6 +95,39 @@ def worker_log_tail(workspace: Path, lines: int = WORKER_LOG_TAIL_LINES) -> str:
     return "\n".join(kept)
 
 
+def _error_headline(workspace: Path) -> str:
+    """Return the reason a failed analysis failed, from the whole worker log.
+
+    :func:`worker_log_tail` keeps the last twenty lines, which for a container
+    failure are ALRB's message-of-the-day and command menu rather than the
+    cause.  Job 7272161793 surfaced as six kilobytes of ROOT security notices
+    with ``Error: unable to source setupfile /srv/my_release_setup.sh``
+    scrolled off the top.
+
+    Scans the full log rather than the tail, because the reason can sit
+    arbitrarily far above the noise that follows it.
+
+    Args:
+        workspace: Workspace directory holding ``worker.log``.
+
+    Returns:
+        The error line, or ``""`` when the log is unreadable or holds no
+        recognisable error — in which case the caller shows the tail alone,
+        which is the pre-existing behaviour.
+    """
+    try:
+        text = (workspace / WORKER_LOG_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        from askpanda_atlas._core_dump_analyzer import (  # noqa: PLC0415
+            _last_error_line,
+        )
+    except ImportError:  # pragma: no cover - analyzer is a hard dependency
+        return ""
+    return _last_error_line(text)
+
+
 def _prepare(workspace: Path, manifest: dict[str, Any]) -> Any:
     """Fetch the job's metadata and listing and rebuild its directory.
 
@@ -181,10 +214,12 @@ def _run_analyzer(workspace: Path, prepared: Any, failure_mode: str) -> tuple[in
 
     if completed.returncode != 0:
         tail = worker_log_tail(workspace)
+        headline = _error_headline(workspace)
         detail = f"\n\nLast lines of the analysis log:\n{tail}" if tail else ""
+        reason = f"\n{headline}" if headline else ""
         return completed.returncode, (
             f"gdb analysis of the core dump failed (exit status {completed.returncode})."
-            f"{detail}"
+            f"{reason}{detail}"
         )
     return 0, ""
 

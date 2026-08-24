@@ -12,6 +12,8 @@ import asyncio
 import builtins
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 import types
@@ -2067,3 +2069,171 @@ def test_anthropic_backend_uses_builtin_default_without_override(
 
     assert captured["model"] == acd.DEFAULT_MODEL
     assert meta["provider"] == "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# Container launch — working directory and failure reporting
+# ---------------------------------------------------------------------------
+
+
+def _container_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Build a job directory and ALRB tree for the container backend.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        Tuple of ``(job_dir, core, release, alrb)``.
+    """
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    core = job_dir / "core.1"
+    core.write_bytes(b"core")
+    release = job_dir / "my_release_setup.sh"
+    release.write_text("#!/bin/bash\n")
+    alrb = tmp_path / "alrb"
+    setup = alrb / "user" / "atlasLocalSetup.sh"
+    setup.parent.mkdir(parents=True)
+    setup.write_text("#!/bin/bash\n")
+    return job_dir, core, release, alrb
+
+
+def test_container_command_cds_into_the_job_dir_before_sourcing_alrb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The launcher must not rely on the subprocess cwd surviving `bash -lc`.
+
+    atlasLocalSetup.sh binds $PWD at /srv and `_container_path` maps every host
+    path under --job-dir to /srv/<rel> on that assumption. A login shell runs
+    /etc/profile and the user's profile first, and on a CERN AFS account that
+    chain ends in the home directory — so ALRB bound $HOME at /srv and reported
+    "unable to source setupfile /srv/my_release_setup.sh" for job 7272161793.
+    """
+    job_dir, core, release, alrb = _container_fixture(tmp_path)
+    commands: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        commands.append(argv[2])
+        json_path = next(job_dir.glob(".core_dump_analyzer_evidence_*.json"))
+        evidence = acd.CoreEvidence(core_file={"path": "/srv/core.1"}, environment={})
+        json_path.write_text(json.dumps({"evidence": evidence.to_dict(), "analysis": None}))
+        next(job_dir.glob(".core_dump_analyzer_gdb_*.txt")).write_text("raw")
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(acd.subprocess, "run", fake_run)
+    args = make_args(
+        core_file=str(core), execution="atlas-container", job_dir=str(job_dir),
+        release_setup=str(release), atlas_local_root_base=str(alrb),
+    )
+    acd.collect_evidence(args, progress=False)
+
+    command = commands[0]
+    cd_at = command.index(f"cd {shlex.quote(str(job_dir))}")
+    source_at = command.index("atlasLocalSetup.sh")
+    assert cd_at < source_at, "the cd must precede the ALRB source, not follow it"
+    assert "|| exit 1" in command
+
+
+def test_container_command_guards_the_srv_assumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drift between the cwd and the /srv mount must fail legibly, not as a menu."""
+    job_dir, core, release, alrb = _container_fixture(tmp_path)
+    commands: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        commands.append(argv[2])
+        json_path = next(job_dir.glob(".core_dump_analyzer_evidence_*.json"))
+        evidence = acd.CoreEvidence(core_file={"path": "/srv/core.1"}, environment={})
+        json_path.write_text(json.dumps({"evidence": evidence.to_dict(), "analysis": None}))
+        next(job_dir.glob(".core_dump_analyzer_gdb_*.txt")).write_text("raw")
+        return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(acd.subprocess, "run", fake_run)
+    args = make_args(
+        core_file=str(core), execution="atlas-container", job_dir=str(job_dir),
+        release_setup=str(release), atlas_local_root_base=str(alrb),
+    )
+    acd.collect_evidence(args, progress=False)
+    assert f"test -f {shlex.quote('my_release_setup.sh')}" in commands[0]
+
+
+def test_the_generated_guard_is_valid_shell(tmp_path: Path) -> None:
+    """Executed rather than pattern-matched: a broken guard would fail every run."""
+    (tmp_path / "my_release_setup.sh").write_text("#!/bin/bash\n")
+    guard = (
+        "test -f " + shlex.quote("my_release_setup.sh") + " || { "
+        "echo \"Error: the release setup is not in the working directory "
+        "($PWD); the /srv mount would be wrong.\" >&2; "
+        "exit 1; }"
+    )
+    ok = subprocess.run(
+        ["bash", "-c", f"cd {shlex.quote(str(tmp_path))} || exit 1; {guard}; echo reached"],
+        capture_output=True, text=True, check=False,
+    )
+    assert ok.returncode == 0 and "reached" in ok.stdout
+
+    (tmp_path / "my_release_setup.sh").unlink()
+    bad = subprocess.run(
+        ["bash", "-c", f"cd {shlex.quote(str(tmp_path))} || exit 1; {guard}; echo reached"],
+        capture_output=True, text=True, check=False,
+    )
+    assert bad.returncode == 1
+    assert "the /srv mount would be wrong" in bad.stderr
+    assert "reached" not in bad.stdout
+
+
+def test_container_failure_keeps_its_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The staged runner is the only record of what ALRB was handed."""
+    job_dir, core, release, alrb = _container_fixture(tmp_path)
+
+    def failing_run(argv: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        return types.SimpleNamespace(stdout="", stderr="Error: boom", returncode=1)
+
+    monkeypatch.setattr(acd.subprocess, "run", failing_run)
+    args = make_args(
+        core_file=str(core), execution="atlas-container", job_dir=str(job_dir),
+        release_setup=str(release), atlas_local_root_base=str(alrb),
+    )
+    with pytest.raises(RuntimeError):
+        acd.collect_evidence(args, progress=False)
+    assert list(job_dir.glob(".core_dump_analyzer_runner_*.sh"))
+
+
+def test_container_failure_leads_with_the_error_not_the_motd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ALRB's menu and MOTD must not bury the one line that explains the failure."""
+    job_dir, core, release, alrb = _container_fixture(tmp_path)
+    noise = "\n".join(
+        ["Info: /cvmfs mounted", "Error: unable to source setupfile /srv/my_release_setup.sh"]
+        + ["lsetup root  ROOT data processing framework"] * 40
+        + ["30 Nov 2023", "A serious security issue in ROOT's web-based GUI"]
+    )
+
+    def failing_run(argv: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        return types.SimpleNamespace(stdout=noise, stderr="", returncode=1)
+
+    monkeypatch.setattr(acd.subprocess, "run", failing_run)
+    args = make_args(
+        core_file=str(core), execution="atlas-container", job_dir=str(job_dir),
+        release_setup=str(release), atlas_local_root_base=str(alrb),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        acd.collect_evidence(args, progress=False)
+    first_lines = str(excinfo.value).splitlines()[:2]
+    assert "unable to source setupfile" in first_lines[1]
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("Error: unable to source setupfile /srv/x.sh", "Error: unable to source setupfile /srv/x.sh"),
+    ("RuntimeError: gdb produced no frames", "RuntimeError: gdb produced no frames"),
+    ("first\nError: one\nnoise\nError: two\nnoise", "Error: two"),
+    ("no problem here", ""),
+    ("", ""),
+])
+def test_last_error_line_selection(text: str, expected: str) -> None:
+    """The last match wins: a nested failure reports its outermost cause last."""
+    assert acd._last_error_line(text) == expected

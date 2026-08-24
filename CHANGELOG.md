@@ -7,6 +7,55 @@ All notable changes to Bamboo are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **The core-dump container mounted the wrong directory at `/srv`**
+  (`packages/askpanda_atlas/askpanda_atlas/_core_dump_analyzer.py`).
+  `atlasLocalSetup.sh` binds `$PWD` at `/srv`, and `_container_path` maps every
+  host path under `--job-dir` to `/srv/<rel>` on that assumption. The launcher
+  established the working directory with `subprocess.run(..., cwd=job_dir)` and
+  then ran the setup through `bash -lc` — a login shell, which sources
+  `/etc/profile` and the user's profile *before* reaching the command string.
+  On a CERN AFS account that chain ends in the home directory:
+
+  ```
+  $ cd /tmp/bamboo/core-analysis/job-7272161793/job && bash -lc 'echo $PWD'
+  /afs/cern.ch/user/a/atlpan
+  ```
+
+  ALRB therefore bound `$HOME` at `/srv` and refused with `Error: unable to
+  source setupfile /srv/my_release_setup.sh` — which reads as a missing file
+  and was in fact a wrong mount. The file was on disk in the job directory
+  throughout; `_job_prep` and the launcher's own `is_file()` check had both
+  already passed.
+
+  The `cd` now happens inside the command string, after the profile has had its
+  say. A `test -f` guard on the release setup runs between the `cd` and the
+  source, so any future drift between the working directory and the `/srv`
+  assumption fails on one legible line instead of ALRB's command menu.
+
+  `--contain` was ruled out by probe: `-e "-c -i"` and `-e "-i"` both mount the
+  job directory correctly, so the default container arguments are unchanged.
+
+- **A failed container run deleted the evidence of why it failed**
+  (same module). The `finally` block unlinked the staged worker, runner and
+  evidence files unless `--keep-container-artifacts` was set, so the exact
+  command ALRB was handed was gone by the time anyone read the error. Artifacts
+  are now kept whenever the run fails, and their location is printed.
+
+- **ALRB's message-of-the-day buried the reason for a failed analysis**
+  (same module, and `_core_dump_worker.py`). The analyzer put 6000 characters
+  of container output into its exception verbatim, and `worker_log_tail` then
+  kept the last twenty *lines* of that — which for a container failure are the
+  ROOT security notice and the `lsetup` menu, never the cause. The one line
+  that explained job 7272161793 had scrolled off the top before the message
+  reached the TUI.
+
+  New `_last_error_line()` scans the whole output for the last `Error:` /
+  `Exception:` line and both the analyzer's exception and the worker's failure
+  message now lead with it, with the raw tail kept underneath and trimmed to
+  2000 characters. The last match wins rather than the first, because a nested
+  failure reports its outermost cause last. No match falls back to the tail
+  alone, which is the pre-existing behaviour.
+
 - **`/fastpath off` silently disarmed core-dump offer acceptance**
   (`core/bamboo/tools/bamboo_answer.py`). Rule 1d was gated on
   `not bypass_fast_path`, alongside the deterministic routing rules. It does

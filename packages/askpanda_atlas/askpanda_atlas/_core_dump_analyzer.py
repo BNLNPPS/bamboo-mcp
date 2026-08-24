@@ -2760,6 +2760,42 @@ def _container_worker_args(args: argparse.Namespace, core_in_container: str,
     return argv
 
 
+#: Characters of container output retained in a failure message.  ALRB prints a
+#: message-of-the-day and, on error, its full command menu, so an untrimmed
+#: tail is mostly noise wrapped across a terminal panel.
+CONTAINER_DIAGNOSTIC_CHARS = 2000
+
+#: Lines that carry the actual reason a container run failed.  ALRB's own
+#: errors are ``Error: …``; the runner and gdb use the other spellings.
+_ERROR_LINE_RE = re.compile(
+    r"^\s*(?:Error|ERROR|error|Fatal|FATAL|fatal)\b.*$|^\s*\S*(?:Error|Exception):\s.*$"
+)
+
+
+def _last_error_line(text: str) -> str:
+    """Return the most specific error line in container output.
+
+    ALRB prints a message-of-the-day and, when it bails, its full command
+    menu — so the last lines of a failed run are almost never the reason it
+    failed.  The reason for job 7272161793 was a single line
+    (``Error: unable to source setupfile /srv/my_release_setup.sh``) sitting
+    ahead of roughly six kilobytes of ROOT security notices.
+
+    The *last* match wins rather than the first: a nested failure reports the
+    outermost cause last, and that is the one worth leading with.
+
+    Args:
+        text: Combined stdout and stderr from the container run.
+
+    Returns:
+        The matching line, stripped, or ``""`` when nothing matches.  An empty
+        result means the caller falls back to the raw tail, which is the
+        pre-existing behaviour.
+    """
+    matches = [line.strip() for line in text.splitlines() if _ERROR_LINE_RE.match(line)]
+    return matches[-1] if matches else ""
+
+
 def _collect_evidence_atlas_container(
     args: argparse.Namespace, progress: bool = True, detail: bool = False,
 ) -> tuple[CoreEvidence, str]:
@@ -2792,6 +2828,7 @@ def _collect_evidence_atlas_container(
         raise FileNotFoundError(f"ATLAS Local Root Base setup not found: {atlas_setup}")
 
     created: list[Path] = []
+    succeeded = False
     try:
         worker_fd, worker_name = tempfile.mkstemp(prefix=".core_dump_analyzer_worker_", suffix=".py", dir=job_dir)
         os.close(worker_fd)
@@ -2829,7 +2866,31 @@ def _collect_evidence_atlas_container(
 
         platform = getattr(args, "atlas_platform", DEFAULT_ATLAS_PLATFORM)
         extra_args = getattr(args, "container_extra_args", "-c -i")
+        release_rel = release_setup.resolve().relative_to(job_dir.resolve()).as_posix()
+        # BAMBOO PATCH (see module note on vendoring): `cd` into the job
+        # directory *inside* the command string, not only via subprocess cwd.
+        #
+        # atlasLocalSetup.sh binds $PWD at /srv, and _container_path maps every
+        # host path under --job-dir to /srv/<rel> on that assumption.  But this
+        # runs under `bash -lc`, which sources /etc/profile and the user's
+        # profile before it reaches this string — and on a CERN AFS account
+        # that chain ends in the home directory, discarding the cwd the parent
+        # set.  ALRB then bound $HOME at /srv and reported
+        # "unable to source setupfile /srv/my_release_setup.sh", which reads as
+        # a missing file and is in fact a wrong mount.
+        #
+        # The guard below is not redundant with `cd || exit 1`: it turns any
+        # future drift between job_dir and the /srv assumption into one legible
+        # line instead of ALRB's help menu.
+        guard = (
+            "test -f " + shlex.quote(release_rel) + " || { "
+            "echo \"Error: the release setup is not in the working directory "
+            "($PWD); the /srv mount would be wrong.\" >&2; "
+            "exit 1; }"
+        )
         source_cmd = (
+            f"cd {shlex.quote(str(job_dir))} || exit 1; "
+            f"{guard}; "
             f"export ATLAS_LOCAL_ROOT_BASE={shlex.quote(str(alrb))}; "
             f"source {shlex.quote(str(atlas_setup))} "
             f"-c {shlex.quote(platform)} "
@@ -2868,11 +2929,15 @@ def _collect_evidence_atlas_container(
             print(f"[*] ATLAS container analysis completed in {time.monotonic() - started:.1f}s", file=sys.stderr)
 
         if proc.returncode != 0 or not json_path.stat().st_size:
-            diagnostics = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
-            diagnostics = diagnostics[-6000:]
-            raise RuntimeError(
-                f"ATLAS container evidence collector failed with exit code {proc.returncode}.\n{diagnostics}"
+            combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            headline = _last_error_line(combined)
+            tail = combined[-CONTAINER_DIAGNOSTIC_CHARS:]
+            message = (
+                f"ATLAS container evidence collector failed with exit code {proc.returncode}."
             )
+            if headline:
+                message += f"\n{headline}"
+            raise RuntimeError(f"{message}\n\n--- container output (tail) ---\n{tail}")
 
         payload = json.loads(json_path.read_text(encoding="utf-8"))
         evidence = core_evidence_from_dict(payload["evidence"])
@@ -2883,9 +2948,20 @@ def _collect_evidence_atlas_container(
         evidence.core_file["container_path"] = core_in_container
         evidence.core_file["path"] = str(core_path)
         raw = raw_path.read_text(encoding="utf-8", errors="replace") if raw_path.exists() else ""
+        succeeded = True
         return evidence, raw
     finally:
-        if not getattr(args, "keep_container_artifacts", False):
+        # Keep the staged worker, runner and evidence files after a failure.
+        # They are the only record of the exact command ALRB was handed, and
+        # deleting them on the way out left nothing to inspect for precisely
+        # the runs that needed inspecting.
+        if getattr(args, "keep_container_artifacts", False) or not succeeded:
+            if not succeeded:
+                print(
+                    f"[!] Container artifacts kept in {job_dir} for debugging.",
+                    file=sys.stderr,
+                )
+        else:
             for path in created:
                 try:
                     path.unlink()

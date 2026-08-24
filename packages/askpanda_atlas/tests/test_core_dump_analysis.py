@@ -1130,3 +1130,39 @@ class TestToolShell:
         assert not (
             Path(impl.__file__).parent / "_fallback_core_dump_analysis.py"
         ).exists()
+
+
+class TestWorkerFailureMessage:
+    """What the user reads when the analyzer exits non-zero."""
+
+    def test_the_error_line_leads_the_message(self, tmp_path: Path) -> None:
+        """The reason must not scroll off the top of a twenty-line tail.
+
+        Job 7272161793 surfaced as ALRB's message-of-the-day and command menu
+        with `Error: unable to source setupfile /srv/my_release_setup.sh`
+        already out of the tail window.
+        """
+        from askpanda_atlas import _core_dump_worker as worker
+
+        log = tmp_path / impl.WORKER_LOG_NAME
+        log.write_text(
+            "Error: unable to source setupfile /srv/my_release_setup.sh\n"
+            + "lsetup root  ROOT data processing framework\n" * 40,
+            encoding="utf-8",
+        )
+        assert worker._error_headline(tmp_path) == (
+            "Error: unable to source setupfile /srv/my_release_setup.sh"
+        )
+
+    def test_a_log_without_an_error_line_yields_nothing(self, tmp_path: Path) -> None:
+        """No match falls back to the tail alone — the pre-existing behaviour."""
+        from askpanda_atlas import _core_dump_worker as worker
+
+        (tmp_path / impl.WORKER_LOG_NAME).write_text("all fine\n", encoding="utf-8")
+        assert worker._error_headline(tmp_path) == ""
+
+    def test_an_unreadable_log_yields_nothing(self, tmp_path: Path) -> None:
+        """A missing worker.log must not raise inside a failure path."""
+        from askpanda_atlas import _core_dump_worker as worker
+
+        assert worker._error_headline(tmp_path / "absent") == ""
