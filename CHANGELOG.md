@@ -99,17 +99,38 @@ All notable changes to Bamboo are documented here.
   all.
 
 ### Added
-- **`--debug-file-directory` / `BAMBOO_CORE_DUMP_DEBUG_DIR`** (same module,
-  and `core_dump_analysis_impl.py`). ATLAS releases ship libpython stripped of
-  DWARF, which is what stops `py-bt` even with the correct helper. When a
-  release does ship matching `.debug` files, pointing gdb at them restores the
-  Python-level backtrace.
+- **`--debug-file-directory` / `BAMBOO_CORE_DUMP_DEBUG_DIR`, as a per-release
+  template** (same module, and `core_dump_analysis_impl.py`). ATLAS releases
+  ship libpython and the analysis libraries stripped of DWARF, which is what
+  stops `py-bt` even with the correct helper and what leaves optimised XrdCl
+  frames without argument data. Where a site publishes matching `.debug` trees,
+  pointing gdb at them recovers both.
 
-  Applied as `-iex`, before the core is loaded: gdb binds separate debug files
-  when an objfile is first read, so the setting has no effect on anything
-  already loaded. Unlike the CPython helper it is not staged into the job
-  directory — debug files for a full release run to hundreds of megabytes and
-  the path is expected to be a CVMFS one, already visible in the container.
+  It takes a template rather than a path. `/cvmfs/atlas.cern.ch/repo/sw/software`
+  holds a hundred-odd releases and each job names its own, so a fixed path is
+  wrong for every job but one — the first cut of this setting shipped with a
+  hardcoded `25.2` example that did not exist. `{project}`, `{release}`,
+  `{platform}` and `{base}` are filled by `_parse_release_info` from the setup
+  banner in `payload.stdout` (`Using AnalysisBase/25.2.103 [cmake] with platform
+  x86_64-el9-gcc15-opt` / `at /cvmfs/.../25.2`), which is also recorded in
+  `gdb_metadata.release` so a derived path can be traced back to what it was
+  built from.
+
+  The expanded directory must exist and is dropped with a warning when it does
+  not: `set debug-file-directory` on a missing path is not an error in gdb, it
+  simply loads nothing, so validating is the difference between a setting that
+  quietly does nothing and one that says so. Placeholders with no release
+  banner, and templates that fail to expand, are dropped the same way. A
+  literal path still works for a single-release site.
+
+  Applied as `-iex`, before the core is loaded, since gdb binds separate debug
+  files when an objfile is first read. Not staged into the job directory: debug
+  trees run to hundreds of megabytes and the path is a CVMFS one, already
+  visible in the container.
+
+  **Documented as leave-unset for a stock ATLAS deployment.** No debug trees
+  are published under `/cvmfs/atlas.cern.ch/repo/sw/software` in any location
+  this tool knows of.
 
 - **A completed analysis was replayed indefinitely and said nothing about it**
   (`packages/askpanda_atlas/askpanda_atlas/core_dump_analysis_impl.py`,

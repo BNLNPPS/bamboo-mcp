@@ -2704,12 +2704,12 @@ def test_the_type_probe_runs_only_when_a_helper_loaded(
     assert parsed["interpreter_types"] is False
 
 
-def test_debug_file_directory_becomes_an_init_setting() -> None:
+def test_debug_file_directory_becomes_an_init_setting(tmp_path: Path) -> None:
     """It must be -iex: gdb binds separate debug files when an objfile is read."""
-    settings = acd._debug_file_init(
-        argparse.Namespace(debug_file_directory="/cvmfs/atlas.cern.ch/debug")
-    )
-    assert settings == ("set debug-file-directory /cvmfs/atlas.cern.ch/debug",)
+    target = tmp_path / "debug"
+    target.mkdir()
+    settings = acd._debug_file_init(argparse.Namespace(debug_file_directory=str(target)))
+    assert settings == (f"set debug-file-directory {target}",)
 
 
 @pytest.mark.parametrize("value", ["", "   ", None])
@@ -2806,3 +2806,100 @@ class TestNextStepRules:
         """A crash analysis can invent a bogus setting just as easily."""
         for mode in ("hang", "crash"):
             assert "different artifact" in acd.build_system_prompt(mode)
+
+
+# ---------------------------------------------------------------------------
+# Release detection and the debug-file template
+# ---------------------------------------------------------------------------
+
+
+def _release_log(tmp_path: Path) -> Path:
+    """Write a job directory containing a real ATLAS setup banner.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        The job directory.
+    """
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "payload.stdout").write_text(
+        "noise\n"
+        "Using AnalysisBase/25.2.103 [cmake] with platform x86_64-el9-gcc15-opt\n"
+        "\tat /cvmfs/atlas.cern.ch/repo/sw/software/25.2\n"
+        "more noise\n",
+        encoding="utf-8",
+    )
+    return job_dir
+
+
+def test_release_banner_is_parsed(tmp_path: Path) -> None:
+    """Every per-job path is derived from this, so it must be read, not assumed."""
+    assert acd._parse_release_info(_release_log(tmp_path)) == {
+        "project": "AnalysisBase",
+        "release": "25.2.103",
+        "platform": "x86_64-el9-gcc15-opt",
+        "base": "/cvmfs/atlas.cern.ch/repo/sw/software/25.2",
+    }
+
+
+def test_a_log_without_a_banner_yields_nothing(tmp_path: Path) -> None:
+    """A non-ATLAS payload is a normal case, not an error."""
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "payload.stdout").write_text("just output\n", encoding="utf-8")
+    assert acd._parse_release_info(job_dir) == {}
+
+
+def test_release_parsing_tolerates_a_missing_job_directory() -> None:
+    """Local execution has no job directory."""
+    assert acd._parse_release_info(None) == {}
+
+
+def test_debug_directory_template_expands_per_release(tmp_path: Path) -> None:
+    """A fixed path is wrong for every job but one.
+
+    /cvmfs/atlas.cern.ch/repo/sw/software holds a hundred-odd releases and each
+    job names its own, so the setting has to be a template.
+    """
+    job_dir = _release_log(tmp_path)
+    info = acd._parse_release_info(job_dir)
+    target = tmp_path / "dbg" / "25.2.103" / "x86_64-el9-gcc15-opt"
+    target.mkdir(parents=True)
+
+    args = argparse.Namespace(
+        debug_file_directory=str(tmp_path / "dbg") + "/{release}/{platform}"
+    )
+    assert acd._debug_file_init(args, info) == (f"set debug-file-directory {target}",)
+
+
+def test_a_nonexistent_debug_directory_is_dropped(tmp_path: Path) -> None:
+    """gdb accepts a missing path silently and loads nothing.
+
+    Validating here is the difference between a setting that quietly does
+    nothing and one that says so.
+    """
+    info = acd._parse_release_info(_release_log(tmp_path))
+    args = argparse.Namespace(debug_file_directory=str(tmp_path / "absent") + "/{release}")
+    assert acd._debug_file_init(args, info) == ()
+
+
+def test_placeholders_without_a_banner_are_dropped(tmp_path: Path) -> None:
+    """Expanding to a half-formed path would point gdb somewhere arbitrary."""
+    args = argparse.Namespace(debug_file_directory="/cvmfs/dbg/{release}")
+    assert acd._debug_file_init(args, {}) == ()
+
+
+def test_an_unexpandable_template_is_dropped(tmp_path: Path) -> None:
+    """A typo in the template must not abort the analysis."""
+    args = argparse.Namespace(debug_file_directory="/cvmfs/dbg/{nosuchfield}")
+    assert acd._debug_file_init(args, {"release": "25.2.103"}) == ()
+
+
+def test_a_literal_path_still_works(tmp_path: Path) -> None:
+    """A site with one release should not have to write a template."""
+    target = tmp_path / "dbg"
+    target.mkdir()
+    args = argparse.Namespace(debug_file_directory=str(target))
+    assert acd._debug_file_init(args, {}) == (f"set debug-file-directory {target}",)

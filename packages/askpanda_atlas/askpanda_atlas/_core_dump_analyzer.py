@@ -2623,7 +2623,8 @@ def _collect_evidence_local(
         print("[*] Resolving executable...", file=sys.stderr)
 
     heartbeat_interval = getattr(args, "heartbeat_interval", DEFAULT_HEARTBEAT_INTERVAL)
-    debug_init = _debug_file_init(args)
+    release_info = _parse_release_info(Path(args.job_dir) if getattr(args, "job_dir", None) else None)
+    debug_init = _debug_file_init(args, release_info)
     probe = run_gdb_phase(
         gdb_path, core_path, None, "probe", [("program", "info program")], args.gdb_timeout,
         progress=progress, detail=detail, heartbeat_interval=heartbeat_interval,
@@ -2709,6 +2710,12 @@ def _collect_evidence_local(
     _attach_library_evidence(evidence, sections, not args.no_redact)
     evidence.gdb_metadata = _gdb_metadata(sections, combined, not args.no_redact)
     evidence.gdb_metadata["python_helper"] = py_helper
+    # Recorded because every path derived per-job — the debug-file directory
+    # above all — is derived from this, and a reader checking why one resolved
+    # the way it did needs to see what was parsed.
+    evidence.gdb_metadata["release"] = _parse_release_info(
+        Path(args.job_dir) if getattr(args, "job_dir", None) else None
+    )
     return evidence, combined
 
 
@@ -3409,30 +3416,118 @@ def collect_evidence(
     return evidence, raw
 
 
-def _debug_file_init(args: argparse.Namespace) -> tuple[str, ...]:
+#: The banner an ATLAS release prints on setup, e.g.::
+#:
+#:     Using AnalysisBase/25.2.103 [cmake] with platform x86_64-el9-gcc15-opt
+#:             at /cvmfs/atlas.cern.ch/repo/sw/software/25.2
+#:
+#: Parsed rather than assumed because the release differs per job, and any
+#: path derived from it — a debug-file directory in particular — is wrong for
+#: every job but one if it is hardcoded.
+_RELEASE_RE = re.compile(
+    r"Using\s+(?P<project>[A-Za-z][\w.+-]*)/(?P<release>[\w.+-]+)\s*"
+    r"(?:\[[^\]]*\]\s*)?with\s+platform\s+(?P<platform>\S+)"
+)
+_RELEASE_BASE_RE = re.compile(r"^\s*at\s+(?P<base>/\S+)\s*$", re.MULTILINE)
+
+
+def _parse_release_info(job_dir: Path | None) -> dict[str, str]:
+    """Read the ATLAS release, platform and CVMFS base from the payload log.
+
+    Args:
+        job_dir: Reconstructed job directory, or ``None``.
+
+    Returns:
+        ``{"project", "release", "platform", "base"}``, with missing pieces
+        omitted.  Empty when the banner is not present, which is a normal
+        outcome for a payload that is not an ATLAS release.
+    """
+    if job_dir is None or not job_dir.is_dir():
+        return {}
+    for name in PY_VERSION_HINT_FILES:
+        candidate = job_dir / name
+        if not candidate.is_file():
+            continue
+        try:
+            with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(PY_VERSION_HINT_BYTES)
+        except OSError:
+            continue
+        found = _RELEASE_RE.search(text)
+        if not found:
+            continue
+        info = {k: v for k, v in found.groupdict().items() if v}
+        base = _RELEASE_BASE_RE.search(text[found.end():found.end() + 500])
+        if base:
+            info["base"] = base.group("base")
+        return info
+    return {}
+
+
+def _debug_file_init(
+    args: argparse.Namespace, release: dict[str, str] | None = None,
+) -> tuple[str, ...]:
     """Build the gdb settings that add a separate debug-file directory.
 
-    ATLAS releases ship libpython stripped of DWARF, which is what stops
-    ``py-bt`` even when the correct helper loads: without type information gdb
-    cannot resolve ``PyObject``, so the helper has nothing to walk.  When a
-    release does ship matching ``.debug`` files, pointing gdb at them restores
-    the Python-level backtrace.
+    ATLAS releases ship libpython and the XrdCl libraries stripped of DWARF,
+    which is what stops ``py-bt`` and what leaves optimised frames without
+    argument or local-variable data.  Where a site does publish matching
+    ``.debug`` trees, pointing gdb at them recovers both.
 
-    The path must be visible *inside* the release container, so in practice it
-    lives under ``/cvmfs``.  Unlike the CPython helper this is not staged into
-    the job directory: debug files for a full release run to hundreds of
-    megabytes and copying them into a workspace that already holds a gigabyte
-    core would be its own problem.
+    The setting is a **template**, not a path, because a fixed path is wrong
+    for every job but one: ``/cvmfs/atlas.cern.ch/repo/sw/software`` holds a
+    hundred-odd releases and each job names its own.  ``{project}``,
+    ``{release}``, ``{platform}`` and ``{base}`` are substituted from the
+    payload log's setup banner — for job 7272161793, ``AnalysisBase``,
+    ``25.2.103``, ``x86_64-el9-gcc15-opt`` and
+    ``/cvmfs/atlas.cern.ch/repo/sw/software/25.2``.
+
+    The expanded directory must exist, and is silently dropped when it does
+    not.  A ``set debug-file-directory`` naming a missing path is not an error
+    in gdb, it simply has no effect, so validating here is the difference
+    between a setting that quietly does nothing and one that says so.  The
+    check is on the host, which is correct for the CVMFS paths this is for:
+    the container sees the same ``/cvmfs``.
 
     Args:
         args: Parsed arguments.
+        release: Result of :func:`_parse_release_info`, or ``None``.
 
     Returns:
-        Settings for ``run_gdb_phase(extra_init=...)``, empty when unset.
+        Settings for ``run_gdb_phase(extra_init=...)``, empty when unset,
+        unexpandable, or pointing at a directory that is not there.
     """
-    directory = (getattr(args, "debug_file_directory", "") or "").strip()
-    if not directory:
+    template = (getattr(args, "debug_file_directory", "") or "").strip()
+    if not template:
         return ()
+
+    fields = {"project": "", "release": "", "platform": "", "base": "", **(release or {})}
+    try:
+        directory = template.format(**fields)
+    except (KeyError, IndexError, ValueError) as exc:
+        print(
+            f"[!] --debug-file-directory template {template!r} could not be expanded ({exc}); "
+            "ignoring it.",
+            file=sys.stderr,
+        )
+        return ()
+
+    if "{" in template and not all(fields[key] for key in ("project", "release", "platform")):
+        print(
+            "[!] --debug-file-directory uses placeholders but the payload log carried no "
+            "release banner; ignoring it.",
+            file=sys.stderr,
+        )
+        return ()
+
+    if not Path(directory).is_dir():
+        print(
+            f"[!] --debug-file-directory resolved to {directory}, which does not exist; "
+            "ignoring it. gdb would accept it silently and load no debug files.",
+            file=sys.stderr,
+        )
+        return ()
+
     return (f"set debug-file-directory {directory}",)
 
 
@@ -4594,10 +4689,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="Release setup script for atlas-container mode "
                              "(default: <job-dir>/my_release_setup.sh).")
     parser.add_argument("--debug-file-directory", default="",
-                        help="Directory holding separate .debug files, applied before the core "
-                             "is loaded. Needed when the release ships libpython stripped of "
-                             "DWARF, which stops py-bt even with the correct helper. Must be "
-                             "visible inside the release container, so in practice under /cvmfs.")
+                        help="Directory holding separate .debug files, applied before the core is "
+                             "loaded. Accepts {project}, {release}, {platform} and {base} "
+                             "placeholders, filled from the payload log's release banner, since a "
+                             "fixed path is wrong for every job but one. Dropped when the expanded "
+                             "directory does not exist. Must be visible inside the release "
+                             "container, so in practice under /cvmfs.")
     parser.add_argument("--python-gdb-helper", default="",
                         help="Path to a CPython gdb helper (python-gdb.py) to source before py-bt. "
                              "Only needed when the release does not ship one next to its Python "

@@ -98,6 +98,34 @@ The 120 s inline wait assumes the 300 s `BAMBOO_MCP_CLIENT_TIMEOUT` default. If
 a deployment pins that lower, lower the inline wait to match or `start` will
 time out on the wire before it can hand back a handle.
 
+### Separate debug files
+
+`BAMBOO_CORE_DUMP_DEBUG_DIR` points gdb at `.debug` trees, recovering both
+`py-bt` and the argument and local-variable data that optimised frames
+otherwise lack. It is applied as `-iex`, since gdb binds separate debug files
+when an objfile is first read, and is not staged into the job directory — it is
+expected to be a CVMFS path already visible in the container.
+
+**For a stock ATLAS deployment there is nothing to point it at.** Releases
+under `/cvmfs/atlas.cern.ch/repo/sw/software` do not ship debug trees in any
+location this tool knows of, so leave it unset unless your site publishes them.
+
+Where they do exist, the setting is a **template**, not a path: that directory
+holds a hundred-odd releases and each job names its own, so a fixed path is
+wrong for every job but one. `{project}`, `{release}`, `{platform}` and
+`{base}` are filled from the release banner in the payload log —
+
+```
+Using AnalysisBase/25.2.103 [cmake] with platform x86_64-el9-gcc15-opt
+        at /cvmfs/atlas.cern.ch/repo/sw/software/25.2
+```
+
+— parsed by `_parse_release_info` and also recorded in
+`gdb_metadata.release`, so a reader can see what a derived path was built
+from. The expanded directory must exist; it is dropped with a warning when it
+does not, because `set debug-file-directory` on a missing path is not an error
+in gdb, it simply loads nothing.
+
 ### Replay of a completed analysis
 
 `start` returns the stored evidence when a manifest is `complete`, rather than
@@ -209,11 +237,7 @@ reasons `py-bt` can come back empty, which otherwise look identical:
 - **No helper found.** Reported with every path searched.
 - **Helper loaded, types unresolvable.** The release's libpython carries no
   DWARF, so there are no interpreter structures to walk — a property of the
-  build, not of the helper. `BAMBOO_CORE_DUMP_DEBUG_DIR` points gdb at separate
-  `.debug` files when the release ships them; it is applied as `-iex`, since
-  gdb binds debug files when an objfile is first read, and is *not* staged into
-  the job directory because it is expected to be a CVMFS path already visible
-  in the container.
+  build, not of the helper. See below.
 - **Helper loaded, types fine, no frames.** The interpreter was not executing
   Python at the moment of capture. For a process caught inside a C-level
   shutdown or wait — a hung XRootD finalization, say — that is the expected

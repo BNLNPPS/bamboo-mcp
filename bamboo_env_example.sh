@@ -454,9 +454,26 @@ echo "AskPanDA LLM environment variables loaded (example configuration)."
 # does not exist as far as the container is concerned.
 # export BAMBOO_CORE_DUMP_PYTHON_GDB="/data/bamboo/tools/cpython-gdb"
 
-# Directory of separate .debug files, for when the release ships libpython
-# stripped of DWARF — which stops py-bt even when the correct helper loads,
-# because gdb cannot resolve PyObject and the helper has nothing to walk.
-# Applied before the core is loaded, and NOT copied into the job directory: it
-# is expected to be a CVMFS path, already visible inside the container.
-# export BAMBOO_CORE_DUMP_DEBUG_DIR="/cvmfs/atlas.cern.ch/repo/sw/software/25.2/.debug"
+# Directory of separate .debug files, for when a release ships libpython and
+# the analysis libraries stripped of DWARF — which is what stops py-bt even
+# when the correct helper loads, and what leaves optimised XrdCl frames without
+# argument or local-variable data.
+#
+# LEAVE THIS UNSET unless your site actually publishes debug trees. ATLAS
+# releases under /cvmfs/atlas.cern.ch/repo/sw/software do not ship them in any
+# location known to this tool, so for a stock deployment there is nothing to
+# point at and no Python-level backtrace is obtainable.
+#
+# If your site does publish them, write a TEMPLATE, not a path: that directory
+# holds a hundred-odd releases and each job names its own, so a fixed path is
+# wrong for every job but one. {project}, {release}, {platform} and {base} are
+# filled from the payload log's setup banner —
+#
+#   Using AnalysisBase/25.2.103 [cmake] with platform x86_64-el9-gcc15-opt
+#           at /cvmfs/atlas.cern.ch/repo/sw/software/25.2
+#
+# giving AnalysisBase, 25.2.103, x86_64-el9-gcc15-opt and the base path. The
+# expanded directory must exist and be visible inside the container; it is
+# dropped with a warning when it is not, because gdb accepts a missing path
+# silently and loads nothing.
+# export BAMBOO_CORE_DUMP_DEBUG_DIR="{base}/{project}/{release}/InstallArea/{platform}/.debug"
